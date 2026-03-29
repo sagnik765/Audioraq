@@ -69,7 +69,7 @@ export default function RegisterPage() {
             <div className="w-10 h-10 rounded-xl bg-[#F5A623] flex items-center justify-center">
               <Microphone weight="bold" className="text-[#0A0A0B] w-5 h-5" />
             </div>
-            <span className="font-['Outfit'] text-xl font-bold text-white tracking-tight">PodcastHub</span>
+            <span className="font-['Outfit'] text-xl font-bold text-white tracking-tight">Podlyzer</span>
           </Link>
 
           {error && (
@@ -81,7 +81,7 @@ export default function RegisterPage() {
           {/* Step 1: Role Selection */}
           {step === 1 && (
             <div className="opacity-0 animate-fade-in-up">
-              <h1 className="font-['Outfit'] text-3xl sm:text-4xl tracking-tight font-bold text-white mb-2">Join PodcastHub</h1>
+              <h1 className="font-['Outfit'] text-3xl sm:text-4xl tracking-tight font-bold text-white mb-2">Join Podlyzer</h1>
               <p className="text-[#8A8A93] mb-8">Are you here to listen or create?</p>
 
               <div className="grid grid-cols-2 gap-4 mb-8">

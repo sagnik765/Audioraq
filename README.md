@@ -1,4 +1,4 @@
-# PodcastHub
+# Podlyzer
 
 **A dedicated podcast discovery and streaming platform — built so podcasters don't have to compete with every other type of content on the internet.**
 
@@ -10,7 +10,7 @@ Podcasts today live on YouTube, Spotify, and other general-purpose platforms whe
 
 ## The Solution
 
-PodcastHub is a platform built exclusively for podcasts. Creators upload directly to an audience that's here specifically for long-form audio and video content. An AI-powered recommendation engine connects listeners with the right shows based on their stated interests and listening history — no algorithm games, no noise.
+Podlyzer is a platform built exclusively for podcasts. Creators upload directly to an audience that's here specifically for long-form audio and video content. An AI-powered recommendation engine connects listeners with the right shows based on their stated interests and listening history — no algorithm games, no noise.
 
 ---
 

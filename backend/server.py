@@ -209,7 +209,7 @@ async def startup():
     await db.view_history.create_index([("user_id", 1), ("podcast_id", 1)])
 
     # Seed admin
-    admin_email = os.environ.get("ADMIN_EMAIL", "admin@podcasthub.com")
+    admin_email = os.environ.get("ADMIN_EMAIL", "admin@podlyzer.com")
     admin_password = os.environ.get("ADMIN_PASSWORD", "admin123")
     existing = await db.users.find_one({"email": admin_email})
     if existing is None:

@@ -1,4 +1,4 @@
-# PodcastHub - Product Requirements Document
+# Podlyzer - Product Requirements Document
 
 ## Original Problem Statement
 Build a software that shows podcast content, separating podcasts from other content forms. Podcasters upload content, users discover and play podcasts. User accounts ask for interests; a recommendation engine suggests podcasts based on interests and viewing history. Podcaster accounts describe their podcast; keywords are extracted and matched with user interests.

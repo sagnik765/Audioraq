@@ -27,7 +27,7 @@ export default function Navbar() {
           <div className="w-8 h-8 rounded-lg bg-[#F5A623] flex items-center justify-center">
             <Microphone weight="bold" className="text-[#0A0A0B] w-4 h-4" />
           </div>
-          <span className="font-['Outfit'] text-lg font-bold text-white tracking-tight">PodcastHub</span>
+          <span className="font-['Outfit'] text-lg font-bold text-white tracking-tight">Podlyzer</span>
         </Link>
 
         {/* Nav Links */}
