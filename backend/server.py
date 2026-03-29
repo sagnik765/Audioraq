@@ -605,10 +605,10 @@ async def get_interest_options():
 # Include router and CORS
 app.include_router(api_router)
 
-frontend_url = os.environ.get("FRONTEND_URL", "http://localhost:3000")
+cors_origins = os.environ.get('CORS_ORIGINS', '*').split(',')
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[frontend_url, "http://localhost:3000", "https://podcast-hub-68.preview.emergentagent.com"],
+    allow_origins=cors_origins if cors_origins != ['*'] else ["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
