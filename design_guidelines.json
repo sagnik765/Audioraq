@@ -1,0 +1,87 @@
+{
+  "theme": "dark",
+  "archetype": "5 (Jewel & Luxury) - Premium Podcast Platform",
+  "colors": {
+    "background": "#0A0A0B",
+    "surface": "#141417",
+    "surface_glass": "rgba(20, 20, 23, 0.6)",
+    "primary": "#F5A623",
+    "primary_hover": "#F7B84B",
+    "text_main": "#F8F8F8",
+    "text_muted": "#8A8A93",
+    "border": "#27272A",
+    "success": "#10B981",
+    "warning": "#F59E0B",
+    "error": "#EF4444"
+  },
+  "typography": {
+    "font_family": {
+      "heading": "Outfit, sans-serif",
+      "body": "DM Sans, sans-serif",
+      "mono": "JetBrains Mono, monospace"
+    },
+    "scale": {
+      "h1": "text-4xl sm:text-5xl lg:text-6xl tracking-tighter font-bold",
+      "h2": "text-2xl sm:text-3xl lg:text-4xl tracking-tight font-semibold",
+      "h3": "text-xl sm:text-2xl tracking-tight font-medium",
+      "h4": "text-lg sm:text-xl font-medium",
+      "body": "text-base leading-relaxed",
+      "small": "text-sm text-[#8A8A93]",
+      "label": "text-xs uppercase tracking-[0.2em] font-semibold text-[#8A8A93]"
+    }
+  },
+  "spacing": {
+    "container_padding": "p-6 md:p-8 lg:p-12",
+    "section_gap": "gap-12 md:gap-16 lg:gap-24",
+    "bento_gap": "gap-6 md:gap-8"
+  },
+  "layout": {
+    "dashboard_grid": "grid grid-cols-1 md:grid-cols-3 lg:grid-cols-4 gap-6",
+    "discover_grid": "grid grid-cols-1 md:grid-cols-8 lg:grid-cols-12 gap-8",
+    "surface_styles": {
+      "cards": "bg-[#141417] border border-[#27272A] rounded-xl overflow-hidden shadow-sm",
+      "header_glass": "backdrop-blur-xl bg-[#0A0A0B]/70 border-b border-[#27272A]/50 sticky top-0 z-50",
+      "player_bar": "backdrop-blur-2xl bg-[#141417]/80 border-t border-[#27272A] fixed bottom-0 w-full z-50 shadow-[0_-8px_32px_rgba(0,0,0,0.4)]"
+    }
+  },
+  "motion": {
+    "hover_lift": "transition-transform duration-300 hover:-translate-y-1",
+    "fade_in": "animate-in fade-in duration-500",
+    "slide_up": "animate-in slide-in-from-bottom-4 duration-500"
+  },
+  "components": {
+    "button": {
+      "primary": "bg-[#F5A623] hover:bg-[#F7B84B] text-[#0A0A0B] font-bold rounded-full px-8 py-3 transition-colors",
+      "secondary": "bg-[#141417] hover:bg-[#27272A] border border-[#27272A] text-white rounded-full px-8 py-3 transition-colors",
+      "ghost": "hover:bg-[#27272A]/50 text-[#8A8A93] hover:text-white rounded-full px-4 py-2 transition-colors"
+    },
+    "inputs": "bg-[#0A0A0B] border border-[#27272A] focus:border-[#F5A623] focus:ring-1 focus:ring-[#F5A623] rounded-lg text-white px-4 py-3 placeholder:text-[#8A8A93] transition-all",
+    "badges": "bg-[#27272A] text-[10px] text-white px-3 py-1 rounded-full uppercase tracking-widest font-bold border border-[#27272A]"
+  },
+  "media": {
+    "hero_microphone": {
+      "url": "https://images.unsplash.com/photo-1709846486154-f9172678be6f?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjA4Mzl8MHwxfHNlYXJjaHwzfHxwb2RjYXN0JTIwbWljcm9waG9uZSUyMHN0dWRpbyUyMGRhcmt8ZW58MHx8fHwxNzc0NzgxMzcyfDA&ixlib=rb-4.1.0&q=85",
+      "description": "Dark room microphone",
+      "usage": "Landing page hero background or Podcaster dashboard empty state. Overlay with bg-black/40 for text contrast."
+    },
+    "listener_moody": {
+      "url": "https://images.pexels.com/photos/8867041/pexels-photo-8867041.jpeg?auto=compress&cs=tinysrgb&dpr=2&h=650&w=940",
+      "description": "Moody shot of man listening to headphones",
+      "usage": "User registration or onboarding screens. Left half screen image."
+    },
+    "soundwave_abstract": {
+      "url": "https://images.unsplash.com/photo-1617994452722-4145e196248b?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NTYxOTB8MHwxfHNlYXJjaHwyfHxhYnN0cmFjdCUyMHNvdW5kJTIwd2F2ZSUyMGRhcmt8ZW58MHx8fHwxNzc0NzgxMzc0fDA&ixlib=rb-4.1.0&q=85",
+      "description": "Blue wave of light on black background",
+      "usage": "Active player visualizer background or recommended podcasts header."
+    }
+  },
+  "instructions_to_main_agent": [
+    "Execute yarn add @phosphor-icons/react for icons.",
+    "Implement the audio player as a sticky bar at the bottom using the 'player_bar' surface styles.",
+    "Never use pure black (#000000) or generic gray; strictly use the tinted palette provided (#0A0A0B and #141417).",
+    "Ensure all interactive elements have data-testid attributes (e.g., data-testid='play-button', data-testid='upload-podcast-form').",
+    "The UI should feel like a premium command center for creators and a moody lounge for listeners.",
+    "Avoid standard 'Bootstrap' columns. Use generous bento grids and robust spacing defined in the guidelines.",
+    "Do not use generic HTML inputs; customize Shadcn components to match the dark/amber theme and rounded radii."
+  ]
+}
