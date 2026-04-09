@@ -3,6 +3,7 @@ FROM node:20-bookworm-slim AS frontend-build
 WORKDIR /app/frontend
 
 COPY frontend/package.json ./
+COPY frontend/package-lock.json ./
 COPY frontend/craco.config.js ./
 COPY frontend/postcss.config.js ./
 COPY frontend/tailwind.config.js ./
@@ -12,7 +13,7 @@ COPY frontend/public ./public
 COPY frontend/src ./src
 COPY frontend/plugins ./plugins
 
-RUN npm install
+RUN npm ci
 RUN npm run build
 
 FROM python:3.11-slim

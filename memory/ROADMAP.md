@@ -1,7 +1,7 @@
-# Podlyzer Roadmap
+# Audioraq Roadmap
 
 ## Outcome
-Turn Podlyzer from a working prototype into a podcast platform with:
+Turn Audioraq from a working prototype into a podcast platform with:
 - better listener activation
 - stronger repeat listening loops
 - creator workflows that feel like running a show

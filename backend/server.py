@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 
 mongo_url = os.environ["MONGO_URL"]
 client = AsyncIOMotorClient(mongo_url)
-db = client[os.environ.get("DB_NAME", "podlyzer")]
+db = client[os.environ.get("DB_NAME", "audioraq")]
 
 JWT_ALGORITHM = "HS256"
 DEFAULT_MEMORY_DIR = PROJECT_DIR / "memory"

@@ -1,192 +1,187 @@
-# Podlyzer
+# Audioraq
 
-**A dedicated podcast discovery and streaming platform — built so podcasters don't have to compete with every other type of content on the internet.**
+Audioraq is a podcast-first listening and creator platform built for long-form audio and video. It helps listeners discover shows intentionally and gives podcasters a show-based workflow for publishing, audience growth, and AI-assisted episode planning.
 
----
+## Product Shape
 
-## The Problem
+### For listeners
+- Personalized home feed based on interests, listening history, saves, and follows
+- Public browse and search with podcast-specific filters
+- Episode detail pages, recommendation reasons, trust signals, and trending
+- Continue listening, queue, history, ratings, likes, and saves
 
-Podcasts today live on YouTube, Spotify, and other general-purpose platforms where they're buried under short-form videos, music, and trending clips. Podcasters compete not just with each other, but with every content creator on the platform. Listeners searching for specific podcast topics have to sift through unrelated media to find what they want.
-
-## The Solution
-
-Podlyzer is a platform built exclusively for podcasts. Creators upload directly to an audience that's here specifically for long-form audio and video content. An AI-powered recommendation engine connects listeners with the right shows based on their stated interests and listening history — no algorithm games, no noise.
-
----
-
-## Features
-
-### For Listeners
-- **Interest-Based Onboarding** — Select your topics during sign-up (technology, true crime, comedy, philosophy, etc.) and get immediate, relevant recommendations
-- **AI-Powered Recommendations** — OpenAI GPT-5.2 analyzes your interests and viewing history to surface podcasts you'll actually want to hear
-- **Search & Browse** — Full-text search across titles, descriptions, creators, and keywords with category filtering
-- **Inline Player** — Sticky audio/video player bar with play/pause, seek, skip ±15s, and volume controls. Video podcasts open in a dedicated modal
-- **Trending Section** — See what the community is listening to right now
-
-### For Podcasters
-- **Creator Studio Dashboard** — Upload episodes, track play counts, and manage your catalog from one place
-- **Audio & Video Support** — Upload MP3, WAV, MP4, WebM, and other standard formats directly to cloud storage
-- **Automatic Keyword Extraction** — Describe your podcast and AI extracts relevant keywords that match listener interests
-- **Thumbnail Support** — Attach cover art to each episode for a polished presentation
-- **Category Tagging** — Organize episodes under topics so listeners can filter and find your content
+### For creators
+- Show-first creator studio with shows and episodes
+- Direct upload, RSS import, and AI-assisted episode planning
+- Post-publish editing, analytics, moderation review, and audience controls
+- Audio and video publishing with show thumbnails and episode artwork
 
 ### Platform
-- **Role-Based Accounts** — Separate flows for listeners and podcasters with dedicated dashboards for each
-- **JWT Authentication** — Secure httpOnly cookie-based sessions with refresh tokens, brute force protection, and admin seeding
-- **Cloud Object Storage** — Podcast media files stored via Emergent Object Storage with streaming playback
-
-### Planned Roadmap
-- **Shows + Episodes** — Move from flat uploads to show-based publishing with episodes
-- **Personalized Home Feed** — Separate listener home from browse/exploration
-- **Episode Detail Pages** — Add show notes, related episodes, saves, and follows
-- **Public Browse** — Let new visitors explore before signup
-- **Listening Retention** — Continue listening, history, queues, and saves
-- **Creator Platform** — Richer publish flow, post-publish editing, analytics, and RSS import
-
----
+- React frontend served by a FastAPI backend from one Docker image
+- MongoDB for app data
+- Emergent Object Storage for media files
+- JWT cookie auth with separate listener and creator flows
 
 ## Tech Stack
 
 | Layer | Technology |
-|---|---|
-| **Frontend** | React, Tailwind CSS, Shadcn/UI, Phosphor Icons |
-| **Backend** | FastAPI (Python), Motor (async MongoDB driver) |
-| **Database** | MongoDB |
-| **Storage** | Emergent Object Storage (audio/video files) |
-| **AI** | OpenAI GPT-5.2 via Emergent Integrations (keyword extraction + recommendations) |
-| **Auth** | JWT (PyJWT), bcrypt password hashing, httpOnly cookies |
+| --- | --- |
+| Frontend | React, Tailwind CSS, Shadcn UI |
+| Backend | FastAPI, Motor, PyMongo |
+| Database | MongoDB |
+| Storage | Emergent Object Storage |
+| AI | Emergent Integrations + LLM-backed generation/recommendation helpers |
+| Deployment | Docker, Koyeb, MongoDB Atlas |
 
----
-
-## Architecture
-
-```
-┌─────────────┐     ┌──────────────┐     ┌───────────┐
-│   React UI  │────▶│  FastAPI /api │────▶│  MongoDB  │
-│  (port 3000)│     │  (port 8001) │     │           │
-└─────────────┘     └──────┬───────┘     └───────────┘
-                           │
-                    ┌──────┴───────┐
-                    │              │
-              ┌─────▼─────┐ ┌─────▼──────┐
-              │  Emergent  │ │  OpenAI    │
-              │  Storage   │ │  GPT-5.2   │
-              └────────────┘ └────────────┘
-```
-
----
-
-## Getting Started
+## Local Development
 
 ### Prerequisites
-- Node.js 18+
-- Python 3.10+
-- MongoDB running locally on port 27017
+- Node.js 20+
+- Python 3.11+
+- MongoDB running locally
 
-### Environment Variables
+### Environment variables
 
-**Backend** (`/backend/.env`):
-```
-MONGO_URL="mongodb://localhost:27017"
-DB_NAME="podlyzer"
-CORS_ORIGINS="http://localhost:3000,http://127.0.0.1:3000"
-JWT_SECRET="<your-64-char-hex-secret>"
-ADMIN_EMAIL="admin@podcasthub.com"
-ADMIN_PASSWORD="admin123"
-EMERGENT_LLM_KEY="<your-emergent-key>"
+Backend in [backend/.env.example](/Users/sagnikroy/Documents/New project/Podlyzer-Centralized-Podcast-Hub/backend/.env.example):
+
+```dotenv
+MONGO_URL=mongodb://localhost:27017
+DB_NAME=audioraq
+JWT_SECRET=replace-with-a-long-random-secret
+ADMIN_EMAIL=admin@audioraq.com
+ADMIN_PASSWORD=admin123
+EMERGENT_LLM_KEY=
+CORS_ORIGINS=http://localhost:3000,http://127.0.0.1:3000
+COOKIE_SECURE=false
+COOKIE_SAMESITE=lax
 ```
 
-**Frontend** (`/frontend/.env`):
-```
+Frontend in [frontend/.env.example](/Users/sagnikroy/Documents/New project/Podlyzer-Centralized-Podcast-Hub/frontend/.env.example):
+
+```dotenv
 REACT_APP_BACKEND_URL=http://localhost:8001
 ```
 
-### Run Locally
+### Run locally
 
 ```bash
-# Backend
+# backend
 cd backend
 pip install -r requirements.txt
 uvicorn server:app --host 0.0.0.0 --port 8001 --reload
 
-# Frontend
+# frontend
 cd frontend
-yarn install
-yarn start
+npm install
+npm start
 ```
 
-The app will be available at `http://localhost:3000`.
+The development app runs at `http://localhost:3000`.
 
-### Run In One Service
+## Production Container
 
-For production, the backend can serve the built React app so auth stays on the same origin and cookie handling remains simple. If `REACT_APP_BACKEND_URL` is unset during the frontend build, the UI automatically talks to `/api` on the same host.
+The root [Dockerfile](/Users/sagnikroy/Documents/New project/Podlyzer-Centralized-Podcast-Hub/Dockerfile) builds the React frontend and serves it from FastAPI so auth and API traffic stay on the same origin.
 
 ```bash
-docker build -t podlyzer .
+docker build -t audioraq .
 docker run --rm -p 8001:8001 \
-  -e MONGO_URL="<your-mongodb-url>" \
-  -e DB_NAME="podlyzer" \
-  -e JWT_SECRET="<your-64-char-hex-secret>" \
-  -e ADMIN_EMAIL="admin@podlyzer.com" \
-  -e ADMIN_PASSWORD="admin123" \
+  -e MONGO_URL="<your-mongodb-uri>" \
+  -e DB_NAME="audioraq" \
+  -e JWT_SECRET="<your-secret>" \
+  -e ADMIN_EMAIL="admin@audioraq.com" \
+  -e ADMIN_PASSWORD="<your-admin-password>" \
+  -e EMERGENT_LLM_KEY="<your-emergent-key>" \
   -e COOKIE_SECURE="true" \
   -e COOKIE_SAMESITE="lax" \
-  podlyzer
+  audioraq
 ```
 
 Then open `http://localhost:8001`.
 
-### Railway Deployment
+## Recommended Deployment: Koyeb + MongoDB Atlas
 
-This repo now includes a root `Dockerfile` and `railway.toml` so Railway can deploy it as a single web service.
+This repo is now prepared to deploy cleanly on Koyeb from GitHub using the root Dockerfile, with MongoDB Atlas as the external database.
 
-Recommended setup:
+### 1. Create MongoDB Atlas
 
-1. Create a Railway project.
-2. Add a MongoDB service from the `mongo` template.
-3. Add a service from this repo and let Railway build from the root `Dockerfile`.
-4. Set these variables on the app service: `MONGO_URL`, `DB_NAME`, `JWT_SECRET`, `ADMIN_EMAIL`, `ADMIN_PASSWORD`, `COOKIE_SECURE=true`, `COOKIE_SAMESITE=lax`.
-5. Deploy and open the generated domain.
+Create an Atlas free cluster, create a database user, and add a network access rule that allows your app to connect. For a hosted app like Koyeb, the practical starting point is usually `0.0.0.0/0` unless you have fixed egress controls.
 
----
+Use:
+- Atlas connection string in `MONGO_URL`
+- `DB_NAME=audioraq`
 
-## API Endpoints
+### 2. Create a Koyeb web service from GitHub
 
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| POST | `/api/auth/register` | Register (user or podcaster) |
-| POST | `/api/auth/login` | Login with email/password |
-| POST | `/api/auth/logout` | Clear session cookies |
-| GET | `/api/auth/me` | Get current user |
-| POST | `/api/auth/refresh` | Refresh access token |
-| GET | `/api/interests/options` | List available interest topics |
-| PUT | `/api/user/interests` | Update user interests |
-| POST | `/api/podcasts/upload` | Upload a podcast (multipart) |
-| GET | `/api/podcasts` | List/search podcasts |
-| GET | `/api/podcasts/my` | List podcaster's own episodes |
-| GET | `/api/podcasts/{id}` | Get single podcast |
-| DELETE | `/api/podcasts/{id}` | Delete a podcast |
-| GET | `/api/podcasts/{id}/stream` | Stream podcast media |
-| GET | `/api/podcasts/{id}/thumbnail` | Get episode thumbnail |
-| POST | `/api/podcasts/{id}/view` | Record a view |
-| GET | `/api/recommendations` | AI-powered recommendations |
-| GET | `/api/trending` | Top podcasts by play count |
-| GET | `/api/categories` | List active categories |
+Use this repository as the source and let Koyeb build from the root Dockerfile.
 
----
+Recommended Koyeb settings:
+- Service type: `Web Service`
+- Builder: `Dockerfile`
+- Exposed port: `8001`
+- Health check path: `/api/health`
 
-## How the Recommendation Engine Works
+Environment variables:
+- `MONGO_URL`
+- `DB_NAME=audioraq`
+- `JWT_SECRET`
+- `ADMIN_EMAIL`
+- `ADMIN_PASSWORD`
+- `EMERGENT_LLM_KEY`
+- `COOKIE_SECURE=true`
+- `COOKIE_SAMESITE=lax`
 
-1. **On registration**, listeners select interests (e.g., technology, comedy, history)
-2. **On upload**, the AI extracts keywords from the podcaster's episode description
-3. **When a listener opens their dashboard**, the engine:
-   - Gathers their stated interests
-   - Collects keywords from previously viewed podcasts
-   - Sends both to GPT-5.2 alongside the full podcast catalog
-   - Returns a ranked list of the most relevant episodes
-4. **Fallback**: If the AI call fails, it falls back to keyword matching, then to popularity-based ranking
+For the default Koyeb URL, use the app/service name `audioraq` so the generated subdomain is branded around Audioraq instead of Podlyzer.
 
----
+### 3. Add the custom domain
+
+After the app is healthy on Koyeb:
+- attach `www.audioraq.com` as the custom domain in Koyeb
+- point GoDaddy `www` to the Koyeb target shown in Koyeb’s domain UI
+- forward `audioraq.com` to `https://www.audioraq.com`
+
+## Railway To Atlas Migration
+
+If you want to move the existing Railway data into Atlas before switching traffic, use [scripts/migrate_mongo.py](/Users/sagnikroy/Documents/New project/Podlyzer-Centralized-Podcast-Hub/scripts/migrate_mongo.py).
+
+Example:
+
+```bash
+python3 scripts/migrate_mongo.py \
+  --source-uri "<railway-mongo-uri>" \
+  --source-db "podlyzer" \
+  --target-uri "<atlas-uri>" \
+  --target-db "audioraq"
+```
+
+Add `--drop-target` if you want the target database cleared before import.
+
+## API Overview
+
+| Method | Endpoint | Purpose |
+| --- | --- | --- |
+| POST | `/api/auth/register` | Register listener or creator |
+| POST | `/api/auth/login` | Email/password sign-in |
+| GET | `/api/auth/me` | Current authenticated user |
+| GET | `/api/shows` | Browse and search shows |
+| GET | `/api/podcasts` | Browse and search episodes |
+| POST | `/api/podcasts/upload` | Upload a new episode |
+| POST | `/api/podcasts/ai-create` | Create an AI-generated episode draft |
+| GET | `/api/recommendations` | Personalized recommendations |
+| GET | `/api/trending` | Trending content |
+| GET | `/api/health` | Deployment health check |
+
+## Notes
+
+- The current Railway files remain in the repo for backwards compatibility, but Koyeb + Atlas is now the recommended deploy target.
+- The GitHub repo name is still unchanged. This update rebrands the product and the deployment path around `Audioraq`, but renaming the repository itself is a separate GitHub action.
+
+## Official References
+
+- [Koyeb Quick Start](https://www.koyeb.com/docs/deploy)
+- [Koyeb Docker image deployment](https://www.koyeb.com/docs/build-and-deploy/prebuilt-docker-images)
+- [Koyeb custom domains](https://www.koyeb.com/docs/run-and-scale/domains)
+- [MongoDB Atlas free cluster setup](https://www.mongodb.com/docs/atlas/tutorial/deploy-free-tier-cluster/)
+- [MongoDB Atlas cluster limitations](https://www.mongodb.com/docs/atlas/reference/limitations/)
 
 ## License
 

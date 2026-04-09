@@ -1,9 +1,9 @@
-# Podlyzer - Product Requirements Document
+# Audioraq - Product Requirements Document
 
 ## Product Vision
-Podlyzer is a podcast-first product built to help listeners discover long-form audio and video without competing against short-form noise, and to help creators run a podcast business workflow rather than just upload individual media files.
+Audioraq is a podcast-first product built to help listeners discover long-form audio and video without competing against short-form noise, and to help creators run a podcast business workflow rather than just upload individual media files.
 
-The next version of Podlyzer should feel like:
+The next version of Audioraq should feel like:
 - a personalized listening app for listeners
 - a show-management and publishing tool for creators
 - a discovery engine organized around shows, episodes, trust, and intent
@@ -52,7 +52,7 @@ This model unlocks:
 - Use stronger listening signals than simple clicks
 - Help creators manage an ongoing publishing workflow, not just file uploads
 - Give users confidence through transparent recommendation reasons and trust signals
-- Reduce friction for existing podcasters migrating into Podlyzer
+- Reduce friction for existing podcasters migrating into Audioraq
 
 ## Current Architecture
 - **Backend**: FastAPI + MongoDB + Emergent Object Storage + OpenAI GPT-5.2

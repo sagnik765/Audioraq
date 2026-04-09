@@ -1,6 +1,10 @@
 .git
 .gitignore
 .emergent
+.venv-deploy
+Audioraq logo
+Audioraq logo.zip
+.DS_Store
 frontend/node_modules
 frontend/build
 backend/__pycache__

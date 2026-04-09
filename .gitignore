@@ -73,6 +73,8 @@ agenthub/agents/youtube/db
 *.pack
 *.deb
 *.dylib
+Audioraq logo/
+Audioraq logo.zip
 
 # Build caches
 .cache/
