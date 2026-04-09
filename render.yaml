@@ -1,0 +1,32 @@
+services:
+  - type: web
+    name: audioraq
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /api/health
+    autoDeployTrigger: commit
+    domains:
+      - www.audioraq.com
+    envVars:
+      - key: PORT
+        value: "10000"
+      - key: DB_NAME
+        value: audioraq
+      - key: COOKIE_SECURE
+        value: "true"
+      - key: COOKIE_SAMESITE
+        value: lax
+      - key: CORS_ORIGINS
+        value: https://audioraq.com,https://www.audioraq.com
+      - key: ADMIN_EMAIL
+        value: admin@audioraq.com
+      - key: MONGO_URL
+        sync: false
+      - key: JWT_SECRET
+        generateValue: true
+      - key: ADMIN_PASSWORD
+        sync: false
+      - key: EMERGENT_LLM_KEY
+        sync: false

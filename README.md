@@ -184,6 +184,19 @@ Expected result:
 
 On Oracle, the public URL becomes your own domain, so the user-facing URL is `www.audioraq.com` instead of a provider-generated hostname containing `podlyzer`.
 
+## Fastest Hosted Path: Render + MongoDB Atlas
+
+If your priority is the fastest GitHub-to-live workflow, Render is the easiest hosted option for this repo.
+
+Use:
+- a Render web service built from the root Dockerfile
+- a MongoDB Atlas database for `MONGO_URL`
+- `www.audioraq.com` as the custom domain in Render
+
+The repo includes [render.yaml](/Users/sagnikroy/Documents/New%20project/Podlyzer-Centralized-Podcast-Hub/render.yaml) so Render can import the app directly from GitHub.
+
+Important: Render's official docs say free web services have important limitations and should not be used for production applications. They can spin down after inactivity and are better for hobby/testing use. If you want a more stable live app on Render, switch the service from `free` to a paid plan after the first deploy.
+
 ## Railway To Atlas Migration
 
 If you want to move the existing Railway data into Atlas before switching traffic, use [scripts/migrate_mongo.py](/Users/sagnikroy/Documents/New project/Podlyzer-Centralized-Podcast-Hub/scripts/migrate_mongo.py).
@@ -231,6 +244,10 @@ If you later decide you want less infrastructure management, the repo can still 
 - [Create an OCI compute instance](https://docs.oracle.com/en-us/iaas/Content/Compute/Tasks/launchinginstance.htm)
 - [Create security lists](https://docs.oracle.com/en-us/iaas/Content/Network/Concepts/creating-securitylist.htm)
 - [Assign a reserved public IP](https://docs.oracle.com/en-us/iaas/Content/Network/Tasks/reserved-public-ip-assign.htm)
+- [Render free services](https://render.com/docs/free)
+- [Render Docker deployments](https://render.com/docs/docker)
+- [Render custom domains](https://render.com/docs/custom-domains)
+- [Render Blueprint reference](https://render.com/docs/blueprint-spec)
 
 ## License
 
