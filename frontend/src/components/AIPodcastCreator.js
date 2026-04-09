@@ -1,0 +1,727 @@
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import axios from 'axios';
+import { PencilSimple, Play, Plus } from '@phosphor-icons/react';
+import { toast } from 'sonner';
+import { API } from '../lib/api';
+
+function uniqueSuggestions(values) {
+  return [...new Set((values || []).filter(Boolean).map((value) => String(value).trim()).filter(Boolean))];
+}
+
+function buildInitialBrief(activeShow) {
+  const categoryHint = activeShow?.category && activeShow.category !== 'general' ? activeShow.category : '';
+  const showTitle = activeShow?.title || '';
+
+  return {
+    identity: {
+      podcastName: showTitle,
+      niche: categoryHint,
+      targetAudience: '',
+    },
+    episodeIntent: {
+      episodeGoal: 'educate',
+      desiredOutcome: '',
+    },
+    contentInput: {
+      topic: '',
+      keyPoints: [],
+      references: [],
+    },
+    toneStyle: {
+      tone: categoryHint === 'comedy' ? 'energetic' : 'professional',
+      format: 'solo',
+      lengthPreference: 'medium',
+    },
+    growthOptimization: {
+      optimizeFor: 'clarity',
+      includeHook: true,
+      knownIssues: '',
+    },
+  };
+}
+
+function getValueAtPath(source, path) {
+  return path.reduce((value, key) => value?.[key], source);
+}
+
+function setValueAtPath(source, path, nextValue) {
+  const clone = JSON.parse(JSON.stringify(source));
+  let cursor = clone;
+  for (let index = 0; index < path.length - 1; index += 1) {
+    cursor = cursor[path[index]];
+  }
+  cursor[path[path.length - 1]] = nextValue;
+  return clone;
+}
+
+function formatDate(value) {
+  if (!value) return '';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '';
+  return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+}
+
+function normalizeListInput(value) {
+  return value
+    .split('\n')
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+}
+
+function isStepComplete(step, value) {
+  if (step.optional) return true;
+  if (step.type === 'list') return Array.isArray(value) && value.length > 0;
+  if (step.type === 'boolean') return typeof value === 'boolean';
+  return String(value || '').trim().length > 0;
+}
+
+export default function AIPodcastCreator({
+  shows,
+  selectedShowId,
+  onSelectShow,
+  activeShow,
+  onApplyDraft,
+}) {
+  const [brief, setBrief] = useState(() => buildInitialBrief(activeShow));
+  const [stepIndex, setStepIndex] = useState(0);
+  const [isGenerating, setIsGenerating] = useState(false);
+  const [draftsLoading, setDraftsLoading] = useState(false);
+  const [generatedDraft, setGeneratedDraft] = useState(null);
+  const [drafts, setDrafts] = useState([]);
+
+  useEffect(() => {
+    setBrief((current) => ({
+      ...current,
+      identity: {
+        ...current.identity,
+        podcastName: current.identity.podcastName || activeShow?.title || '',
+        niche: current.identity.niche || ((activeShow?.category && activeShow.category !== 'general') ? activeShow.category : ''),
+      },
+    }));
+  }, [activeShow?.category, activeShow?.title]);
+
+  const steps = useMemo(() => {
+    const nicheSuggestions = uniqueSuggestions([
+      activeShow?.category && activeShow.category !== 'general' ? activeShow.category : '',
+      'technology',
+      'business',
+      'education',
+      'health',
+    ]);
+
+    return [
+      {
+        id: 'podcastName',
+        category: 'Podcast Identity',
+        label: 'Podcast name',
+        prompt: 'What should this episode feel connected to?',
+        help: 'This can match your show title or the umbrella name you want the episode to live under.',
+        type: 'text',
+        path: ['identity', 'podcastName'],
+        placeholder: activeShow?.title || 'Signal Over Noise',
+        suggestions: uniqueSuggestions([activeShow?.title, `${activeShow?.title || 'Signal Over Noise'} Deep Dive`]),
+      },
+      {
+        id: 'niche',
+        category: 'Podcast Identity',
+        label: 'Niche',
+        prompt: 'Which niche or domain should the AI stay anchored in?',
+        help: 'Keeping this specific helps the outline sound like a real show, not generic content.',
+        type: 'text',
+        path: ['identity', 'niche'],
+        placeholder: 'technology, founder stories, policy, health, sports...',
+        suggestions: nicheSuggestions,
+      },
+      {
+        id: 'targetAudience',
+        category: 'Podcast Identity',
+        label: 'Target audience',
+        prompt: 'Who exactly are we making this episode for?',
+        help: 'Be concrete about who should feel this was made for them.',
+        type: 'text',
+        path: ['identity', 'targetAudience'],
+        placeholder: 'busy founders who want practical operating insight',
+        suggestions: [
+          'busy professionals who want clear signal fast',
+          'curious listeners who want a smarter breakdown',
+          'operators looking for practical next steps',
+        ],
+      },
+      {
+        id: 'episodeGoal',
+        category: 'Episode Intent',
+        label: 'Episode goal',
+        prompt: 'What is the main job of this episode?',
+        help: 'Choose the primary intent so the structure does not drift.',
+        type: 'option',
+        path: ['episodeIntent', 'episodeGoal'],
+        options: [
+          { value: 'educate', label: 'Educate', description: 'Teach something clearly and usefully.' },
+          { value: 'entertain', label: 'Entertain', description: 'Keep it lively and memorable.' },
+          { value: 'storytelling', label: 'Storytelling', description: 'Lead with narrative and tension.' },
+          { value: 'interview', label: 'Interview', description: 'Design around strong questions and answers.' },
+        ],
+      },
+      {
+        id: 'desiredOutcome',
+        category: 'Episode Intent',
+        label: 'Desired outcome',
+        prompt: 'What should listeners know, feel, or do by the end?',
+        help: 'This is the finish line the AI will optimize around.',
+        type: 'text',
+        path: ['episodeIntent', 'desiredOutcome'],
+        placeholder: 'walk away with a practical framework they can apply this week',
+        suggestions: [
+          'leave with a framework they can apply immediately',
+          'feel more confident about the topic',
+          'see the tradeoffs more clearly',
+        ],
+      },
+      {
+        id: 'topic',
+        category: 'Content Input',
+        label: 'Topic',
+        prompt: 'What is the central topic for this episode?',
+        help: 'Phrase it the way you would pitch it to a listener.',
+        type: 'text',
+        path: ['contentInput', 'topic'],
+        placeholder: 'How founders can make better hiring decisions early',
+      },
+      {
+        id: 'keyPoints',
+        category: 'Content Input',
+        label: 'Key points',
+        prompt: 'What are the must-hit points or beats?',
+        help: 'Use one point per line. The AI will turn these into the episode spine.',
+        type: 'list',
+        path: ['contentInput', 'keyPoints'],
+        placeholder: 'The mistake most people make\nA useful framework\nA real example or story\nThe action step',
+      },
+      {
+        id: 'references',
+        category: 'Content Input',
+        label: 'References',
+        prompt: 'Any sources, links, books, or examples the AI should respect?',
+        help: 'Optional. One reference per line.',
+        type: 'list',
+        path: ['contentInput', 'references'],
+        optional: true,
+        placeholder: 'https://example.com/article\nA book title\nA report or case study',
+      },
+      {
+        id: 'tone',
+        category: 'Tone & Style',
+        label: 'Tone',
+        prompt: 'What tone should the episode use?',
+        help: 'This affects the hook, pacing, and how the script opens.',
+        type: 'option',
+        path: ['toneStyle', 'tone'],
+        options: [
+          { value: 'casual', label: 'Casual', description: 'Relaxed and easy to follow.' },
+          { value: 'professional', label: 'Professional', description: 'Clear, credible, and polished.' },
+          { value: 'energetic', label: 'Energetic', description: 'High momentum without feeling noisy.' },
+          { value: 'storytelling', label: 'Storytelling', description: 'Narrative-led and scene-driven.' },
+        ],
+      },
+      {
+        id: 'format',
+        category: 'Tone & Style',
+        label: 'Format',
+        prompt: 'Which format should the AI structure for?',
+        help: 'The outline and talking points will adapt to this.',
+        type: 'option',
+        path: ['toneStyle', 'format'],
+        options: [
+          { value: 'solo', label: 'Solo', description: 'One voice, focused and direct.' },
+          { value: 'interview', label: 'Interview', description: 'Lead with guest questions and responses.' },
+          { value: 'narrative', label: 'Narrative', description: 'Build with scenes and progression.' },
+        ],
+      },
+      {
+        id: 'lengthPreference',
+        category: 'Tone & Style',
+        label: 'Length',
+        prompt: 'How long should this episode feel?',
+        help: 'This influences the scope of the outline, not an exact minute count.',
+        type: 'option',
+        path: ['toneStyle', 'lengthPreference'],
+        options: [
+          { value: 'short', label: 'Short', description: 'Tight, focused, and quick to finish.' },
+          { value: 'medium', label: 'Medium', description: 'Balanced depth and pace.' },
+          { value: 'long', label: 'Long', description: 'Go deeper with more examples and layers.' },
+        ],
+      },
+      {
+        id: 'optimizeFor',
+        category: 'Growth Optimization',
+        label: 'Optimize for',
+        prompt: 'What should the AI prioritize most?',
+        help: 'This is the main growth lens for the hook and structure.',
+        type: 'option',
+        path: ['growthOptimization', 'optimizeFor'],
+        options: [
+          { value: 'retention', label: 'Retention', description: 'Keep listeners staying through the full episode.' },
+          { value: 'virality', label: 'Virality', description: 'Make the angle especially shareable.' },
+          { value: 'clarity', label: 'Clarity', description: 'Make the message easy to follow and remember.' },
+        ],
+      },
+      {
+        id: 'includeHook',
+        category: 'Growth Optimization',
+        label: 'Include hook',
+        prompt: 'Do you want the AI to open with a sharper hook?',
+        help: 'Recommended for most discovery-oriented episodes.',
+        type: 'boolean',
+        path: ['growthOptimization', 'includeHook'],
+        options: [
+          { value: true, label: 'Yes', description: 'Lead with a stronger cold open.' },
+          { value: false, label: 'No', description: 'Open more directly and calmly.' },
+        ],
+      },
+      {
+        id: 'knownIssues',
+        category: 'Growth Optimization',
+        label: 'Known issues',
+        prompt: 'Any pitfalls the AI should avoid or solve around?',
+        help: 'Optional. Mention concerns like sounding too generic, too technical, or too long.',
+        type: 'textarea',
+        path: ['growthOptimization', 'knownIssues'],
+        optional: true,
+        placeholder: 'Avoid jargon. Keep the intro tight. Do not sound salesy.',
+      },
+    ];
+  }, [activeShow?.category, activeShow?.title]);
+
+  const currentStep = steps[stepIndex];
+  const currentValue = getValueAtPath(brief, currentStep.path);
+  const canProceed = isStepComplete(currentStep, currentValue);
+
+  const fetchDrafts = useCallback(async () => {
+    if (!selectedShowId) {
+      setDrafts([]);
+      return;
+    }
+
+    setDraftsLoading(true);
+    try {
+      const { data } = await axios.get(
+        `${API}/ai-podcast-drafts/my?show_id=${encodeURIComponent(selectedShowId)}`,
+        { withCredentials: true },
+      );
+      setDrafts(data.drafts || []);
+    } catch {
+      setDrafts([]);
+    } finally {
+      setDraftsLoading(false);
+    }
+  }, [selectedShowId]);
+
+  useEffect(() => {
+    fetchDrafts();
+  }, [fetchDrafts]);
+
+  const updateBriefValue = (nextValue) => {
+    setBrief((current) => setValueAtPath(current, currentStep.path, nextValue));
+  };
+
+  const handleSuggestion = (suggestion) => {
+    if (currentStep.type === 'list') {
+      const existing = Array.isArray(currentValue) ? currentValue : [];
+      updateBriefValue([...new Set([...existing, suggestion])]);
+      return;
+    }
+    updateBriefValue(suggestion);
+  };
+
+  const handleGenerate = async () => {
+    if (!selectedShowId) {
+      toast.error('Create a show first so the AI draft has a real home in your catalog.');
+      return;
+    }
+
+    setIsGenerating(true);
+    try {
+      const { data } = await axios.post(
+        `${API}/ai-podcast-drafts/generate`,
+        { show_id: selectedShowId, intake: brief },
+        { withCredentials: true },
+      );
+      setGeneratedDraft(data);
+      setDrafts((current) => [data, ...current.filter((draft) => draft.id !== data.id)].slice(0, 8));
+      toast.success('AI episode package is ready');
+    } catch (error) {
+      toast.error(error.response?.data?.detail || 'Could not generate the AI podcast draft');
+    } finally {
+      setIsGenerating(false);
+    }
+  };
+
+  const handleNext = () => {
+    if (stepIndex === steps.length - 1) {
+      handleGenerate();
+      return;
+    }
+    setStepIndex((current) => Math.min(current + 1, steps.length - 1));
+  };
+
+  const handleStartFresh = () => {
+    setBrief(buildInitialBrief(activeShow));
+    setGeneratedDraft(null);
+    setStepIndex(0);
+  };
+
+  const handleReuseDraft = (draft) => {
+    setBrief(draft.intake || buildInitialBrief(activeShow));
+    setGeneratedDraft(draft);
+    setStepIndex(0);
+    toast.success('Loaded that AI brief back into the flow');
+  };
+
+  const renderInput = () => {
+    if (currentStep.type === 'option' || currentStep.type === 'boolean') {
+      return (
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+          {currentStep.options.map((option) => {
+            const isSelected = currentValue === option.value;
+            return (
+              <button
+                key={String(option.value)}
+                type="button"
+                onClick={() => updateBriefValue(option.value)}
+                className={`text-left rounded-2xl border p-4 transition-all ${
+                  isSelected
+                    ? 'border-[#F5A623] bg-[#F5A623]/10'
+                    : 'border-[#27272A] bg-[#0A0A0B] hover:border-[#8A8A93]'
+                }`}
+                data-testid={`ai-step-option-${currentStep.id}-${String(option.value)}`}
+              >
+                <p className="text-sm font-semibold text-white mb-1">{option.label}</p>
+                <p className="text-xs text-[#8A8A93] leading-relaxed">{option.description}</p>
+              </button>
+            );
+          })}
+        </div>
+      );
+    }
+
+    if (currentStep.type === 'list') {
+      return (
+        <textarea
+          value={Array.isArray(currentValue) ? currentValue.join('\n') : ''}
+          onChange={(event) => updateBriefValue(normalizeListInput(event.target.value))}
+          placeholder={currentStep.placeholder}
+          className="w-full bg-[#0A0A0B] border border-[#27272A] focus:border-[#F5A623] rounded-2xl text-white px-4 py-4 min-h-[180px] outline-none resize-none"
+          data-testid={`ai-step-input-${currentStep.id}`}
+        />
+      );
+    }
+
+    if (currentStep.type === 'textarea') {
+      return (
+        <textarea
+          value={currentValue || ''}
+          onChange={(event) => updateBriefValue(event.target.value)}
+          placeholder={currentStep.placeholder}
+          className="w-full bg-[#0A0A0B] border border-[#27272A] focus:border-[#F5A623] rounded-2xl text-white px-4 py-4 min-h-[160px] outline-none resize-none"
+          data-testid={`ai-step-input-${currentStep.id}`}
+        />
+      );
+    }
+
+    return (
+      <input
+        type="text"
+        value={currentValue || ''}
+        onChange={(event) => updateBriefValue(event.target.value)}
+        placeholder={currentStep.placeholder}
+        className="w-full bg-[#0A0A0B] border border-[#27272A] focus:border-[#F5A623] rounded-2xl text-white px-4 py-4 outline-none"
+        data-testid={`ai-step-input-${currentStep.id}`}
+      />
+    );
+  };
+
+  return (
+    <section className="bg-[#141417] border border-[#27272A] rounded-3xl p-8 mb-10" data-testid="ai-podcast-creator">
+      <div className="flex flex-col lg:flex-row lg:items-end lg:justify-between gap-5 mb-8">
+        <div>
+          <p className="text-xs uppercase tracking-[0.2em] font-semibold text-[#F5A623] mb-2">Create Podcast with AI</p>
+          <h2 className="font-['Outfit'] text-2xl font-semibold text-white mb-2">Build an episode brief one answer at a time</h2>
+          <p className="text-sm text-[#8A8A93] max-w-3xl">
+            Audioraq keeps this conversational on purpose. You answer one focused question, we store the brief as structured JSON, and the AI turns it into a podcast-ready outline, hook, and publish copy.
+          </p>
+        </div>
+
+        <div className="min-w-[240px]">
+          <label className="text-xs uppercase tracking-[0.2em] font-semibold text-[#8A8A93] mb-2 block">Working show</label>
+          <select
+            value={selectedShowId}
+            onChange={(event) => onSelectShow(event.target.value)}
+            className="w-full bg-[#0A0A0B] border border-[#27272A] rounded-xl text-white px-4 py-3 outline-none"
+            data-testid="ai-show-select"
+          >
+            <option value="">Select a show</option>
+            {shows.map((show) => <option key={show.id} value={show.id}>{show.title}</option>)}
+          </select>
+        </div>
+      </div>
+
+      {!shows.length ? (
+        <div className="bg-[#0A0A0B] border border-[#27272A] rounded-3xl p-8 text-center">
+          <p className="text-sm text-[#8A8A93] mb-4">
+            Create a show first so AI-generated episodes stay anchored to a real catalog and preserve Audioraq&apos;s show-first workflow.
+          </p>
+        </div>
+      ) : (
+        <>
+          <div className="grid grid-cols-1 xl:grid-cols-[0.9fr_1.1fr] gap-6 mb-8">
+            <div className="bg-[#0A0A0B] border border-[#27272A] rounded-3xl p-6">
+              <div className="flex items-center justify-between gap-4 mb-5">
+                <div>
+                  <p className="text-xs uppercase tracking-[0.18em] text-[#8A8A93] mb-1">{currentStep.category}</p>
+                  <h3 className="font-['Outfit'] text-xl font-semibold text-white">
+                    Step {stepIndex + 1} of {steps.length}: {currentStep.label}
+                  </h3>
+                </div>
+                <span className="text-xs text-[#F5A623] uppercase tracking-[0.18em] font-semibold">
+                  {Math.round(((stepIndex + 1) / steps.length) * 100)}% brief
+                </span>
+              </div>
+
+              <div className="h-2 bg-[#141417] rounded-full overflow-hidden mb-6">
+                <div className="h-full bg-[#F5A623]" style={{ width: `${((stepIndex + 1) / steps.length) * 100}%` }} />
+              </div>
+
+              <p className="text-white text-base mb-2">{currentStep.prompt}</p>
+              <p className="text-sm text-[#8A8A93] mb-5">{currentStep.help}</p>
+
+              {renderInput()}
+
+              {currentStep.suggestions?.length > 0 && (
+                <div className="mt-5">
+                  <p className="text-xs uppercase tracking-[0.18em] text-[#8A8A93] mb-3">Suggested starting points</p>
+                  <div className="flex flex-wrap gap-2">
+                    {currentStep.suggestions.map((suggestion) => (
+                      <button
+                        key={suggestion}
+                        type="button"
+                        onClick={() => handleSuggestion(suggestion)}
+                        className="px-3 py-1.5 rounded-full bg-[#141417] border border-[#27272A] text-xs text-white hover:border-[#F5A623] transition-colors"
+                      >
+                        {suggestion}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              <div className="flex flex-wrap items-center gap-3 mt-8">
+                <button
+                  type="button"
+                  onClick={() => setStepIndex((current) => Math.max(current - 1, 0))}
+                  disabled={stepIndex === 0}
+                  className="bg-[#141417] hover:bg-[#27272A] border border-[#27272A] text-white rounded-full px-5 py-3 transition-colors disabled:opacity-40"
+                >
+                  Back
+                </button>
+                {currentStep.optional && (
+                  <button
+                    type="button"
+                    onClick={handleNext}
+                    className="bg-[#141417] hover:bg-[#27272A] border border-[#27272A] text-white rounded-full px-5 py-3 transition-colors"
+                  >
+                    Skip for now
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={handleNext}
+                  disabled={!canProceed || isGenerating}
+                  className="bg-[#F5A623] hover:bg-[#F7B84B] text-[#0A0A0B] font-bold rounded-full px-5 py-3 transition-colors disabled:opacity-50"
+                  data-testid="ai-step-next-btn"
+                >
+                  {stepIndex === steps.length - 1 ? (isGenerating ? 'Generating...' : 'Generate AI Episode') : 'Continue'}
+                </button>
+                <button
+                  type="button"
+                  onClick={handleStartFresh}
+                  className="text-sm text-[#8A8A93] hover:text-white transition-colors"
+                >
+                  Start fresh
+                </button>
+              </div>
+            </div>
+
+            <div className="space-y-6">
+              <div className="bg-[#0A0A0B] border border-[#27272A] rounded-3xl p-6">
+                <div className="flex items-center justify-between gap-4 mb-4">
+                  <div>
+                    <p className="text-xs uppercase tracking-[0.18em] text-[#8A8A93] mb-1">Structured JSON</p>
+                    <h3 className="font-['Outfit'] text-lg font-semibold text-white">Live creator brief</h3>
+                  </div>
+                  <span className="text-xs text-[#F5A623] uppercase tracking-[0.18em] font-semibold">
+                    stored as JSON
+                  </span>
+                </div>
+                <pre className="bg-[#141417] border border-[#27272A] rounded-2xl p-4 text-xs text-[#C7C7D1] overflow-auto max-h-[340px] whitespace-pre-wrap break-words">
+                  {JSON.stringify(brief, null, 2)}
+                </pre>
+              </div>
+
+              <div className="bg-[#0A0A0B] border border-[#27272A] rounded-3xl p-6">
+                {generatedDraft ? (
+                  <>
+                    <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-4 mb-5">
+                      <div>
+                        <p className="text-xs uppercase tracking-[0.18em] text-[#8A8A93] mb-1">AI Episode Package</p>
+                        <h3 className="font-['Outfit'] text-2xl font-semibold text-white">{generatedDraft.generation?.episode_title}</h3>
+                        <p className="text-sm text-[#8A8A93] mt-2">{generatedDraft.generation?.one_line_promise}</p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => onApplyDraft(generatedDraft)}
+                        className="bg-[#F5A623] hover:bg-[#F7B84B] text-[#0A0A0B] font-bold rounded-full px-5 py-3 transition-colors whitespace-nowrap"
+                        data-testid="ai-apply-draft-btn"
+                      >
+                        Use in Publish Flow
+                      </button>
+                    </div>
+
+                    <div className="bg-[#141417] border border-[#27272A] rounded-2xl p-4 mb-4">
+                      <p className="text-xs uppercase tracking-[0.18em] text-[#8A8A93] mb-2">Hook</p>
+                      <p className="text-sm text-white leading-relaxed">{generatedDraft.generation?.hook}</p>
+                    </div>
+
+                    <div className="bg-[#141417] border border-[#27272A] rounded-2xl p-4 mb-4">
+                      <p className="text-xs uppercase tracking-[0.18em] text-[#8A8A93] mb-2">Intro</p>
+                      <p className="text-sm text-[#C7C7D1] leading-relaxed">{generatedDraft.generation?.intro_script}</p>
+                    </div>
+
+                    <div className="mb-4">
+                      <p className="text-xs uppercase tracking-[0.18em] text-[#8A8A93] mb-3">Outline</p>
+                      <div className="space-y-3">
+                        {(generatedDraft.generation?.outline || []).map((section) => (
+                          <div key={section.section_title} className="bg-[#141417] border border-[#27272A] rounded-2xl p-4">
+                            <p className="text-sm font-semibold text-white mb-1">{section.section_title}</p>
+                            {section.purpose && <p className="text-xs text-[#F5A623] mb-2">{section.purpose}</p>}
+                            <div className="space-y-1">
+                              {(section.beats || []).map((beat) => (
+                                <p key={beat} className="text-sm text-[#C7C7D1]">- {beat}</p>
+                              ))}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+                      <div className="bg-[#141417] border border-[#27272A] rounded-2xl p-4">
+                        <p className="text-xs uppercase tracking-[0.18em] text-[#8A8A93] mb-2">Talking points</p>
+                        <div className="space-y-1">
+                          {(generatedDraft.generation?.talking_points || []).map((point) => (
+                            <p key={point} className="text-sm text-[#C7C7D1]">- {point}</p>
+                          ))}
+                        </div>
+                      </div>
+                      <div className="bg-[#141417] border border-[#27272A] rounded-2xl p-4">
+                        <p className="text-xs uppercase tracking-[0.18em] text-[#8A8A93] mb-2">Production notes</p>
+                        <div className="space-y-1">
+                          {(generatedDraft.generation?.production_notes || []).map((note) => (
+                            <p key={note} className="text-sm text-[#C7C7D1]">- {note}</p>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="bg-[#141417] border border-[#27272A] rounded-2xl p-4">
+                      <p className="text-xs uppercase tracking-[0.18em] text-[#8A8A93] mb-2">Publish-ready description</p>
+                      <p className="text-sm text-[#C7C7D1] whitespace-pre-wrap leading-relaxed">
+                        {generatedDraft.publish_prefill?.description || generatedDraft.generation?.suggested_description}
+                      </p>
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <p className="text-xs uppercase tracking-[0.18em] text-[#8A8A93] mb-2">What the AI will create</p>
+                    <h3 className="font-['Outfit'] text-xl font-semibold text-white mb-3">A draft built for real long-form podcasting</h3>
+                    <div className="space-y-3">
+                      {[
+                        'A structured episode outline that matches the show, audience, and goal.',
+                        'A sharper intro hook without turning the episode into generic clickbait.',
+                        'Talking points, production notes, and publish-ready copy you can carry into the upload flow.',
+                      ].map((line) => (
+                        <div key={line} className="bg-[#141417] border border-[#27272A] rounded-2xl p-4">
+                          <p className="text-sm text-[#C7C7D1]">{line}</p>
+                        </div>
+                      ))}
+                    </div>
+                  </>
+                )}
+              </div>
+            </div>
+          </div>
+
+          <div className="bg-[#0A0A0B] border border-[#27272A] rounded-3xl p-6">
+            <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4 mb-5">
+              <div>
+                <p className="text-xs uppercase tracking-[0.18em] text-[#8A8A93] mb-1">Recent AI drafts</p>
+                <h3 className="font-['Outfit'] text-xl font-semibold text-white">Reusable episode packages</h3>
+              </div>
+              {draftsLoading && <span className="text-sm text-[#8A8A93]">Loading drafts...</span>}
+            </div>
+
+            {drafts.length > 0 ? (
+              <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+                {drafts.map((draft) => (
+                  <div key={draft.id} className="bg-[#141417] border border-[#27272A] rounded-2xl p-5">
+                    <div className="flex items-start justify-between gap-4 mb-3">
+                      <div className="min-w-0">
+                        <p className="text-sm font-semibold text-white truncate">{draft.generation?.episode_title || draft.publish_prefill?.title}</p>
+                        <p className="text-xs text-[#8A8A93] truncate">{draft.show_title} · {formatDate(draft.created_at)}</p>
+                      </div>
+                      <span className="text-[10px] uppercase tracking-[0.18em] text-[#F5A623]">
+                        {draft.publish_prefill?.category || draft.recommended_category}
+                      </span>
+                    </div>
+                    <p className="text-sm text-[#C7C7D1] line-clamp-3 mb-4">
+                      {draft.generation?.hook || draft.generation?.one_line_promise}
+                    </p>
+                    <div className="flex flex-wrap gap-3">
+                      <button
+                        type="button"
+                        onClick={() => onApplyDraft(draft)}
+                        className="bg-[#F5A623] hover:bg-[#F7B84B] text-[#0A0A0B] font-bold rounded-full px-4 py-2 transition-colors inline-flex items-center gap-2"
+                      >
+                        <Play className="w-4 h-4" />
+                        Use draft
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleReuseDraft(draft)}
+                        className="bg-[#0A0A0B] hover:bg-[#27272A] border border-[#27272A] text-white rounded-full px-4 py-2 transition-colors inline-flex items-center gap-2"
+                      >
+                        <PencilSimple className="w-4 h-4" />
+                        Edit brief
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setGeneratedDraft(draft)}
+                        className="bg-[#0A0A0B] hover:bg-[#27272A] border border-[#27272A] text-white rounded-full px-4 py-2 transition-colors inline-flex items-center gap-2"
+                      >
+                        <Plus className="w-4 h-4" />
+                        Preview
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="bg-[#141417] border border-[#27272A] rounded-2xl p-6 text-center">
+                <p className="text-sm text-[#8A8A93]">Your AI-created episode packages will show up here once you generate the first one.</p>
+              </div>
+            )}
+          </div>
+        </>
+      )}
+    </section>
+  );
+}

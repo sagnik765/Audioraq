@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
 import { Microphone, Eye, EyeSlash } from '@phosphor-icons/react';
+import SocialAuthButtons from '../components/SocialAuthButtons';
 
 export default function LoginPage() {
   const { login } = useAuth();
@@ -45,7 +46,7 @@ export default function LoginPage() {
             <div className="w-10 h-10 rounded-xl bg-[#F5A623] flex items-center justify-center">
               <Microphone weight="bold" className="text-[#0A0A0B] w-5 h-5" />
             </div>
-            <span className="font-['Outfit'] text-xl font-bold text-white tracking-tight">Podlyzer</span>
+            <span className="font-['Outfit'] text-xl font-bold text-white tracking-tight">Audioraq</span>
           </Link>
 
           <h1 className="font-['Outfit'] text-3xl sm:text-4xl tracking-tight font-bold text-white mb-2">Welcome back</h1>
@@ -56,6 +57,10 @@ export default function LoginPage() {
               {error}
             </div>
           )}
+
+          <div className="mb-6">
+            <SocialAuthButtons context="sign in" />
+          </div>
 
           <form onSubmit={handleSubmit} className="space-y-5">
             <div>

@@ -51,6 +51,7 @@ __pycache__/
 *pyc*
 venv/
 .venv/
+.venv-deploy/
 
 # Development tools
 chainlit.md
@@ -81,15 +82,9 @@ memory/test_credentials.md
 # Mobile development
 android-sdk/frontend/node_modules/.cache/default-development/0.pack
 frontend/node_modules/.cache/default-development/0.pack
--e 
+
 # Environment files
 *.env
 *.env.*
--e 
-# Environment files
-*.env
-*.env.*
--e 
-# Environment files
-*.env
-*.env.*
+!backend/.env.example
+!frontend/.env.example

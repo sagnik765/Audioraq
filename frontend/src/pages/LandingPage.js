@@ -26,7 +26,7 @@ export default function LandingPage() {
             <div className="w-10 h-10 rounded-xl bg-[#F5A623] flex items-center justify-center">
               <Microphone weight="bold" className="text-[#0A0A0B] w-5 h-5" />
             </div>
-            <span className="font-['Outfit'] text-xl font-bold text-white tracking-tight">Podlyzer</span>
+            <span className="font-['Outfit'] text-xl font-bold text-white tracking-tight">Audioraq</span>
           </Link>
           <div className="flex items-center gap-4">
             {user && user.role ? (
@@ -69,7 +69,7 @@ export default function LandingPage() {
             <span className="text-[#F5A623]">its own stage.</span>
           </h1>
           <p className="text-base text-[#8A8A93] leading-relaxed max-w-xl mb-10">
-            Stop competing with short-form content. Podlyzer is a dedicated platform where podcasters connect directly with listeners who are searching for exactly what you create.
+            Stop competing with short-form content. Audioraq is a dedicated platform where podcasters connect directly with listeners who are searching for exactly what you create.
           </p>
           <div className="flex flex-wrap gap-4">
             <Link
@@ -96,7 +96,7 @@ export default function LandingPage() {
       <section className="py-24 px-6 md:px-8 lg:px-12">
         <div className="max-w-6xl mx-auto">
           <div className="text-center mb-16 opacity-0 animate-fade-in-up stagger-1">
-            <span className="text-xs uppercase tracking-[0.2em] font-semibold text-[#F5A623] mb-4 block">Why Podlyzer</span>
+            <span className="text-xs uppercase tracking-[0.2em] font-semibold text-[#F5A623] mb-4 block">Why Audioraq</span>
             <h2 className="font-['Outfit'] text-2xl sm:text-3xl lg:text-4xl tracking-tight font-semibold text-white">
               Built exclusively for podcasts
             </h2>
@@ -163,9 +163,9 @@ export default function LandingPage() {
         <div className="max-w-6xl mx-auto flex items-center justify-between">
           <div className="flex items-center gap-2">
             <Microphone weight="bold" className="text-[#F5A623] w-4 h-4" />
-            <span className="text-sm text-[#8A8A93]">Podlyzer</span>
+            <span className="text-sm text-[#8A8A93]">Audioraq</span>
           </div>
-          <span className="text-xs text-[#8A8A93]">&copy; 2026 Podlyzer</span>
+          <span className="text-xs text-[#8A8A93]">&copy; 2026 Audioraq</span>
         </div>
       </footer>
     </div>

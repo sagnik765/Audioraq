@@ -1,0 +1,12 @@
+.git
+.gitignore
+.emergent
+frontend/node_modules
+frontend/build
+backend/__pycache__
+**/__pycache__
+**/*.pyc
+tests
+test_reports
+test_result.md
+backend_test.py

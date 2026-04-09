@@ -35,6 +35,14 @@ Podlyzer is a platform built exclusively for podcasts. Creators upload directly 
 - **JWT Authentication** — Secure httpOnly cookie-based sessions with refresh tokens, brute force protection, and admin seeding
 - **Cloud Object Storage** — Podcast media files stored via Emergent Object Storage with streaming playback
 
+### Planned Roadmap
+- **Shows + Episodes** — Move from flat uploads to show-based publishing with episodes
+- **Personalized Home Feed** — Separate listener home from browse/exploration
+- **Episode Detail Pages** — Add show notes, related episodes, saves, and follows
+- **Public Browse** — Let new visitors explore before signup
+- **Listening Retention** — Continue listening, history, queues, and saves
+- **Creator Platform** — Richer publish flow, post-publish editing, analytics, and RSS import
+
 ---
 
 ## Tech Stack
@@ -80,8 +88,8 @@ Podlyzer is a platform built exclusively for podcasts. Creators upload directly 
 **Backend** (`/backend/.env`):
 ```
 MONGO_URL="mongodb://localhost:27017"
-DB_NAME="test_database"
-CORS_ORIGINS="*"
+DB_NAME="podlyzer"
+CORS_ORIGINS="http://localhost:3000,http://127.0.0.1:3000"
 JWT_SECRET="<your-64-char-hex-secret>"
 ADMIN_EMAIL="admin@podcasthub.com"
 ADMIN_PASSWORD="admin123"
@@ -108,6 +116,37 @@ yarn start
 ```
 
 The app will be available at `http://localhost:3000`.
+
+### Run In One Service
+
+For production, the backend can serve the built React app so auth stays on the same origin and cookie handling remains simple. If `REACT_APP_BACKEND_URL` is unset during the frontend build, the UI automatically talks to `/api` on the same host.
+
+```bash
+docker build -t podlyzer .
+docker run --rm -p 8001:8001 \
+  -e MONGO_URL="<your-mongodb-url>" \
+  -e DB_NAME="podlyzer" \
+  -e JWT_SECRET="<your-64-char-hex-secret>" \
+  -e ADMIN_EMAIL="admin@podlyzer.com" \
+  -e ADMIN_PASSWORD="admin123" \
+  -e COOKIE_SECURE="true" \
+  -e COOKIE_SAMESITE="lax" \
+  podlyzer
+```
+
+Then open `http://localhost:8001`.
+
+### Railway Deployment
+
+This repo now includes a root `Dockerfile` and `railway.toml` so Railway can deploy it as a single web service.
+
+Recommended setup:
+
+1. Create a Railway project.
+2. Add a MongoDB service from the `mongo` template.
+3. Add a service from this repo and let Railway build from the root `Dockerfile`.
+4. Set these variables on the app service: `MONGO_URL`, `DB_NAME`, `JWT_SECRET`, `ADMIN_EMAIL`, `ADMIN_PASSWORD`, `COOKIE_SECURE=true`, `COOKIE_SAMESITE=lax`.
+5. Deploy and open the generated domain.
 
 ---
 

@@ -10,6 +10,9 @@ import RegisterPage from "./pages/RegisterPage";
 import UserDashboard from "./pages/UserDashboard";
 import PodcasterDashboard from "./pages/PodcasterDashboard";
 import BrowsePage from "./pages/BrowsePage";
+import EpisodeDetailPage from "./pages/EpisodeDetailPage";
+import ShowPage from "./pages/ShowPage";
+import SettingsPage from "./pages/SettingsPage";
 
 function ProtectedRoute({ children, allowedRoles }) {
   const { user, loading } = useAuth();
@@ -58,7 +61,10 @@ function AppRoutes() {
         <Route path="/register" element={<PublicRoute><RegisterPage /></PublicRoute>} />
         <Route path="/dashboard" element={<ProtectedRoute allowedRoles={['user', 'admin']}><UserDashboard /></ProtectedRoute>} />
         <Route path="/dashboard/podcaster" element={<ProtectedRoute allowedRoles={['podcaster']}><PodcasterDashboard /></ProtectedRoute>} />
-        <Route path="/browse" element={<ProtectedRoute><BrowsePage /></ProtectedRoute>} />
+        <Route path="/settings" element={<ProtectedRoute><SettingsPage /></ProtectedRoute>} />
+        <Route path="/browse" element={<BrowsePage />} />
+        <Route path="/shows/:showId" element={<ShowPage />} />
+        <Route path="/episodes/:podcastId" element={<EpisodeDetailPage />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
       <PlayerBar />
