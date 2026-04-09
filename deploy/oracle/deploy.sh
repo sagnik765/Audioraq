@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+ENV_FILE="${SCRIPT_DIR}/oracle.env"
+COMPOSE_FILE="${SCRIPT_DIR}/docker-compose.oracle.yml"
+
+if [[ ! -f "${ENV_FILE}" ]]; then
+  cp "${SCRIPT_DIR}/oracle.env.example" "${ENV_FILE}"
+  echo "Created ${ENV_FILE}. Fill in the secrets and rerun the script."
+  exit 1
+fi
+
+cd "${ROOT_DIR}"
+
+docker compose --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" up -d --build
+docker compose --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" ps
+
+echo
+echo "Audioraq is deploying on Oracle Cloud."
+echo "When DNS is pointed at the instance, verify: https://www.audioraq.com/api/health"

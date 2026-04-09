@@ -1,0 +1,8 @@
+{$APEX_DOMAIN} {
+    redir https://{$WWW_DOMAIN}{uri} permanent
+}
+
+{$WWW_DOMAIN} {
+    encode gzip
+    reverse_proxy app:8001
+}

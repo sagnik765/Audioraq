@@ -31,7 +31,7 @@ Audioraq is a podcast-first listening and creator platform built for long-form a
 | Database | MongoDB |
 | Storage | Emergent Object Storage |
 | AI | Emergent Integrations + LLM-backed generation/recommendation helpers |
-| Deployment | Docker, Koyeb, MongoDB Atlas |
+| Deployment | Docker, Oracle Cloud Infrastructure, MongoDB |
 
 ## Local Development
 
@@ -98,46 +98,91 @@ docker run --rm -p 8001:8001 \
 
 Then open `http://localhost:8001`.
 
-## Recommended Deployment: Koyeb + MongoDB Atlas
+## Recommended Deployment: Oracle Cloud Always Free
 
-This repo is now prepared to deploy cleanly on Koyeb from GitHub using the root Dockerfile, with MongoDB Atlas as the external database.
+This repo is now prepared to deploy cleanly on an Oracle Cloud Infrastructure Always Free compute instance using Docker Compose. The Oracle path keeps the app and MongoDB on the same VM so you do not need a separate paid database service.
 
-### 1. Create MongoDB Atlas
+### Recommended Oracle shape
 
-Create an Atlas free cluster, create a database user, and add a network access rule that allows your app to connect. For a hosted app like Koyeb, the practical starting point is usually `0.0.0.0/0` unless you have fixed egress controls.
+Use an Always Free `VM.Standard.A1.Flex` instance in your tenancy home region. A practical starting size for Audioraq is `2 OCPUs / 12 GB RAM`.
 
-Use:
-- Atlas connection string in `MONGO_URL`
-- `DB_NAME=audioraq`
+Important: Oracle documents that idle Always Free compute instances can be reclaimed. For a public app, keep an eye on instance activity and monitoring instead of assuming the VM is permanently reserved.
 
-### 2. Create a Koyeb web service from GitHub
+### 1. Create the Oracle VM
 
-Use this repository as the source and let Koyeb build from the root Dockerfile.
+Create a public Linux instance and keep the public IPv4 address stable by assigning a reserved public IP.
 
-Recommended Koyeb settings:
-- Service type: `Web Service`
-- Builder: `Dockerfile`
-- Exposed port: `8001`
-- Health check path: `/api/health`
+Open inbound traffic for:
+- `22` for SSH
+- `80` for HTTP
+- `443` for HTTPS
 
-Environment variables:
-- `MONGO_URL`
-- `DB_NAME=audioraq`
+### 2. Bootstrap the instance
+
+SSH to the instance, clone this repository, and run:
+
+```bash
+bash deploy/oracle/provision-ubuntu.sh
+```
+
+Reconnect your shell after the script finishes so Docker group membership applies.
+
+### 3. Configure secrets and domains
+
+Copy the Oracle env template:
+
+```bash
+cp deploy/oracle/oracle.env.example deploy/oracle/oracle.env
+```
+
+Fill in:
+- `MONGO_INITDB_ROOT_PASSWORD`
 - `JWT_SECRET`
-- `ADMIN_EMAIL`
 - `ADMIN_PASSWORD`
 - `EMERGENT_LLM_KEY`
-- `COOKIE_SECURE=true`
-- `COOKIE_SAMESITE=lax`
 
-For the default Koyeb URL, use the app/service name `audioraq` so the generated subdomain is branded around Audioraq instead of Podlyzer.
+The default domains in that file are already:
+- `APEX_DOMAIN=audioraq.com`
+- `WWW_DOMAIN=www.audioraq.com`
 
-### 3. Add the custom domain
+### 4. Launch Audioraq
 
-After the app is healthy on Koyeb:
-- attach `www.audioraq.com` as the custom domain in Koyeb
-- point GoDaddy `www` to the Koyeb target shown in Koyeb’s domain UI
-- forward `audioraq.com` to `https://www.audioraq.com`
+```bash
+bash deploy/oracle/deploy.sh
+```
+
+This starts:
+- MongoDB
+- the Audioraq app
+- Caddy for HTTPS and reverse proxy
+
+### 5. Point GoDaddy to Oracle
+
+In GoDaddy DNS, point the domain directly to the Oracle VM:
+- `A` record for `@` -> your Oracle reserved public IP
+- `A` record for `www` -> the same Oracle reserved public IP
+
+You do not need GoDaddy forwarding with this setup. Caddy handles:
+- `audioraq.com` -> redirect to `https://www.audioraq.com`
+- `https://www.audioraq.com` -> Audioraq app
+
+### 6. Verify
+
+After DNS propagates, test:
+
+```bash
+curl https://www.audioraq.com/api/health
+```
+
+Expected result:
+
+```json
+{"status":"ok"}
+```
+
+### Why this fixes the URL branding
+
+On Oracle, the public URL becomes your own domain, so the user-facing URL is `www.audioraq.com` instead of a provider-generated hostname containing `podlyzer`.
 
 ## Railway To Atlas Migration
 
@@ -170,18 +215,22 @@ Add `--drop-target` if you want the target database cleared before import.
 | GET | `/api/trending` | Trending content |
 | GET | `/api/health` | Deployment health check |
 
+## Alternative Hosted Option
+
+If you later decide you want less infrastructure management, the repo can still be deployed on Koyeb or another Docker host. Oracle Cloud is now the recommended path for the lowest-cost long-running deployment.
+
 ## Notes
 
-- The current Railway files remain in the repo for backwards compatibility, but Koyeb + Atlas is now the recommended deploy target.
-- The GitHub repo name is still unchanged. This update rebrands the product and the deployment path around `Audioraq`, but renaming the repository itself is a separate GitHub action.
+- The current Railway files remain in the repo for backwards compatibility.
+- The GitHub repo name is still unchanged. This update rebrands the product and deployment path around `Audioraq`, but renaming the repository itself is a separate GitHub action.
 
 ## Official References
 
-- [Koyeb Quick Start](https://www.koyeb.com/docs/deploy)
-- [Koyeb Docker image deployment](https://www.koyeb.com/docs/build-and-deploy/prebuilt-docker-images)
-- [Koyeb custom domains](https://www.koyeb.com/docs/run-and-scale/domains)
-- [MongoDB Atlas free cluster setup](https://www.mongodb.com/docs/atlas/tutorial/deploy-free-tier-cluster/)
-- [MongoDB Atlas cluster limitations](https://www.mongodb.com/docs/atlas/reference/limitations/)
+- [Oracle Cloud Infrastructure Free Tier](https://docs.oracle.com/en-us/iaas/Content/FreeTier/freetier.htm)
+- [Oracle Always Free resources](https://docs.oracle.com/en-us/iaas/Content/FreeTier/freetier_topic-Always_Free_Resources.htm)
+- [Create an OCI compute instance](https://docs.oracle.com/en-us/iaas/Content/Compute/Tasks/launchinginstance.htm)
+- [Create security lists](https://docs.oracle.com/en-us/iaas/Content/Network/Concepts/creating-securitylist.htm)
+- [Assign a reserved public IP](https://docs.oracle.com/en-us/iaas/Content/Network/Tasks/reserved-public-ip-assign.htm)
 
 ## License
 
