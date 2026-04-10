@@ -145,6 +145,57 @@ The default domains in that file are already:
 - `APEX_DOMAIN=audioraq.com`
 - `WWW_DOMAIN=www.audioraq.com`
 
+### 3a. Enable Google and Apple sign-in
+
+The live app already contains the full OAuth flow. The last step is adding real provider credentials to [deploy/oracle/oracle.env.example](/Users/sagnikroy/Documents/New%20project/Podlyzer-Centralized-Podcast-Hub/deploy/oracle/oracle.env.example) and your deployed `deploy/oracle/oracle.env`.
+
+Use these exact production callback URLs:
+- Google callback: `https://www.audioraq.com/api/auth/oauth/google/callback`
+- Apple callback: `https://www.audioraq.com/api/auth/oauth/apple/callback`
+
+Set these production env vars:
+
+```dotenv
+GOOGLE_CLIENT_ID=<google-oauth-client-id>
+GOOGLE_CLIENT_SECRET=<google-oauth-client-secret>
+GOOGLE_REDIRECT_URI=https://www.audioraq.com/api/auth/oauth/google/callback
+
+APPLE_CLIENT_ID=<apple-services-id>
+APPLE_TEAM_ID=<apple-team-id>
+APPLE_KEY_ID=<apple-key-id>
+APPLE_PRIVATE_KEY=-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----
+APPLE_REDIRECT_URI=https://www.audioraq.com/api/auth/oauth/apple/callback
+```
+
+#### Google Cloud
+
+1. Open Google Cloud Console and create or select the Audioraq project.
+2. Configure the OAuth consent screen with app name `Audioraq`, your support email, and the authorized domain `audioraq.com`.
+3. Create an OAuth client of type `Web application`.
+4. Add this redirect URI:
+   - `https://www.audioraq.com/api/auth/oauth/google/callback`
+5. Copy the Google client ID and secret into `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET`.
+
+#### Apple Developer
+
+1. In Apple Developer, create or use an App ID with `Sign in with Apple` enabled.
+2. Create a `Services ID`. This Services ID becomes `APPLE_CLIENT_ID`.
+3. Under the Services ID configuration, enable `Sign in with Apple` for the web.
+4. Set:
+   - Primary App ID: your Apple app identifier with Sign in with Apple enabled
+   - Domains and subdomains: `www.audioraq.com`, `audioraq.com`
+   - Return URL: `https://www.audioraq.com/api/auth/oauth/apple/callback`
+5. Create a `Sign in with Apple` key, download the `.p8` file once, and copy:
+   - `APPLE_TEAM_ID`
+   - `APPLE_KEY_ID`
+   - the `.p8` contents into `APPLE_PRIVATE_KEY`
+
+Important:
+- Store `APPLE_PRIVATE_KEY` as one line with literal `\n` escapes in the env file.
+- If you want extra safety, you can also add the apex callback URL in each provider console:
+  - `https://audioraq.com/api/auth/oauth/google/callback`
+  - `https://audioraq.com/api/auth/oauth/apple/callback`
+
 ### 4. Launch Audioraq
 
 ```bash
@@ -172,12 +223,19 @@ After DNS propagates, test:
 
 ```bash
 curl https://www.audioraq.com/api/health
+curl https://www.audioraq.com/api/auth/social/providers
 ```
 
 Expected result:
 
 ```json
 {"status":"ok"}
+```
+
+And after the provider secrets are added:
+
+```json
+{"google":true,"apple":true}
 ```
 
 ### Why this fixes the URL branding
