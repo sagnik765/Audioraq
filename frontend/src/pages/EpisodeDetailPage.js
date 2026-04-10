@@ -294,6 +294,17 @@ export default function EpisodeDetailPage() {
                 <p className="text-xs text-[#8A8A93] uppercase tracking-[0.16em]">
                   Status: {episode.moderation_status || 'clear'}
                 </p>
+                {episode.media_reviewed && (
+                  <p className="text-xs text-[#8A8A93] mt-2">
+                    Media transcript reviewed via {episode.media_review_provider || 'transcription'}.
+                  </p>
+                )}
+                {episode.media_transcript_excerpt && (
+                  <div className="mt-3 rounded-xl border border-[#1F1F24] bg-[#141417] px-3 py-3">
+                    <p className="text-[11px] uppercase tracking-[0.18em] text-[#8A8A93] mb-2">Transcript excerpt used for review</p>
+                    <p className="text-sm text-[#D8D8DE] whitespace-pre-wrap">{episode.media_transcript_excerpt}</p>
+                  </div>
+                )}
               </div>
             )}
 

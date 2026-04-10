@@ -8,4 +8,9 @@ python-dotenv==1.2.1
 python-multipart==0.0.20
 requests==2.32.5
 dnspython==2.7.0
+cryptography==46.0.5
+google-auth==2.49.1
+setuptools==80.9.0
+wheel==0.45.1
+vosk==0.3.45
 emergentintegrations @ https://d33sy5i8bnduwe.cloudfront.net/simple/emergentintegrations/emergentintegrations-0.1.1-py3-none-any.whl

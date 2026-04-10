@@ -20,13 +20,19 @@ import logging
 import os
 import re
 import requests
+import secrets
+import shutil
+import subprocess
+import tempfile
 import uuid
+import wave
 import xml.etree.ElementTree as ET
+import zipfile
 
 from bson import ObjectId
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Literal, Optional, Set
-from urllib.parse import urlparse
+from urllib.parse import urlencode, urlparse
 
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
@@ -45,6 +51,9 @@ STORAGE_URL = "https://integrations.emergentagent.com/objstore/api/v1/storage"
 EMERGENT_KEY = os.environ.get("EMERGENT_LLM_KEY")
 APP_NAME = "audioraq"
 storage_key = None
+pending_social_cookie_name = "pending_social_auth"
+transcription_model_cache = None
+transcription_model_path = None
 
 DEFAULT_SHOW_CATEGORY = "general"
 MAX_LIBRARY_ITEMS = 2000
@@ -56,10 +65,156 @@ PUBLICATION_STATUS_DRAFT = "draft"
 MODERATION_STATUS_CLEAR = "clear"
 MODERATION_STATUS_REVIEW = "review"
 MODERATION_STATUS_BLOCKED = "blocked"
+SOCIAL_PROVIDER_GOOGLE = "google"
+SOCIAL_PROVIDER_APPLE = "apple"
+SUPPORTED_SOCIAL_PROVIDERS = {SOCIAL_PROVIDER_GOOGLE, SOCIAL_PROVIDER_APPLE}
 
 
 def now_iso():
     return datetime.now(timezone.utc).isoformat()
+
+
+def parse_int_env(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        return default
+
+
+def get_google_client_id() -> str:
+    return os.environ.get("GOOGLE_CLIENT_ID", "").strip()
+
+
+def get_google_client_secret() -> str:
+    return os.environ.get("GOOGLE_CLIENT_SECRET", "").strip()
+
+
+def is_google_oauth_configured() -> bool:
+    return bool(get_google_client_id() and get_google_client_secret())
+
+
+def get_apple_client_id() -> str:
+    return os.environ.get("APPLE_CLIENT_ID", "").strip()
+
+
+def get_apple_team_id() -> str:
+    return os.environ.get("APPLE_TEAM_ID", "").strip()
+
+
+def get_apple_key_id() -> str:
+    return os.environ.get("APPLE_KEY_ID", "").strip()
+
+
+def get_apple_private_key() -> str:
+    return os.environ.get("APPLE_PRIVATE_KEY", "").replace("\\n", "\n").strip()
+
+
+def is_apple_oauth_configured() -> bool:
+    return bool(get_apple_client_id() and get_apple_team_id() and get_apple_key_id() and get_apple_private_key())
+
+
+def is_social_provider_configured(provider: str) -> bool:
+    if provider == SOCIAL_PROVIDER_GOOGLE:
+        return is_google_oauth_configured()
+    if provider == SOCIAL_PROVIDER_APPLE:
+        return is_apple_oauth_configured()
+    return False
+
+
+def get_public_request_origin(request: Request) -> str:
+    forwarded_proto = (request.headers.get("x-forwarded-proto") or "").split(",")[0].strip()
+    forwarded_host = (request.headers.get("x-forwarded-host") or "").split(",")[0].strip()
+    scheme = forwarded_proto or request.url.scheme
+    host = forwarded_host or request.headers.get("host") or request.url.netloc
+    return f"{scheme}://{host}".rstrip("/")
+
+
+def get_allowed_return_origins(request: Request) -> Set[str]:
+    allowed = {get_public_request_origin(request)}
+    for origin in [item.strip().rstrip("/") for item in os.environ.get("CORS_ORIGINS", "").split(",") if item.strip()]:
+        allowed.add(origin)
+    return allowed
+
+
+def sanitize_return_origin(candidate: Optional[str], request: Request) -> str:
+    normalized = (candidate or "").strip().rstrip("/")
+    if normalized and normalized in get_allowed_return_origins(request):
+        return normalized
+    return get_public_request_origin(request)
+
+
+def build_frontend_url(base_origin: str, path: str, params: Optional[Dict[str, Any]] = None) -> str:
+    normalized_origin = (base_origin or "").rstrip("/")
+    normalized_path = path if path.startswith("/") else f"/{path}"
+    query_params = {key: value for key, value in (params or {}).items() if value not in [None, ""]}
+    if not query_params:
+        return f"{normalized_origin}{normalized_path}"
+    return f"{normalized_origin}{normalized_path}?{urlencode(query_params)}"
+
+
+def get_oauth_redirect_uri(request: Request, provider: str) -> str:
+    base_origin = get_public_request_origin(request)
+    override_name = f"{provider.upper()}_REDIRECT_URI"
+    override = os.environ.get(override_name, "").strip()
+    if override:
+        return override
+    return f"{base_origin}/api/auth/oauth/{provider}/callback"
+
+
+def build_oauth_state(provider: str, intent: str, return_origin: str, role_hint: str = "") -> str:
+    payload = {
+        "type": "oauth_state",
+        "provider": provider,
+        "intent": "register" if intent == "register" else "login",
+        "return_origin": return_origin,
+        "role_hint": role_hint if role_hint in {"user", "podcaster"} else "",
+        "nonce": secrets.token_urlsafe(24),
+        "exp": datetime.now(timezone.utc) + timedelta(minutes=15),
+    }
+    return jwt.encode(payload, get_jwt_secret(), algorithm=JWT_ALGORITHM)
+
+
+def decode_oauth_state(state: str, expected_provider: str) -> Dict[str, Any]:
+    try:
+        payload = jwt.decode(state, get_jwt_secret(), algorithms=[JWT_ALGORITHM])
+    except jwt.PyJWTError:
+        raise HTTPException(status_code=400, detail="Invalid social sign-in state")
+    if payload.get("type") != "oauth_state" or payload.get("provider") != expected_provider:
+        raise HTTPException(status_code=400, detail="Invalid social sign-in state")
+    return payload
+
+
+def social_provider_record(provider: str, profile: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "sub": profile["sub"],
+        "email": (profile.get("email") or "").lower().strip(),
+        "email_verified": bool(profile.get("email_verified")),
+        "linked_at": now_iso(),
+    }
+
+
+def build_social_state_error_redirect(request: Request, return_origin: str, message: str) -> RedirectResponse:
+    destination = build_frontend_url(return_origin, "/login", {"auth_error": message[:180]})
+    response = RedirectResponse(destination, status_code=302)
+    clear_pending_social_cookie(response)
+    return response
+
+
+def clear_pending_social_cookie(response: Response):
+    cookie_settings = {"path": "/"}
+    cookie_domain = os.environ.get("COOKIE_DOMAIN")
+    if cookie_domain:
+        cookie_settings["domain"] = cookie_domain
+    response.delete_cookie(pending_social_cookie_name, **cookie_settings)
+
+
+def set_pending_social_cookie(response: Response, session_id: str, request: Optional[Request] = None):
+    cookie_settings = get_cookie_settings(request)
+    response.set_cookie(key=pending_social_cookie_name, value=session_id, max_age=900, **cookie_settings)
+
+
+def get_pending_social_cookie(request: Request) -> str:
+    return (request.cookies.get(pending_social_cookie_name) or "").strip()
 
 
 def normalize_content_rating(value: Optional[str]) -> str:
@@ -281,6 +436,8 @@ def hash_password(password):
 
 
 def verify_password(plain_password, hashed_password):
+    if not hashed_password:
+        return False
     return bcrypt.checkpw(plain_password.encode("utf-8"), hashed_password.encode("utf-8"))
 
 
@@ -490,6 +647,7 @@ def build_episode_review_text(
     description: str,
     category: str,
     generation: Optional[Dict[str, Any]] = None,
+    media_analysis: Optional[Dict[str, Any]] = None,
 ) -> str:
     parts = [
         f"Show title: {show.get('title', '')}",
@@ -508,6 +666,14 @@ def build_episode_review_text(
                 f"Show notes summary: {generation.get('show_notes_summary', '')}",
             ]
         )
+    if media_analysis and media_analysis.get("transcript_excerpt"):
+        parts.extend(
+            [
+                f"Media transcript status: {media_analysis.get('status', 'unknown')}",
+                f"Media transcript provider: {media_analysis.get('provider', '')}",
+                f"Media transcript excerpt: {media_analysis.get('transcript_excerpt', '')}",
+            ]
+        )
     return "\n".join(part.strip() for part in parts if str(part).strip()).strip()
 
 
@@ -518,12 +684,13 @@ def heuristic_episode_safety_review(source_text: str, selected_rating: str = ALL
         "self-harm": ["suicide", "self-harm", "kill yourself", "cut yourself"],
         "graphic violence": ["beheading", "torture", "massacre", "bomb-making"],
         "explicit sexual content": ["porn", "hardcore sex", "fetish", "sexual assault"],
+        "dangerous instructions": ["drink bleach", "build a bomb", "stop taking insulin", "ignore your doctor"],
     }
     flags = [label for label, terms in rule_map.items() if any(term in lowered for term in terms)]
 
     status = MODERATION_STATUS_CLEAR
     risk_level = "low"
-    summary = "No obvious hateful or harmful risk detected in the episode metadata."
+    summary = "No obvious hateful or harmful risk detected in the episode content."
     if flags:
         status = MODERATION_STATUS_REVIEW
         risk_level = "medium"
@@ -548,9 +715,14 @@ def heuristic_episode_safety_review(source_text: str, selected_rating: str = ALL
     }
 
 
-def normalize_episode_safety_result(raw: Any, fallback: Dict[str, Any], selected_rating: str) -> Dict[str, Any]:
+def normalize_episode_safety_result(
+    raw: Any,
+    fallback: Dict[str, Any],
+    selected_rating: str,
+    media_analysis: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
     if not isinstance(raw, dict):
-        return fallback
+        raw = {}
 
     status = str(raw.get("status") or fallback.get("status") or MODERATION_STATUS_CLEAR).strip().lower()
     if status not in {MODERATION_STATUS_CLEAR, MODERATION_STATUS_REVIEW, MODERATION_STATUS_BLOCKED}:
@@ -565,16 +737,219 @@ def normalize_episode_safety_result(raw: Any, fallback: Dict[str, Any], selected
     recommended_age_gate = normalize_content_rating(
         raw.get("recommended_age_gate") or selected_rating or fallback.get("recommended_age_gate")
     )
+    media_fields = {
+        "media_reviewed": False,
+        "media_review_status": "not_requested",
+        "media_review_provider": "",
+        "media_transcript_excerpt": "",
+        "media_transcript_word_count": 0,
+        "media_transcript_truncated": False,
+        "media_review_error": "",
+    }
+    if media_analysis:
+        media_fields.update(
+            {
+                "media_reviewed": bool(media_analysis.get("media_reviewed")),
+                "media_review_status": media_analysis.get("status", "unknown"),
+                "media_review_provider": media_analysis.get("provider", ""),
+                "media_transcript_excerpt": media_analysis.get("transcript_excerpt", "")[:2400],
+                "media_transcript_word_count": int(media_analysis.get("word_count") or 0),
+                "media_transcript_truncated": bool(media_analysis.get("transcript_truncated")),
+                "media_review_error": str(media_analysis.get("error") or "")[:240],
+            }
+        )
 
-    return {
+    normalized = {
         "status": status,
         "risk_level": risk_level,
         "flags": flags,
         "summary": summary or fallback.get("summary", ""),
         "recommended_age_gate": recommended_age_gate,
-        "provider": raw.get("provider") or "emergent",
+        "provider": raw.get("provider") or fallback.get("provider") or "emergent",
         "reviewed_at": now_iso(),
     }
+    normalized.update(media_fields)
+    return normalized
+
+
+def build_transcript_excerpt(transcript_text: str, max_chars: int = 2600) -> str:
+    cleaned = re.sub(r"\s+", " ", (transcript_text or "")).strip()
+    if len(cleaned) <= max_chars:
+        return cleaned
+
+    risk_terms = [
+        "suicide",
+        "kill yourself",
+        "white power",
+        "heil hitler",
+        "bomb",
+        "drink bleach",
+        "sexual assault",
+        "torture",
+    ]
+    highlighted = []
+    for sentence in re.split(r"(?<=[.!?])\s+", cleaned):
+        if any(term in sentence.lower() for term in risk_terms):
+            highlighted.append(sentence.strip())
+        if len(highlighted) >= 4:
+            break
+
+    half = max_chars // 2
+    head = cleaned[:half].rsplit(" ", 1)[0]
+    tail = cleaned[-half:].lstrip()
+    parts = []
+    if highlighted:
+        parts.append("Flagged transcript moments: " + " | ".join(highlighted[:4]))
+    parts.append(head)
+    parts.append("...")
+    parts.append(tail)
+    excerpt = "\n".join(part for part in parts if part)
+    return excerpt[: max_chars + 400]
+
+
+def get_vosk_model():
+    global transcription_model_cache, transcription_model_path
+    configured_model_dir = Path(os.environ.get("VOSK_MODEL_DIR", "/tmp/vosk-model-small-en-us-0.15"))
+    configured_model_url = os.environ.get(
+        "VOSK_MODEL_URL",
+        "https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip",
+    ).strip()
+    if transcription_model_cache is not None and transcription_model_path == configured_model_dir:
+        return transcription_model_cache
+
+    model_dir = configured_model_dir
+    if not (model_dir / "am").exists():
+        model_dir.parent.mkdir(parents=True, exist_ok=True)
+        archive_path = model_dir.parent / f"{model_dir.name}.zip"
+        extract_parent = model_dir.parent / f"{model_dir.name}.extract"
+        if extract_parent.exists():
+            shutil.rmtree(extract_parent)
+        if archive_path.exists():
+            archive_path.unlink()
+
+        with requests.get(configured_model_url, stream=True, timeout=300) as response:
+            response.raise_for_status()
+            with open(archive_path, "wb") as archive_file:
+                for chunk in response.iter_content(chunk_size=1024 * 1024):
+                    if chunk:
+                        archive_file.write(chunk)
+
+        with zipfile.ZipFile(archive_path, "r") as archive:
+            archive.extractall(extract_parent)
+
+        extracted_dirs = [path for path in extract_parent.iterdir() if path.is_dir()]
+        if not extracted_dirs:
+            raise RuntimeError("Downloaded Vosk model archive did not contain a model directory")
+        extracted_model_dir = extracted_dirs[0]
+        if model_dir.exists():
+            shutil.rmtree(model_dir)
+        shutil.move(str(extracted_model_dir), str(model_dir))
+        shutil.rmtree(extract_parent, ignore_errors=True)
+        archive_path.unlink(missing_ok=True)
+
+    from vosk import Model, SetLogLevel
+
+    SetLogLevel(-1)
+    transcription_model_cache = Model(str(model_dir))
+    transcription_model_path = model_dir
+    return transcription_model_cache
+
+
+def transcribe_media_for_safety(data: bytes, filename: str, content_type: str) -> Dict[str, Any]:
+    if not data:
+        return {
+            "status": "empty_upload",
+            "provider": "",
+            "media_reviewed": False,
+            "transcript_text": "",
+            "transcript_excerpt": "",
+            "word_count": 0,
+            "transcript_truncated": False,
+            "error": "",
+        }
+
+    max_seconds = max(0, parse_int_env("MAX_MEDIA_TRANSCRIPT_SECONDS", 1800))
+    suffix = Path(filename or "upload.bin").suffix or ".bin"
+    extracted_path = ""
+    source_path = ""
+
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as media_file:
+            media_file.write(data)
+            source_path = media_file.name
+
+        extracted_path = f"{source_path}.wav"
+        ffmpeg_cmd = ["ffmpeg", "-y", "-i", source_path]
+        if max_seconds:
+            ffmpeg_cmd.extend(["-t", str(max_seconds)])
+        ffmpeg_cmd.extend(["-vn", "-ac", "1", "-ar", "16000", extracted_path])
+        ffmpeg_run = subprocess.run(ffmpeg_cmd, capture_output=True, text=True, timeout=240)
+        if ffmpeg_run.returncode != 0:
+            raise RuntimeError((ffmpeg_run.stderr or ffmpeg_run.stdout or "ffmpeg conversion failed").strip())
+
+        from vosk import KaldiRecognizer
+
+        model = get_vosk_model()
+        transcript_parts = []
+        with wave.open(extracted_path, "rb") as wav_file:
+            recognizer = KaldiRecognizer(model, wav_file.getframerate())
+            recognizer.SetWords(False)
+            while True:
+                audio_chunk = wav_file.readframes(4000)
+                if not audio_chunk:
+                    break
+                if recognizer.AcceptWaveform(audio_chunk):
+                    payload = json.loads(recognizer.Result())
+                    text = str(payload.get("text") or "").strip()
+                    if text:
+                        transcript_parts.append(text)
+            final_payload = json.loads(recognizer.FinalResult())
+            final_text = str(final_payload.get("text") or "").strip()
+            if final_text:
+                transcript_parts.append(final_text)
+
+        transcript_text = " ".join(transcript_parts).strip()
+        if not transcript_text:
+            return {
+                "status": "no_speech_detected",
+                "provider": "vosk:small-en-us",
+                "media_reviewed": True,
+                "transcript_text": "",
+                "transcript_excerpt": "",
+                "word_count": 0,
+                "transcript_truncated": bool(max_seconds),
+                "error": "",
+            }
+
+        return {
+            "status": "transcribed",
+            "provider": "vosk:small-en-us",
+            "media_reviewed": True,
+            "transcript_text": transcript_text,
+            "transcript_excerpt": build_transcript_excerpt(transcript_text),
+            "word_count": len(transcript_text.split()),
+            "transcript_truncated": bool(max_seconds),
+            "error": "",
+        }
+    except Exception as exc:
+        logger.error(f"Media transcription failed for {filename or content_type}: {exc}")
+        return {
+            "status": "transcription_failed",
+            "provider": "",
+            "media_reviewed": False,
+            "transcript_text": "",
+            "transcript_excerpt": "",
+            "word_count": 0,
+            "transcript_truncated": bool(max_seconds),
+            "error": str(exc)[:240],
+        }
+    finally:
+        for path in [source_path, extracted_path]:
+            if path and os.path.exists(path):
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
 
 
 async def review_episode_safety(
@@ -584,11 +959,15 @@ async def review_episode_safety(
     category: str,
     selected_rating: str = ALL_AGES_RATING,
     generation: Optional[Dict[str, Any]] = None,
+    media_analysis: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    review_text = build_episode_review_text(show, title, description, category, generation=generation)
-    fallback = heuristic_episode_safety_review(review_text, selected_rating=selected_rating)
+    review_text = build_episode_review_text(show, title, description, category, generation=generation, media_analysis=media_analysis)
+    heuristic_input = review_text
+    if media_analysis and media_analysis.get("transcript_text"):
+        heuristic_input = f"{review_text}\n\nFull transcript text:\n{media_analysis.get('transcript_text', '')}"
+    fallback = heuristic_episode_safety_review(heuristic_input, selected_rating=selected_rating)
     if not EMERGENT_KEY:
-        return fallback
+        return normalize_episode_safety_result({}, fallback, selected_rating, media_analysis=media_analysis)
 
     try:
         from emergentintegrations.llm.chat import LlmChat, UserMessage
@@ -601,11 +980,12 @@ async def review_episode_safety(
             "recommended_age_gate": "all_ages|18+",
         }
         prompt = (
-            "Review this podcast episode metadata for hateful, harmful, or unsafe viewer-facing content.\n"
-            "Focus on whether the available title, description, and AI-generated copy suggest hate speech, "
-            "self-harm encouragement, violent instructions, or explicit sexual content.\n"
+            "Review this podcast episode package for hateful, harmful, or unsafe listener-facing content.\n"
+            "Use the metadata, AI-generated copy, and uploaded-media transcript excerpt when available.\n"
+            "Focus on hate speech, self-harm encouragement, violent or illegal instructions, dangerous health advice, "
+            "or explicit sexual content.\n"
             "Return JSON only.\n\n"
-            f"Episode metadata:\n{review_text}\n\n"
+            f"Episode package:\n{review_text}\n\n"
             f"Return JSON matching this schema exactly:\n{json.dumps(schema, ensure_ascii=True)}"
         )
         chat = LlmChat(
@@ -615,10 +995,10 @@ async def review_episode_safety(
         ).with_model("openai", "gpt-5.2")
         response = await chat.send_message(UserMessage(text=prompt))
         raw = parse_json_payload(response)
-        return normalize_episode_safety_result(raw, fallback, selected_rating)
+        return normalize_episode_safety_result(raw, fallback, selected_rating, media_analysis=media_analysis)
     except Exception as exc:
         logger.error(f"Episode safety review error: {exc}")
-        return fallback
+        return normalize_episode_safety_result({}, fallback, selected_rating, media_analysis=media_analysis)
 
 
 def build_fallback_ai_generation(brief: Dict[str, Any], show: Dict[str, Any]) -> Dict[str, Any]:
@@ -1202,6 +1582,10 @@ async def enrich_episodes(episodes: List[Dict], current_user=None):
         cleaned["moderation_status"] = cleaned.get("moderation_status", MODERATION_STATUS_CLEAR)
         cleaned["moderation"] = cleaned.get("moderation", {}) or {}
         cleaned["moderation_summary"] = cleaned["moderation"].get("summary", "")
+        cleaned["media_reviewed"] = bool(cleaned["moderation"].get("media_reviewed"))
+        cleaned["media_review_status"] = cleaned["moderation"].get("media_review_status", "")
+        cleaned["media_review_provider"] = cleaned["moderation"].get("media_review_provider", "")
+        cleaned["media_transcript_excerpt"] = cleaned["moderation"].get("media_transcript_excerpt", "")
         cleaned["is_playable"] = bool(cleaned.get("is_playable", bool(cleaned.get("media_path") or cleaned.get("external_media_url"))))
         cleaned["like_count"] = int(engagement.get("like_count", cleaned.get("like_count", 0)) or 0)
         cleaned["rating_count"] = int(engagement.get("rating_count", cleaned.get("rating_count", 0)) or 0)
@@ -1321,6 +1705,13 @@ async def migrate_existing_shows():
 async def build_user_response(user_doc):
     primary_show = await fetch_primary_show_for_user(user_doc)
     age = normalize_age_value(user_doc.get("age"))
+    auth_providers = sorted(
+        [
+            provider
+            for provider, details in (user_doc.get("auth_providers") or {}).items()
+            if isinstance(details, dict) and details.get("sub")
+        ]
+    )
     return {
         "id": user_id_str(user_doc),
         "email": user_doc["email"],
@@ -1333,6 +1724,8 @@ async def build_user_response(user_doc):
         "podcast_description": user_doc.get("podcast_description", ""),
         "podcast_keywords": user_doc.get("podcast_keywords", []),
         "show_title": user_doc.get("show_title", ""),
+        "avatar_url": user_doc.get("avatar_url", ""),
+        "auth_providers": auth_providers,
         "primary_show": primary_show,
     }
 
@@ -1504,6 +1897,16 @@ class LoginRequest(BaseModel):
     password: str
 
 
+class CompleteSocialSignupRequest(BaseModel):
+    name: Optional[str] = ""
+    role: str
+    phone: Optional[str] = ""
+    age: Optional[int] = None
+    interests: Optional[List[str]] = []
+    podcast_description: Optional[str] = ""
+    show_title: Optional[str] = ""
+
+
 class UpdateInterestsRequest(BaseModel):
     interests: List[str]
 
@@ -1577,7 +1980,11 @@ api_router = APIRouter(prefix="/api")
 @app.on_event("startup")
 async def startup():
     await db.users.create_index("email", unique=True)
+    await db.users.create_index("auth_providers.google.sub", unique=True, sparse=True)
+    await db.users.create_index("auth_providers.apple.sub", unique=True, sparse=True)
     await db.login_attempts.create_index("identifier")
+    await db.social_auth_sessions.create_index("id", unique=True)
+    await db.social_auth_sessions.create_index("expires_at", expireAfterSeconds=0)
     await db.podcasts.create_index("keywords")
     await db.podcasts.create_index("podcaster_id")
     await db.podcasts.create_index("show_id")
@@ -1640,6 +2047,414 @@ async def startup():
         f.write("## Test User\n- Email: testuser@test.com\n- Password: test123\n- Role: user\n\n")
         f.write("## Test Podcaster\n- Email: podcaster@test.com\n- Password: test123\n- Role: podcaster\n\n")
         f.write("## Auth Endpoints\n- POST /api/auth/register\n- POST /api/auth/login\n- POST /api/auth/logout\n- GET /api/auth/me\n- POST /api/auth/refresh\n")
+
+
+def build_social_display_name(email: str = "", fallback_name: str = "") -> str:
+    if (fallback_name or "").strip():
+        return fallback_name.strip()
+    local_part = (email or "").split("@", 1)[0].strip()
+    if not local_part:
+        return "Audioraq Creator"
+    pieces = [piece for piece in re.split(r"[._\-]+", local_part) if piece]
+    pretty = " ".join(piece.capitalize() for piece in pieces[:3]).strip()
+    return pretty or "Audioraq Creator"
+
+
+async def find_user_for_social_profile(provider: str, profile: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    provider_sub = profile.get("sub")
+    if provider_sub:
+        user = await db.users.find_one({f"auth_providers.{provider}.sub": provider_sub})
+        if user:
+            return user
+
+    email = (profile.get("email") or "").lower().strip()
+    if email:
+        return await db.users.find_one({"email": email})
+    return None
+
+
+async def upsert_social_provider_link(user_doc: Dict[str, Any], provider: str, profile: Dict[str, Any]) -> Dict[str, Any]:
+    updates = {
+        f"auth_providers.{provider}": social_provider_record(provider, profile),
+        "updated_at": now_iso(),
+    }
+    if profile.get("picture_url") and not user_doc.get("avatar_url"):
+        updates["avatar_url"] = profile["picture_url"]
+    if profile.get("name") and not user_doc.get("name"):
+        updates["name"] = profile["name"]
+    target_user_id = user_object_id(user_doc)
+    await db.users.update_one({"_id": target_user_id}, {"$set": updates})
+    return await db.users.find_one({"_id": target_user_id})
+
+
+async def complete_social_login_redirect(
+    user_doc: Dict[str, Any],
+    request: Request,
+    return_origin: str,
+) -> RedirectResponse:
+    if user_doc.get("role") == "podcaster":
+        await ensure_primary_show_for_user(user_doc)
+        user_doc = await db.users.find_one({"_id": user_object_id(user_doc)})
+
+    access_token = create_access_token(str(user_doc["_id"]), user_doc["email"])
+    refresh_token = create_refresh_token(str(user_doc["_id"]))
+    destination = "/dashboard/podcaster" if user_doc.get("role") == "podcaster" else "/dashboard"
+    response = RedirectResponse(build_frontend_url(return_origin, destination), status_code=302)
+    set_auth_cookies(response, access_token, refresh_token, request)
+    clear_pending_social_cookie(response)
+    return response
+
+
+async def create_pending_social_session(
+    provider: str,
+    profile: Dict[str, Any],
+    intent: str,
+    return_origin: str,
+    role_hint: str = "",
+) -> str:
+    session_id = str(uuid.uuid4())
+    await db.social_auth_sessions.insert_one(
+        {
+            "id": session_id,
+            "provider": provider,
+            "intent": "register" if intent == "register" else "login",
+            "role_hint": role_hint if role_hint in {"user", "podcaster"} else "",
+            "return_origin": return_origin,
+            "email": (profile.get("email") or "").lower().strip(),
+            "name": build_social_display_name(profile.get("email", ""), profile.get("name", "")),
+            "picture_url": profile.get("picture_url", ""),
+            "provider_sub": profile["sub"],
+            "email_verified": bool(profile.get("email_verified")),
+            "created_at": now_iso(),
+            "expires_at": datetime.now(timezone.utc) + timedelta(minutes=15),
+        }
+    )
+    return session_id
+
+
+async def get_pending_social_session(request: Request) -> Dict[str, Any]:
+    session_id = get_pending_social_cookie(request)
+    if not session_id:
+        raise HTTPException(status_code=404, detail="No pending social sign-up session")
+    session = await db.social_auth_sessions.find_one({"id": session_id})
+    if not session:
+        raise HTTPException(status_code=404, detail="Pending social sign-up session expired")
+    return session
+
+
+def build_google_authorize_url(request: Request, state: str) -> str:
+    params = {
+        "client_id": get_google_client_id(),
+        "redirect_uri": get_oauth_redirect_uri(request, SOCIAL_PROVIDER_GOOGLE),
+        "response_type": "code",
+        "scope": "openid email profile",
+        "state": state,
+        "prompt": "select_account",
+    }
+    return f"https://accounts.google.com/o/oauth2/v2/auth?{urlencode(params)}"
+
+
+def exchange_google_code_for_profile(code: str, request: Request) -> Dict[str, Any]:
+    from google.auth.transport import requests as google_requests
+    from google.oauth2 import id_token as google_id_token
+
+    token_response = requests.post(
+        "https://oauth2.googleapis.com/token",
+        data={
+            "code": code,
+            "client_id": get_google_client_id(),
+            "client_secret": get_google_client_secret(),
+            "redirect_uri": get_oauth_redirect_uri(request, SOCIAL_PROVIDER_GOOGLE),
+            "grant_type": "authorization_code",
+        },
+        timeout=30,
+    )
+    token_response.raise_for_status()
+    token_data = token_response.json()
+    raw_id_token = token_data.get("id_token")
+    if not raw_id_token:
+        raise HTTPException(status_code=502, detail="Google did not return an ID token")
+
+    id_info = google_id_token.verify_oauth2_token(raw_id_token, google_requests.Request(), get_google_client_id())
+    email = (id_info.get("email") or "").lower().strip()
+    if not email:
+        raise HTTPException(status_code=400, detail="Google account did not provide an email address")
+
+    return {
+        "sub": id_info["sub"],
+        "email": email,
+        "email_verified": bool(id_info.get("email_verified")),
+        "name": str(id_info.get("name") or "").strip(),
+        "picture_url": str(id_info.get("picture") or "").strip(),
+    }
+
+
+def generate_apple_client_secret() -> str:
+    now_ts = int(datetime.now(timezone.utc).timestamp())
+    return jwt.encode(
+        {
+            "iss": get_apple_team_id(),
+            "iat": now_ts,
+            "exp": now_ts + 86400 * 180,
+            "aud": "https://appleid.apple.com",
+            "sub": get_apple_client_id(),
+        },
+        get_apple_private_key(),
+        algorithm="ES256",
+        headers={"kid": get_apple_key_id()},
+    )
+
+
+def exchange_apple_code_for_profile(code: str, request: Request, raw_user_payload: str = "") -> Dict[str, Any]:
+    token_response = requests.post(
+        "https://appleid.apple.com/auth/token",
+        data={
+            "client_id": get_apple_client_id(),
+            "client_secret": generate_apple_client_secret(),
+            "code": code,
+            "grant_type": "authorization_code",
+            "redirect_uri": get_oauth_redirect_uri(request, SOCIAL_PROVIDER_APPLE),
+        },
+        timeout=30,
+    )
+    token_response.raise_for_status()
+    token_data = token_response.json()
+    raw_id_token = token_data.get("id_token")
+    if not raw_id_token:
+        raise HTTPException(status_code=502, detail="Apple did not return an ID token")
+
+    jwks_client = jwt.PyJWKClient("https://appleid.apple.com/auth/keys")
+    signing_key = jwks_client.get_signing_key_from_jwt(raw_id_token)
+    claims = jwt.decode(
+        raw_id_token,
+        signing_key.key,
+        algorithms=["RS256"],
+        audience=get_apple_client_id(),
+        issuer="https://appleid.apple.com",
+    )
+
+    name = ""
+    if raw_user_payload:
+        try:
+            user_payload = json.loads(raw_user_payload)
+            first_name = str((user_payload.get("name") or {}).get("firstName") or "").strip()
+            last_name = str((user_payload.get("name") or {}).get("lastName") or "").strip()
+            name = " ".join(part for part in [first_name, last_name] if part).strip()
+        except json.JSONDecodeError:
+            name = ""
+
+    return {
+        "sub": claims["sub"],
+        "email": (claims.get("email") or "").lower().strip(),
+        "email_verified": str(claims.get("email_verified") or "").lower() == "true",
+        "name": name,
+        "picture_url": "",
+    }
+
+
+@api_router.get("/auth/social/providers")
+async def get_social_auth_providers():
+    return {
+        "google": is_google_oauth_configured(),
+        "apple": is_apple_oauth_configured(),
+    }
+
+
+@api_router.get("/auth/oauth/{provider}/start")
+async def start_social_auth(
+    provider: str,
+    request: Request,
+    intent: str = "login",
+    return_origin: str = "",
+    role_hint: str = "",
+):
+    provider = provider.strip().lower()
+    if provider not in SUPPORTED_SOCIAL_PROVIDERS:
+        raise HTTPException(status_code=404, detail="Unsupported social sign-in provider")
+    if not is_social_provider_configured(provider):
+        raise HTTPException(status_code=503, detail=f"{provider.title()} sign-in is not configured")
+
+    resolved_intent = "register" if intent == "register" else "login"
+    resolved_return_origin = sanitize_return_origin(return_origin, request)
+    state = build_oauth_state(provider, resolved_intent, resolved_return_origin, role_hint=role_hint)
+
+    if provider == SOCIAL_PROVIDER_GOOGLE:
+        return RedirectResponse(build_google_authorize_url(request, state), status_code=302)
+
+    params = {
+        "client_id": get_apple_client_id(),
+        "redirect_uri": get_oauth_redirect_uri(request, SOCIAL_PROVIDER_APPLE),
+        "response_type": "code",
+        "response_mode": "form_post",
+        "scope": "name email",
+        "state": state,
+    }
+    return RedirectResponse(f"https://appleid.apple.com/auth/authorize?{urlencode(params)}", status_code=302)
+
+
+@api_router.api_route("/auth/oauth/{provider}/callback", methods=["GET", "POST"])
+async def social_auth_callback(provider: str, request: Request):
+    provider = provider.strip().lower()
+    if provider not in SUPPORTED_SOCIAL_PROVIDERS:
+        raise HTTPException(status_code=404, detail="Unsupported social sign-in provider")
+
+    payload_source: Dict[str, Any]
+    if request.method == "POST":
+        form = await request.form()
+        payload_source = dict(form)
+    else:
+        payload_source = dict(request.query_params)
+
+    raw_state = str(payload_source.get("state") or "").strip()
+    if not raw_state:
+        raise HTTPException(status_code=400, detail="Missing social sign-in state")
+
+    state = decode_oauth_state(raw_state, provider)
+    return_origin = sanitize_return_origin(state.get("return_origin"), request)
+
+    if payload_source.get("error"):
+        error_message = str(payload_source.get("error_description") or payload_source.get("error") or "Provider sign-in failed")
+        return build_social_state_error_redirect(request, return_origin, error_message)
+
+    code = str(payload_source.get("code") or "").strip()
+    if not code:
+        return build_social_state_error_redirect(request, return_origin, "Provider sign-in did not return an authorization code")
+
+    try:
+        if provider == SOCIAL_PROVIDER_GOOGLE:
+            profile = exchange_google_code_for_profile(code, request)
+        else:
+            profile = exchange_apple_code_for_profile(code, request, str(payload_source.get("user") or ""))
+    except HTTPException as exc:
+        return build_social_state_error_redirect(request, return_origin, str(exc.detail))
+    except Exception as exc:
+        logger.error(f"{provider.title()} social sign-in failed: {exc}")
+        return build_social_state_error_redirect(request, return_origin, f"{provider.title()} sign-in could not be completed")
+
+    user_doc = await find_user_for_social_profile(provider, profile)
+    if user_doc:
+        user_doc = await upsert_social_provider_link(user_doc, provider, profile)
+        return await complete_social_login_redirect(user_doc, request, return_origin)
+
+    if not profile.get("email"):
+        return build_social_state_error_redirect(
+            request,
+            return_origin,
+            f"{provider.title()} did not share an email address for a new account",
+        )
+
+    session_id = await create_pending_social_session(
+        provider,
+        profile,
+        state.get("intent", "login"),
+        return_origin,
+        role_hint=state.get("role_hint", ""),
+    )
+    response = RedirectResponse(
+        build_frontend_url(return_origin, "/register", {"social": 1, "provider": provider}),
+        status_code=302,
+    )
+    set_pending_social_cookie(response, session_id, request)
+    return response
+
+
+@api_router.get("/auth/social/pending")
+async def get_pending_social_signup(request: Request):
+    session = await get_pending_social_session(request)
+    return {
+        "provider": session["provider"],
+        "intent": session.get("intent", "register"),
+        "role_hint": session.get("role_hint", ""),
+        "email": session.get("email", ""),
+        "name": session.get("name", ""),
+        "picture_url": session.get("picture_url", ""),
+    }
+
+
+@api_router.post("/auth/social/cancel")
+async def cancel_pending_social_signup(request: Request):
+    session_id = get_pending_social_cookie(request)
+    if session_id:
+        await db.social_auth_sessions.delete_many({"id": session_id})
+    response = Response(content=json.dumps({"message": "Pending social sign-up cleared"}), media_type="application/json")
+    clear_pending_social_cookie(response)
+    return response
+
+
+@api_router.post("/auth/social/complete")
+async def complete_social_signup(req: CompleteSocialSignupRequest, request: Request, response: Response):
+    session = await get_pending_social_session(request)
+    email = (session.get("email") or "").lower().strip()
+    if not email:
+        raise HTTPException(status_code=400, detail="This social sign-up session is missing an email address")
+    if req.role not in ["user", "podcaster"]:
+        raise HTTPException(status_code=400, detail="Role must be 'user' or 'podcaster'")
+
+    age = normalize_age_value(req.age)
+    if req.role == "user" and age is None:
+        raise HTTPException(status_code=400, detail="Age is required for listener accounts")
+
+    provider = session["provider"]
+    profile = {
+        "sub": session["provider_sub"],
+        "email": email,
+        "email_verified": bool(session.get("email_verified")),
+        "name": session.get("name", ""),
+        "picture_url": session.get("picture_url", ""),
+    }
+
+    existing_user = await find_user_for_social_profile(provider, profile)
+    if existing_user:
+        existing_user = await upsert_social_provider_link(existing_user, provider, profile)
+        await db.social_auth_sessions.delete_many({"id": session["id"]})
+        clear_pending_social_cookie(response)
+        access_token = create_access_token(str(existing_user["_id"]), existing_user["email"])
+        refresh_token = create_refresh_token(str(existing_user["_id"]))
+        set_auth_cookies(response, access_token, refresh_token, request)
+        payload = await build_user_response(existing_user)
+        payload["access_token"] = access_token
+        return payload
+
+    keywords = []
+    if req.role == "podcaster" and req.podcast_description:
+        keywords = await extract_keywords(req.podcast_description)
+
+    name = build_social_display_name(email, req.name or session.get("name", ""))
+    user_doc = {
+        "email": email,
+        "name": name,
+        "role": req.role,
+        "phone": req.phone or "",
+        "age": age,
+        "interests": [item.lower().strip() for item in (req.interests or [])],
+        "podcast_description": req.podcast_description or "",
+        "podcast_keywords": keywords,
+        "show_title": (req.show_title or "").strip(),
+        "avatar_url": session.get("picture_url", ""),
+        "auth_providers": {provider: social_provider_record(provider, profile)},
+        "created_at": now_iso(),
+        "updated_at": now_iso(),
+    }
+    result = await db.users.insert_one(user_doc)
+    user_doc["_id"] = result.inserted_id
+
+    if req.role == "podcaster":
+        primary_show = await ensure_primary_show_for_user(user_doc, title_override=req.show_title)
+        user_doc["primary_show_id"] = primary_show["id"] if primary_show else ""
+        if primary_show:
+            user_doc["show_title"] = primary_show["title"]
+
+    await db.social_auth_sessions.delete_many({"id": session["id"]})
+    clear_pending_social_cookie(response)
+
+    access_token = create_access_token(str(result.inserted_id), email)
+    refresh_token = create_refresh_token(str(result.inserted_id))
+    set_auth_cookies(response, access_token, refresh_token, request)
+    clear_pending_social_cookie(response)
+
+    payload = await build_user_response(user_doc)
+    payload["access_token"] = access_token
+    return payload
 
 
 @api_router.post("/auth/register")
@@ -1722,6 +2537,7 @@ async def login(req: LoginRequest, request: Request, response: Response):
     access_token = create_access_token(user_id, email)
     refresh_token = create_refresh_token(user_id)
     set_auth_cookies(response, access_token, refresh_token, request)
+    clear_pending_social_cookie(response)
 
     payload = await build_user_response(user)
     payload["access_token"] = access_token
@@ -1731,6 +2547,7 @@ async def login(req: LoginRequest, request: Request, response: Response):
 @api_router.post("/auth/logout")
 async def logout(response: Response):
     clear_auth_cookies(response)
+    clear_pending_social_cookie(response)
     return {"message": "Logged out"}
 
 
@@ -2326,6 +3143,7 @@ async def upload_podcast(
     keywords = await extract_keywords(f"{title} {description} {normalized_category} {show['title']}")
     media_type = "video" if content_type in allowed_video else "audio"
     selected_rating = normalize_content_rating(audience_rating)
+    media_analysis = transcribe_media_for_safety(data, file.filename or "", content_type)
     moderation = await review_episode_safety(
         show,
         title,
@@ -2333,6 +3151,7 @@ async def upload_podcast(
         normalized_category,
         selected_rating=selected_rating,
         generation=ai_draft.get("generation") if ai_draft else None,
+        media_analysis=media_analysis,
     )
     resolved_rating = MATURE_RATING if moderation.get("recommended_age_gate") == MATURE_RATING else selected_rating
     podcast_doc = {
@@ -2363,6 +3182,7 @@ async def upload_podcast(
         "is_playable": True,
         "source_kind": "upload",
         "file_size": len(data),
+        "transcript_status": media_analysis.get("status", ""),
         "created_at": now_iso(),
         "updated_at": now_iso(),
         "is_deleted": False,

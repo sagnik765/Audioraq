@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
+import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import axios from 'axios';
 import { Eye, EyeSlash, Microphone, MicrophoneStage, User } from '@phosphor-icons/react';
 import SocialAuthButtons from '../components/SocialAuthButtons';
@@ -9,8 +9,9 @@ import { API } from '../lib/api';
 const starterInterests = ['technology', 'business', 'self improvement'];
 
 export default function RegisterPage() {
-  const { register } = useAuth();
+  const { register, getPendingSocialSignup, completeSocialSignup, cancelPendingSocialSignup } = useAuth();
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
   const [step, setStep] = useState(1);
   const [role, setRole] = useState('');
   const [name, setName] = useState('');
@@ -25,12 +26,48 @@ export default function RegisterPage() {
   const [interestOptions, setInterestOptions] = useState([]);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
+  const [pendingSocial, setPendingSocial] = useState(null);
+  const [loadingPendingSocial, setLoadingPendingSocial] = useState(false);
+  const socialMode = searchParams.get('social') === '1';
 
   useEffect(() => {
     axios.get(`${API}/interests/options`).then((res) => {
       setInterestOptions(res.data.interests || []);
     }).catch(() => {});
   }, []);
+
+  useEffect(() => {
+    let active = true;
+    if (!socialMode) {
+      setPendingSocial(null);
+      setLoadingPendingSocial(false);
+      return undefined;
+    }
+
+    setLoadingPendingSocial(true);
+    getPendingSocialSignup().then((result) => {
+      if (!active) return;
+      if (!result.success) {
+        setError(result.error || 'Your social sign-up session expired. Please try again.');
+        setPendingSocial(null);
+        return;
+      }
+
+      const social = result.data;
+      setPendingSocial(social);
+      setName((prev) => prev || social.name || '');
+      setEmail(social.email || '');
+      if (social.role_hint) {
+        setRole((prev) => prev || social.role_hint);
+      }
+    }).finally(() => {
+      if (active) setLoadingPendingSocial(false);
+    });
+
+    return () => {
+      active = false;
+    };
+  }, [socialMode, getPendingSocialSignup]);
 
   const toggleInterest = (interest) => {
     setSelectedInterests((prev) => (
@@ -41,7 +78,7 @@ export default function RegisterPage() {
   const handleSubmit = async () => {
     setError('');
     setLoading(true);
-    const result = await register({
+    const payload = {
       email,
       password,
       name,
@@ -51,7 +88,18 @@ export default function RegisterPage() {
       interests: role === 'user' ? selectedInterests : [],
       podcast_description: role === 'podcaster' ? podcastDescription : '',
       show_title: role === 'podcaster' ? showTitle : '',
-    });
+    };
+    const result = socialMode
+      ? await completeSocialSignup({
+          name,
+          role,
+          phone,
+          age: role === 'user' && age !== '' ? Number(age) : null,
+          interests: role === 'user' ? selectedInterests : [],
+          podcast_description: role === 'podcaster' ? podcastDescription : '',
+          show_title: role === 'podcaster' ? showTitle : '',
+        })
+      : await register(payload);
     setLoading(false);
     if (result.success) {
       navigate(role === 'podcaster' ? '/dashboard/podcaster' : '/dashboard');
@@ -61,6 +109,38 @@ export default function RegisterPage() {
   };
 
   const progress = `${(step / 3) * 100}%`;
+  const socialProviderLabel = pendingSocial?.provider ? `${pendingSocial.provider[0].toUpperCase()}${pendingSocial.provider.slice(1)}` : 'Social';
+
+  const handleCancelSocial = async () => {
+    await cancelPendingSocialSignup();
+    navigate('/register', { replace: true });
+  };
+
+  if (socialMode && loadingPendingSocial) {
+    return (
+      <div className="min-h-screen bg-[#0A0A0B] flex items-center justify-center">
+        <div className="w-8 h-8 border-2 border-[#F5A623] border-t-transparent rounded-full animate-spin" />
+      </div>
+    );
+  }
+
+  if (socialMode && !pendingSocial) {
+    return (
+      <div className="min-h-screen bg-[#0A0A0B] flex items-center justify-center p-6">
+        <div className="w-full max-w-md rounded-3xl border border-[#27272A] bg-[#141417] p-8 text-center">
+          <h1 className="font-['Outfit'] text-3xl font-bold text-white mb-3">Social sign-up expired</h1>
+          <p className="text-[#8A8A93] mb-6">{error || 'Start the Google or Apple sign-up flow again to continue.'}</p>
+          <button
+            type="button"
+            onClick={() => navigate('/register', { replace: true })}
+            className="w-full bg-[#F5A623] hover:bg-[#F7B84B] text-[#0A0A0B] font-bold rounded-full px-8 py-3 transition-colors"
+          >
+            Back to sign up
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-[#0A0A0B] flex" data-testid="register-page">
@@ -100,11 +180,32 @@ export default function RegisterPage() {
 
           {step === 1 && (
             <div className="opacity-0 animate-fade-in-up">
-              <h1 className="font-['Outfit'] text-3xl sm:text-4xl tracking-tight font-bold text-white mb-2">Join Audioraq</h1>
-              <p className="text-[#8A8A93] mb-6">Choose the experience you want first. You can evolve from there later.</p>
+              <h1 className="font-['Outfit'] text-3xl sm:text-4xl tracking-tight font-bold text-white mb-2">
+                {socialMode ? `Finish with ${socialProviderLabel}` : 'Join Audioraq'}
+              </h1>
+              <p className="text-[#8A8A93] mb-6">
+                {socialMode
+                  ? 'Your provider verified who you are. Now choose the Audioraq experience you want.'
+                  : 'Choose the experience you want first. You can evolve from there later.'}
+              </p>
 
               <div className="mb-8">
-                <SocialAuthButtons context="sign up" />
+                {socialMode ? (
+                  <div className="rounded-2xl border border-[#27272A] bg-[#141417] px-4 py-4">
+                    <p className="text-xs uppercase tracking-[0.2em] text-[#8A8A93] mb-2">Connected account</p>
+                    <p className="text-white font-medium">{pendingSocial?.email || email}</p>
+                    <p className="text-sm text-[#8A8A93] mt-1">Signed in with {socialProviderLabel}. We only need your role-specific setup details now.</p>
+                    <button
+                      type="button"
+                      onClick={handleCancelSocial}
+                      className="text-sm text-[#F5A623] hover:text-[#F7B84B] transition-colors mt-3"
+                    >
+                      Start over
+                    </button>
+                  </div>
+                ) : (
+                  <SocialAuthButtons context="sign up" roleHint={role} />
+                )}
               </div>
 
               <div className="grid grid-cols-2 gap-4 mb-8">
@@ -140,12 +241,25 @@ export default function RegisterPage() {
           {step === 2 && (
             <div className="opacity-0 animate-fade-in-up">
               <h1 className="font-['Outfit'] text-3xl tracking-tight font-bold text-white mb-2">
-                {role === 'podcaster' ? 'Create your account' : 'Create your listener account'}
+                {socialMode
+                  ? `Complete your ${socialProviderLabel} account`
+                  : role === 'podcaster' ? 'Create your account' : 'Create your listener account'}
               </h1>
-              <p className="text-[#8A8A93] mb-8">This gets you through the door. We’ll shape the experience in the next step.</p>
+              <p className="text-[#8A8A93] mb-8">
+                {socialMode
+                  ? 'We already have your verified identity. Add the last product details and you are in.'
+                  : 'This gets you through the door. We’ll shape the experience in the next step.'}
+              </p>
 
               <div className="mb-6">
-                <SocialAuthButtons context="sign up" />
+                {socialMode ? (
+                  <div className="rounded-2xl border border-[#27272A] bg-[#141417] px-4 py-4">
+                    <p className="text-xs uppercase tracking-[0.2em] text-[#8A8A93] mb-2">Using {socialProviderLabel}</p>
+                    <p className="text-white font-medium">{pendingSocial?.email || email}</p>
+                  </div>
+                ) : (
+                  <SocialAuthButtons context="sign up" roleHint={role} />
+                )}
               </div>
 
               <div className="space-y-4">
@@ -167,9 +281,14 @@ export default function RegisterPage() {
                     type="email"
                     value={email}
                     onChange={(e) => setEmail(e.target.value)}
-                    className="w-full bg-[#0A0A0B] border border-[#27272A] focus:border-[#F5A623] focus:ring-1 focus:ring-[#F5A623] rounded-lg text-white px-4 py-3 placeholder:text-[#8A8A93] transition-all outline-none"
+                    className={`w-full border rounded-lg text-white px-4 py-3 placeholder:text-[#8A8A93] transition-all outline-none ${
+                      socialMode
+                        ? 'bg-[#141417] border-[#1F1F24] text-[#AFAFB7]'
+                        : 'bg-[#0A0A0B] border-[#27272A] focus:border-[#F5A623] focus:ring-1 focus:ring-[#F5A623]'
+                    }`}
                     placeholder="you@example.com"
                     required
+                    readOnly={socialMode}
                     data-testid="register-email-input"
                   />
                 </div>
@@ -200,27 +319,29 @@ export default function RegisterPage() {
                     <p className="text-xs text-[#8A8A93] mt-2">We use this to keep mature episodes out of underage listener accounts.</p>
                   </div>
                 )}
-                <div>
-                  <label className="text-xs uppercase tracking-[0.2em] font-semibold text-[#8A8A93] mb-2 block">Password</label>
-                  <div className="relative">
-                    <input
-                      type={showPassword ? 'text' : 'password'}
-                      value={password}
-                      onChange={(e) => setPassword(e.target.value)}
-                      className="w-full bg-[#0A0A0B] border border-[#27272A] focus:border-[#F5A623] focus:ring-1 focus:ring-[#F5A623] rounded-lg text-white px-4 py-3 placeholder:text-[#8A8A93] transition-all outline-none pr-12"
-                      placeholder="Create a password"
-                      required
-                      data-testid="register-password-input"
-                    />
-                    <button
-                      type="button"
-                      onClick={() => setShowPassword(!showPassword)}
-                      className="absolute right-3 top-1/2 -translate-y-1/2 text-[#8A8A93] hover:text-white transition-colors"
-                    >
-                      {showPassword ? <EyeSlash size={20} /> : <Eye size={20} />}
-                    </button>
+                {!socialMode && (
+                  <div>
+                    <label className="text-xs uppercase tracking-[0.2em] font-semibold text-[#8A8A93] mb-2 block">Password</label>
+                    <div className="relative">
+                      <input
+                        type={showPassword ? 'text' : 'password'}
+                        value={password}
+                        onChange={(e) => setPassword(e.target.value)}
+                        className="w-full bg-[#0A0A0B] border border-[#27272A] focus:border-[#F5A623] focus:ring-1 focus:ring-[#F5A623] rounded-lg text-white px-4 py-3 placeholder:text-[#8A8A93] transition-all outline-none pr-12"
+                        placeholder="Create a password"
+                        required
+                        data-testid="register-password-input"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setShowPassword(!showPassword)}
+                        className="absolute right-3 top-1/2 -translate-y-1/2 text-[#8A8A93] hover:text-white transition-colors"
+                      >
+                        {showPassword ? <EyeSlash size={20} /> : <Eye size={20} />}
+                      </button>
+                    </div>
                   </div>
-                </div>
+                )}
               </div>
 
               <div className="flex gap-3 mt-8">
@@ -233,7 +354,7 @@ export default function RegisterPage() {
                 </button>
                 <button
                   onClick={() => {
-                    if (!name || !email || !password || (role === 'user' && !age)) {
+                    if (!name || !email || (!socialMode && !password) || (role === 'user' && !age)) {
                       setError('Please fill all required fields');
                       return;
                     }
@@ -324,7 +445,7 @@ export default function RegisterPage() {
                   className="flex-1 bg-[#F5A623] hover:bg-[#F7B84B] text-[#0A0A0B] font-bold rounded-full px-8 py-3 transition-colors disabled:opacity-50"
                   data-testid="register-submit-btn"
                 >
-                  {loading ? 'Creating account...' : 'Create Account'}
+                  {loading ? (socialMode ? 'Finishing account...' : 'Creating account...') : (socialMode ? `Finish with ${socialProviderLabel}` : 'Create Account')}
                 </button>
               </div>
             </div>
