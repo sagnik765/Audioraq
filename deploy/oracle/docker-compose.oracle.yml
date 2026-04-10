@@ -14,10 +14,12 @@ services:
   app:
     build:
       context: ../..
-      dockerfile: Dockerfile
+      dockerfile: deploy/oracle/Dockerfile.runtime
     restart: unless-stopped
     depends_on:
       - mongo
+    ports:
+      - "8001:8001"
     environment:
       PORT: 8001
       MONGO_URL: mongodb://${MONGO_INITDB_ROOT_USERNAME}:${MONGO_INITDB_ROOT_PASSWORD}@mongo:27017/?authSource=admin
