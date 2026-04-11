@@ -80,6 +80,30 @@ ROLE_VOICES = {
     "Guest": ["Daniel", "Oliver", "Fred"],
 }
 
+AVATAR_PROFILES = {
+    "Host": {
+        "skin": "#B87955",
+        "hair": "#1C120D",
+        "shirt": "#FFD84D",
+        "accent": "#E3A800",
+        "mic": "#F7F2E5",
+    },
+    "Co-host": {
+        "skin": "#8D5C3F",
+        "hair": "#2F1A12",
+        "shirt": "#2EC4B6",
+        "accent": "#1B998B",
+        "mic": "#F7F2E5",
+    },
+    "Guest": {
+        "skin": "#C48A62",
+        "hair": "#111827",
+        "shirt": "#FF6B6B",
+        "accent": "#C92A2A",
+        "mic": "#F7F2E5",
+    },
+}
+
 REALNESS_TARGET_PROFILE = {
     "min_turn_count": 10,
     "min_speaker_count": 2,
@@ -522,15 +546,19 @@ def synthesize_turn_audio(text: str, output_wav: Path, voices: List[str]) -> Non
     text_file = output_wav.with_suffix(".txt")
     text_file.write_text(text, encoding="utf-8")
     last_error = None
+    min_duration = 0.16 if len(text.split()) <= 3 else 0.35
     for attempt, selected_voice in enumerate(dict.fromkeys(voices + ["Aman", "Daniel", "Alex"]), start=1):
         tmp_aiff = output_wav.with_suffix(f".{attempt}.aiff")
         try:
             run(["say", "-v", selected_voice, "-o", str(tmp_aiff), "-f", str(text_file)])
             time.sleep(0.25)
             run(["afconvert", "-f", "WAVE", "-d", "LEI16", str(tmp_aiff), str(output_wav)])
-            if wav_metrics(output_wav)["duration_seconds"] >= 0.4:
+            metrics = wav_metrics(output_wav)
+            if metrics["duration_seconds"] >= min_duration:
                 return
-            last_error = RuntimeError(f"Generated short turn with voice {selected_voice}")
+            last_error = RuntimeError(
+                f"Generated short turn with voice {selected_voice}: {metrics['duration_seconds']}s for {text[:80]!r}"
+            )
         except Exception as exc:
             last_error = exc
         finally:
@@ -558,18 +586,33 @@ def concat_wavs(segment_paths: List[Path], output_wav: Path, gap_seconds: float 
                 out.writeframes(silence)
 
 
-def synthesize_dialogue_audio(turns: List[Dict[str, str]], output_wav: Path) -> None:
+def synthesize_dialogue_audio(turns: List[Dict[str, str]], output_wav: Path) -> List[Dict[str, Any]]:
     with tempfile.TemporaryDirectory(prefix="audioraq-dialogue-") as temp_dir:
         temp_path = Path(temp_dir)
         segments = []
+        timings = []
+        cursor = 0.0
+        gap_seconds = 0.22
         for index, turn in enumerate(turns, start=1):
             segment = temp_path / f"{index:02d}-{slugify(turn['speaker'])}.wav"
             synthesize_turn_audio(turn["text"], segment, ROLE_VOICES.get(turn["speaker"], ["Aman"]))
+            duration = wav_metrics(segment)["duration_seconds"]
+            timings.append(
+                {
+                    "speaker": turn["speaker"],
+                    "text": turn["text"],
+                    "start": round(cursor, 3),
+                    "end": round(cursor + duration, 3),
+                    "duration": round(duration, 3),
+                }
+            )
+            cursor += duration + gap_seconds
             segments.append(segment)
-        concat_wavs(segments, output_wav)
+        concat_wavs(segments, output_wav, gap_seconds=gap_seconds)
     metrics = wav_metrics(output_wav)
     if metrics["duration_seconds"] < 20:
         raise RuntimeError(f"Dialogue output is unexpectedly short: {metrics['duration_seconds']}s")
+    return timings
 
 
 def svg_escape(value: str) -> str:
@@ -605,6 +648,136 @@ def write_video_cover(path: Path, title: str, label: str) -> None:
 </svg>""",
         encoding="utf-8",
     )
+
+
+def current_speaker_at(timings: List[Dict[str, Any]], timestamp: float) -> str:
+    for timing in timings:
+        if timing["start"] <= timestamp <= timing["end"]:
+            return str(timing["speaker"])
+    if not timings:
+        return "Host"
+    return str(timings[min(len(timings) - 1, int(timestamp) % len(timings))]["speaker"])
+
+
+def avatar_svg(speaker: str, x: int, active: bool, frame_index: int) -> str:
+    profile = AVATAR_PROFILES.get(speaker, AVATAR_PROFILES["Host"])
+    bob = math.sin(frame_index * 0.42 + x * 0.01) * (4 if active else 1.5)
+    mouth_height = 20 if active and frame_index % 4 in (1, 2) else 5
+    mouth_y = 343 + bob
+    blink = frame_index % 57 in (0, 1)
+    eye_shape = "line" if blink else "circle"
+    left_eye = (
+        f'<line x1="{x - 33}" y1="{297 + bob:.1f}" x2="{x - 19}" y2="{297 + bob:.1f}" stroke="#130F0C" stroke-width="4" stroke-linecap="round"/>'
+        if eye_shape == "line"
+        else f'<circle cx="{x - 26}" cy="{296 + bob:.1f}" r="5" fill="#130F0C"/>'
+    )
+    right_eye = (
+        f'<line x1="{x + 19}" y1="{297 + bob:.1f}" x2="{x + 33}" y2="{297 + bob:.1f}" stroke="#130F0C" stroke-width="4" stroke-linecap="round"/>'
+        if eye_shape == "line"
+        else f'<circle cx="{x + 26}" cy="{296 + bob:.1f}" r="5" fill="#130F0C"/>'
+    )
+    active_ring = (
+        f'<ellipse cx="{x}" cy="327" rx="116" ry="148" fill="none" stroke="{profile["accent"]}" stroke-width="7" opacity="0.72"/>'
+        if active
+        else f'<ellipse cx="{x}" cy="327" rx="112" ry="144" fill="none" stroke="#F7F2E5" stroke-width="2" opacity="0.16"/>'
+    )
+    return f"""
+    <g>
+      {active_ring}
+      <ellipse cx="{x}" cy="525" rx="138" ry="42" fill="#000000" opacity="0.28"/>
+      <path d="M{x - 98} 505 C{x - 82} 424 {x + 82} 424 {x + 98} 505 Z" fill="{profile["shirt"]}"/>
+      <rect x="{x - 30}" y="{391 + bob:.1f}" width="60" height="58" rx="28" fill="{profile["skin"]}"/>
+      <ellipse cx="{x}" cy="{315 + bob:.1f}" rx="74" ry="92" fill="{profile["skin"]}"/>
+      <path d="M{x - 70} {272 + bob:.1f} C{x - 52} {205 + bob:.1f} {x + 54} {204 + bob:.1f} {x + 76} {273 + bob:.1f} C{x + 34} {252 + bob:.1f} {x - 15} {248 + bob:.1f} {x - 70} {272 + bob:.1f} Z" fill="{profile["hair"]}"/>
+      {left_eye}
+      {right_eye}
+      <path d="M{x - 10} {316 + bob:.1f} C{x - 4} {325 + bob:.1f} {x + 8} {325 + bob:.1f} {x + 13} {316 + bob:.1f}" fill="none" stroke="#5B3324" stroke-width="4" stroke-linecap="round"/>
+      <ellipse cx="{x}" cy="{mouth_y:.1f}" rx="23" ry="{mouth_height}" fill="#321114"/>
+      <path d="M{x - 72} 505 C{x - 38} 545 {x + 38} 545 {x + 72} 505" fill="none" stroke="{profile["accent"]}" stroke-width="9" opacity="0.72"/>
+      <rect x="{x - 18}" y="458" width="36" height="84" rx="18" fill="{profile["mic"]}" opacity="0.9"/>
+      <rect x="{x - 4}" y="535" width="8" height="48" rx="4" fill="{profile["mic"]}" opacity="0.7"/>
+      <text x="{x}" y="636" text-anchor="middle" fill="#F7F2E5" font-size="25" font-weight="800" font-family="Arial, sans-serif">{svg_escape(speaker)}</text>
+    </g>"""
+
+
+def waveform_svg(frame_index: int, active_speaker: str) -> str:
+    active_color = AVATAR_PROFILES.get(active_speaker, AVATAR_PROFILES["Host"])["accent"]
+    bars = []
+    for index in range(44):
+        height = 14 + int(34 * abs(math.sin(frame_index * 0.24 + index * 0.58)))
+        x = 388 + index * 12
+        y = 642 - height / 2
+        bars.append(f'<rect x="{x}" y="{y:.1f}" width="7" height="{height}" rx="3.5" fill="{active_color}" opacity="0.72"/>')
+    return "\n".join(bars)
+
+
+def write_talking_studio_frame(
+    path: Path,
+    title: str,
+    label: str,
+    speakers: List[str],
+    active_speaker: str,
+    frame_index: int,
+) -> None:
+    safe_title = svg_escape(title.replace("[QA]", "").strip())
+    safe_label = svg_escape(label)
+    positions_by_count = {
+        1: [640],
+        2: [430, 850],
+        3: [300, 640, 980],
+    }
+    positions = positions_by_count.get(len(speakers), positions_by_count[3])
+    avatars = "\n".join(
+        avatar_svg(speaker, positions[index], speaker == active_speaker, frame_index)
+        for index, speaker in enumerate(speakers[: len(positions)])
+    )
+    path.write_text(
+        f"""<svg width="1280" height="720" viewBox="0 0 1280 720" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="backdrop" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#17120A"/>
+      <stop offset="0.48" stop-color="#080807"/>
+      <stop offset="1" stop-color="#201A10"/>
+    </linearGradient>
+    <radialGradient id="lamp" cx="50%" cy="16%" r="58%">
+      <stop offset="0" stop-color="#FFD84D" stop-opacity="0.34"/>
+      <stop offset="1" stop-color="#000000" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <rect width="1280" height="720" fill="url(#backdrop)"/>
+  <rect width="1280" height="720" fill="url(#lamp)"/>
+  <path d="M0 548 C210 504 346 520 500 552 C700 594 828 498 1036 526 C1132 539 1200 522 1280 488 L1280 720 L0 720 Z" fill="#11100E"/>
+  <rect x="70" y="54" width="1140" height="110" rx="34" fill="#0D0C0B" opacity="0.78"/>
+  <text x="104" y="105" fill="#FFD84D" font-size="34" font-weight="900" font-family="Arial, sans-serif">Audioraq</text>
+  <text x="104" y="145" fill="#F7F2E5" font-size="28" font-weight="800" font-family="Arial, sans-serif">{safe_title[:86]}</text>
+  <text x="975" y="105" text-anchor="end" fill="#C8B993" font-size="20" font-family="Arial, sans-serif">{safe_label}</text>
+  <text x="975" y="135" text-anchor="end" fill="#C8B993" font-size="17" font-family="Arial, sans-serif">Synthetic avatar preview - no real-person likeness</text>
+  {avatars}
+  <rect x="350" y="611" width="580" height="62" rx="31" fill="#080807" opacity="0.78"/>
+  {waveform_svg(frame_index, active_speaker)}
+  <text x="640" y="694" text-anchor="middle" fill="#C8B993" font-size="18" font-family="Arial, sans-serif">Active speaker: {svg_escape(active_speaker)}</text>
+</svg>""",
+        encoding="utf-8",
+    )
+
+
+def write_talking_studio_frames(
+    frames_dir: Path,
+    title: str,
+    label: str,
+    turns: List[Dict[str, str]],
+    timings: List[Dict[str, Any]],
+    duration_seconds: float,
+    fps: int = 4,
+) -> None:
+    frames_dir.mkdir(parents=True, exist_ok=True)
+    speakers = list(dict.fromkeys(turn["speaker"] for turn in turns)) or ["Host"]
+    frame_count = max(1, int(math.ceil(duration_seconds * fps)))
+    for frame_index in range(frame_count):
+        timestamp = frame_index / fps
+        active_speaker = current_speaker_at(timings, timestamp)
+        frame_path = frames_dir / f"frame-{frame_index:05d}.svg"
+        write_talking_studio_frame(frame_path, title, label, speakers, active_speaker, frame_index)
 
 
 def make_video_with_remote_ffmpeg(audio_path: Path, cover_path: Path, output_mp4: Path, remote: str, ssh_key: Path, run_id: str) -> None:
@@ -666,6 +839,73 @@ def make_video_with_remote_ffmpeg(audio_path: Path, cover_path: Path, output_mp4
     run_with_retries(rsync_base + [f"{remote}:{remote_output}", str(output_mp4)])
 
 
+def make_talking_studio_video_with_remote_ffmpeg(
+    audio_path: Path,
+    frames_dir: Path,
+    output_mp4: Path,
+    remote: str,
+    ssh_key: Path,
+    run_id: str,
+    fps: int = 4,
+) -> None:
+    remote_dir = f"/tmp/audioraq-avatar-{run_id}-{output_mp4.stem}"
+    remote_frames_dir = f"{remote_dir}/frames"
+    container = "oracle-app-1"
+    container_dir = f"/tmp/audioraq-avatar-{run_id}-{output_mp4.stem}"
+    container_frames_dir = f"{container_dir}/frames"
+    ssh_base = ["ssh", "-o", "StrictHostKeyChecking=no", "-i", str(ssh_key), remote]
+    rsync_base = ["rsync", "-az", "-e", f"ssh -o StrictHostKeyChecking=no -i {ssh_key}"]
+
+    run_with_retries(ssh_base + [f"mkdir -p {shlex.quote(remote_frames_dir)}"])
+    run_with_retries(rsync_base + [str(audio_path), f"{remote}:{remote_dir}/"])
+    run_with_retries(rsync_base + [str(frames_dir) + "/", f"{remote}:{remote_frames_dir}/"])
+
+    remote_audio = f"{remote_dir}/{audio_path.name}"
+    remote_output = f"{remote_dir}/{output_mp4.name}"
+    container_audio = f"{container_dir}/{audio_path.name}"
+    container_output = f"{container_dir}/{output_mp4.name}"
+    container_frame_pattern = f"{container_frames_dir}/frame-%05d.svg"
+    ffmpeg_args = [
+        "ffmpeg",
+        "-y",
+        "-v",
+        "error",
+        "-framerate",
+        str(fps),
+        "-i",
+        container_frame_pattern,
+        "-i",
+        container_audio,
+        "-vf",
+        "scale=1280:720,format=yuv420p",
+        "-r",
+        "24",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "veryfast",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "128k",
+        "-shortest",
+        "-movflags",
+        "+faststart",
+        container_output,
+    ]
+    remote_cmd = " && ".join(
+        [
+            f"docker exec {container} mkdir -p {shlex.quote(container_frames_dir)}",
+            f"docker cp {shlex.quote(remote_audio)} {container}:{shlex.quote(container_audio)}",
+            f"docker cp {shlex.quote(remote_frames_dir)}/. {container}:{shlex.quote(container_frames_dir)}/",
+            f"docker exec {container} {' '.join(shlex.quote(part) for part in ffmpeg_args)}",
+            f"docker cp {container}:{shlex.quote(container_output)} {shlex.quote(remote_output)}",
+        ]
+    )
+    run_with_retries(ssh_base + [remote_cmd], attempts=4, delay_seconds=8)
+    run_with_retries(rsync_base + [f"{remote}:{remote_output}", str(output_mp4)])
+
+
 def summarize_result(item: Dict[str, Any], before: Dict[str, Any], after: Dict[str, Any]) -> str:
     return (
         f"AI-risk {before['label']} {before['score']} -> {after['label']} {after['score']}; "
@@ -693,10 +933,12 @@ def main() -> None:
     scripts_dir = output_root / "scripts"
     media_dir = output_root / "media"
     covers_dir = output_root / "covers"
+    frames_root = output_root / "frames"
     output_root.mkdir(parents=True, exist_ok=True)
     scripts_dir.mkdir(parents=True, exist_ok=True)
     media_dir.mkdir(parents=True, exist_ok=True)
     covers_dir.mkdir(parents=True, exist_ok=True)
+    frames_root.mkdir(parents=True, exist_ok=True)
 
     results = []
     selected = [item for item in manifest["results"] if int(item["index"]) >= args.start_index]
@@ -712,7 +954,7 @@ def main() -> None:
         improved_script_path.write_text(improved_text + "\n", encoding="utf-8")
 
         improved_audio = media_dir / f"{slug}-improved.wav"
-        synthesize_dialogue_audio(dialogue_turns, improved_audio)
+        turn_timings = synthesize_dialogue_audio(dialogue_turns, improved_audio)
         original_metrics = wav_metrics(Path(item["media_path"]) if item["media_type"] == "audio" else Path(str(item["media_path"]).replace(".mp4", ".wav")))
         improved_metrics = wav_metrics(improved_audio)
         before_risk = gan_inspired_ai_risk(original_text, original_metrics)
@@ -724,7 +966,16 @@ def main() -> None:
             cover_path = covers_dir / f"{slug}-cover.svg"
             write_video_cover(cover_path, item["title"], f"{len({turn['speaker'] for turn in dialogue_turns})}-speaker audio + video")
             improved_media = media_dir / f"{slug}-improved.mp4"
-            make_video_with_remote_ffmpeg(improved_audio, cover_path, improved_media, args.remote, Path(args.ssh_key).expanduser().resolve(), run_id)
+            frames_dir = frames_root / slug
+            write_talking_studio_frames(
+                frames_dir,
+                item["title"],
+                f"{len({turn['speaker'] for turn in dialogue_turns})}-speaker synthetic avatar conversation",
+                dialogue_turns,
+                turn_timings,
+                improved_metrics["duration_seconds"],
+            )
+            make_talking_studio_video_with_remote_ffmpeg(improved_audio, frames_dir, improved_media, args.remote, Path(args.ssh_key).expanduser().resolve(), run_id)
 
         result = {
             "index": index,
@@ -739,6 +990,8 @@ def main() -> None:
             "rag_safety": safety,
             "audio_metrics": improved_metrics,
             "dialogue_turns": dialogue_turns,
+            "turn_timings": turn_timings,
+            "visual_style": "Synthetic animated studio avatars with active-speaker mouth/head movement; no real-person likeness.",
         }
         result["summary"] = summarize_result(
             item,
@@ -760,6 +1013,7 @@ def main() -> None:
             "benchmarks": REFERENCE_BENCHMARKS,
             "gan_note": "GAN-inspired adversarial discriminator, not a trained neural GAN model.",
             "rag_note": "Local RAG-style retrieval over safety policy snippets plus pattern checks.",
+            "video_note": "Video episodes use consent-safe synthetic animated avatars and do not claim to depict real people.",
         },
         "results": results,
     }
@@ -777,6 +1031,7 @@ def main() -> None:
         "",
         "Detector note: the AI detector is GAN-inspired/adversarial, not a trained neural GAN.",
         "Voice note: speakers use distinct generic system voices; the agent does not copy Joe Rogan or Raj Shamani resonance/articulation.",
+        "Video note: audio+video cuts use synthetic animated studio avatars with active-speaker mouth/head movement; they are not real-person likenesses.",
         "Safety note: the derogatory-content check uses a local RAG-style safety knowledge base and pattern scan.",
         "",
         "| # | Format | Speakers | Title | Original | Improved Media | Improved Script | AI Risk Before | AI Risk After | Benchmark Similarity | RAG Safety | Summary |",

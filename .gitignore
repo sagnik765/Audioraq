@@ -21,6 +21,7 @@ node_modules/
 qa/ai-podcast-agent/
 qa/podcast-improvement-agent/
 qa/published-improved-podcasts/
+qa/avatar-video-agent/
 
 # Next.js
 /.next/

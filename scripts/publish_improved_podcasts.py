@@ -43,6 +43,9 @@ def main() -> None:
     parser.add_argument("--original-manifest", default=str(DEFAULT_ORIGINAL_MANIFEST))
     parser.add_argument("--improved-manifest", default=str(DEFAULT_IMPROVED_MANIFEST))
     parser.add_argument("--output-root", default=str(DEFAULT_OUTPUT_ROOT))
+    parser.add_argument("--start-index", type=int, default=1)
+    parser.add_argument("--limit", type=int, default=0)
+    parser.add_argument("--title-prefix", default="[QA Dialogue]")
     args = parser.parse_args()
 
     base_url = args.base_url.rstrip("/")
@@ -55,7 +58,9 @@ def main() -> None:
     output_root.mkdir(parents=True, exist_ok=True)
     published = []
 
-    for improved in improved_manifest["results"]:
+    selected = [item for item in improved_manifest["results"] if int(item["index"]) >= args.start_index]
+    selected = selected[: args.limit or None]
+    for improved in selected:
         index = int(improved["index"])
         original = originals_by_index[index]
         session = requests.Session()
@@ -79,7 +84,7 @@ def main() -> None:
         else:
             content_type = mimetypes.guess_type(media_path.name)[0] or "application/octet-stream"
         clean_title = improved["title"].replace("[QA]", "").strip()
-        title = f"[QA Dialogue] {clean_title}"
+        title = f"{args.title_prefix} {clean_title}"
         description = (
             f"Dialogue-based improved QA cut for Audioraq.\n\n"
             f"Original episode: {original['episode_url']}\n"
@@ -87,6 +92,7 @@ def main() -> None:
             f"-> {improved['after_ai_detector']['label']} {improved['after_ai_detector']['score']}.\n"
             f"Benchmark similarity: {improved['after_ai_detector']['benchmark_similarity']}.\n"
             f"RAG safety check: {improved['rag_safety']['status']}.\n\n"
+            f"Visual style: {improved.get('visual_style', 'Dialogue-focused media cut')}.\n\n"
             f"{original_episode.get('description') or ''}"
         ).strip()
 
