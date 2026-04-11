@@ -140,12 +140,48 @@ Fill in:
 - `JWT_SECRET`
 - `ADMIN_PASSWORD`
 - `EMERGENT_LLM_KEY`
+- Optional production voice key: `ELEVENLABS_API_KEY` or `OPENAI_API_KEY`
 
 The default domains in that file are already:
 - `APEX_DOMAIN=audioraq.com`
 - `WWW_DOMAIN=www.audioraq.com`
 
-### 3a. Enable Google and Apple sign-in
+### 3a. Enable production AI voices
+
+`Create with AI` renders playable audio with a provider chain. By default, `AI_AUDIO_TTS_PROVIDER=auto` tries:
+
+```text
+ElevenLabs when ELEVENLABS_API_KEY is set
+OpenAI TTS when OPENAI_API_KEY is set
+local espeak-ng fallback
+```
+
+For the most natural podcast-style voices, set ElevenLabs:
+
+```dotenv
+AI_AUDIO_TTS_PROVIDER=auto
+ELEVENLABS_API_KEY=<your-elevenlabs-key>
+ELEVENLABS_MODEL_ID=eleven_v3
+ELEVENLABS_OUTPUT_FORMAT=mp3_44100_128
+ELEVENLABS_VOICE_ID_HOST=<host-voice-id>
+ELEVENLABS_VOICE_ID_GUEST=<guest-voice-id>
+ELEVENLABS_VOICE_ID_NARRATOR=<optional-narrator-voice-id>
+```
+
+For the simplest production setup, set OpenAI TTS:
+
+```dotenv
+AI_AUDIO_TTS_PROVIDER=auto
+OPENAI_API_KEY=<your-openai-key>
+OPENAI_TTS_MODEL=gpt-4o-mini-tts
+OPENAI_TTS_VOICE_HOST=marin
+OPENAI_TTS_VOICE_GUEST=cedar
+OPENAI_TTS_VOICE_NARRATOR=coral
+```
+
+Keep `AI_AUDIO_TTS_LOCAL_FALLBACK=true` so Audioraq still publishes an audio episode if the paid provider is temporarily unavailable. New AI drafts include `audio_script_turns` so interview-style episodes can render with distinct host/guest/narrator voices. Do not configure cloned voices or voices imitating real people without permission.
+
+### 3b. Enable Google and Apple sign-in
 
 The live app already contains the full OAuth flow. The last step is adding real provider credentials to [deploy/oracle/oracle.env.example](/Users/sagnikroy/Documents/New%20project/Podlyzer-Centralized-Podcast-Hub/deploy/oracle/oracle.env.example) and your deployed `deploy/oracle/oracle.env`.
 

@@ -112,6 +112,9 @@ AGENT2_RLAIF_POLICY = [
     "Preserve the creator's chosen audience, tone, and episode goal.",
 ]
 
+AI_AUDIO_VOICE_ROLES = {"host", "guest", "narrator"}
+AI_AUDIO_DISCLOSURE = "This episode includes AI-generated voice audio."
+
 
 def now_iso():
     return datetime.now(timezone.utc).isoformat()
@@ -122,6 +125,13 @@ def parse_int_env(name: str, default: int) -> int:
         return int(os.environ.get(name, default))
     except (TypeError, ValueError):
         return default
+
+
+def parse_bool_env(name: str, default: bool = False) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def get_google_client_id() -> str:
@@ -665,6 +675,39 @@ def normalize_outline_items(items: Any) -> List[Dict[str, Any]]:
                 "beats": beats[:5],
             }
         )
+    return normalized
+
+
+def normalize_audio_script_turns(items: Any, limit: int = 48) -> List[Dict[str, str]]:
+    if not isinstance(items, list):
+        return []
+
+    normalized = []
+    for item in items[:limit]:
+        if isinstance(item, dict):
+            speaker = str(item.get("speaker") or item.get("name") or item.get("role") or "Host").strip() or "Host"
+            voice_role = str(item.get("voice_role") or item.get("voiceRole") or item.get("role") or "").strip().lower()
+            text = str(item.get("text") or item.get("line") or item.get("script") or "").strip()
+        else:
+            speaker = "Host"
+            voice_role = "host"
+            text = str(item).strip()
+
+        if not text:
+            continue
+
+        if voice_role not in AI_AUDIO_VOICE_ROLES:
+            lowered_speaker = speaker.lower()
+            if "guest" in lowered_speaker or "cohost" in lowered_speaker or "co-host" in lowered_speaker:
+                voice_role = "guest"
+            elif "narrator" in lowered_speaker or "story" in lowered_speaker:
+                voice_role = "narrator"
+            else:
+                voice_role = "host"
+
+        text = re.sub(r"\s+", " ", text).strip()
+        normalized.append({"speaker": speaker[:80], "voice_role": voice_role, "text": text})
+
     return normalized
 
 
@@ -1353,12 +1396,20 @@ async def revise_ai_generation_with_agent2_feedback(
             "suggested_description": "string",
             "suggested_keywords": ["string"],
             "why_this_episode_fits": "string",
+            "audio_script_turns": [
+                {
+                    "speaker": "Host | Guest | Narrator",
+                    "voice_role": "host | guest | narrator",
+                    "text": "voice-ready spoken text for this turn",
+                }
+            ],
             "recommended_category": "string",
         }
         prompt = (
             "Agent 2 reviewed this AI podcast package and produced RLAIF-style self-feedback.\n"
             "Revise the package once using the feedback. Keep the creator's topic, audience, tone, and goal intact.\n"
             "Do not add unsafe claims. Do not make it clickbait. Make it more concrete, human-paced, and useful.\n\n"
+            "Also revise audio_script_turns so they are voice-ready spoken text, preserve speaker roles, and never imitate any real person's voice.\n\n"
             f"Show:\n{json.dumps({'title': show.get('title'), 'description': show.get('description'), 'category': show.get('category')}, ensure_ascii=True)}\n\n"
             f"Creator brief:\n{json.dumps(brief, ensure_ascii=True)}\n\n"
             f"Current package:\n{json.dumps(generation, ensure_ascii=True)}\n\n"
@@ -1445,13 +1496,198 @@ def build_script_media_analysis(script_text: str, provider: str) -> Dict[str, An
     }
 
 
-def render_ai_audio_bytes(script_text: str) -> Dict[str, Any]:
+def audio_turns_to_script(turns: List[Dict[str, str]]) -> str:
+    return "\n\n".join(
+        f"{turn.get('speaker', 'Host')}: {turn.get('text', '').strip()}"
+        for turn in turns
+        if turn.get("text", "").strip()
+    ).strip()
+
+
+def cap_audio_script_turns(turns: List[Dict[str, str]]) -> List[Dict[str, str]]:
+    max_words = parse_int_env("AI_AUDIO_MAX_WORDS", 900)
+    max_chars = parse_int_env("AI_AUDIO_TTS_MAX_CHARS", 4800)
+    capped = []
+    word_count = 0
+    char_count = 0
+    for turn in turns:
+        text = (turn.get("text") or "").strip()
+        if not text:
+            continue
+        words = text.split()
+        remaining_words = max_words - word_count
+        remaining_chars = max_chars - char_count
+        if remaining_words <= 0 or remaining_chars <= 0:
+            break
+        if len(words) > remaining_words:
+            text = " ".join(words[:remaining_words])
+        if len(text) > remaining_chars:
+            text = text[:remaining_chars].rsplit(" ", 1)[0].strip()
+        if not text:
+            break
+        capped.append({**turn, "text": text})
+        word_count += len(text.split())
+        char_count += len(text)
+    return capped
+
+
+def split_audio_turns_for_tts(turns: List[Dict[str, str]]) -> List[Dict[str, str]]:
+    max_chars = parse_int_env("AI_AUDIO_TTS_MAX_CHARS_PER_TURN", 1400)
+    split_turns = []
+    for turn in turns:
+        text = (turn.get("text") or "").strip()
+        if not text:
+            continue
+        if len(text) <= max_chars:
+            split_turns.append(turn)
+            continue
+        sentences = re.split(r"(?<=[.!?])\s+", text)
+        buffer = ""
+        for sentence in sentences:
+            candidate = f"{buffer} {sentence}".strip()
+            if len(candidate) <= max_chars:
+                buffer = candidate
+                continue
+            if buffer:
+                split_turns.append({**turn, "text": buffer})
+            buffer = sentence[:max_chars].rsplit(" ", 1)[0].strip()
+        if buffer:
+            split_turns.append({**turn, "text": buffer})
+    return split_turns
+
+
+def build_ai_audio_turns(
+    show: Dict[str, Any],
+    title: str,
+    generation: Dict[str, Any],
+    intake: Optional[Dict[str, Any]] = None,
+) -> List[Dict[str, str]]:
+    turns = normalize_audio_script_turns(generation.get("audio_script_turns"), limit=48)
+    if not turns:
+        format_name = ((intake or {}).get("toneStyle") or {}).get("format", "")
+        questions = normalize_string_list(generation.get("guest_questions"), limit=5)
+        talking_points = normalize_string_list(generation.get("talking_points"), limit=8)
+        if format_name == "interview" and questions:
+            turns = [
+                {
+                    "speaker": "Host",
+                    "voice_role": "host",
+                    "text": generation.get("intro_script")
+                    or f"Welcome back to {show.get('title') or 'Audioraq'}. Today we are talking about {title}.",
+                }
+            ]
+            for index, question in enumerate(questions[:4]):
+                answer = talking_points[index] if index < len(talking_points) else generation.get("one_line_promise", "")
+                turns.extend(
+                    [
+                        {"speaker": "Host", "voice_role": "host", "text": question},
+                        {
+                            "speaker": "Guest",
+                            "voice_role": "guest",
+                            "text": answer or "The important part is making the idea practical and memorable for the listener.",
+                        },
+                    ]
+                )
+            if generation.get("outro_cta"):
+                turns.append({"speaker": "Host", "voice_role": "host", "text": generation["outro_cta"]})
+        else:
+            script = build_ai_audio_script(show, title, generation)
+            paragraphs = [part.strip() for part in re.split(r"\n{2,}", script) if part.strip()]
+            default_role = "narrator" if format_name == "narrative" else "host"
+            default_speaker = "Narrator" if default_role == "narrator" else "Host"
+            turns = [{"speaker": default_speaker, "voice_role": default_role, "text": paragraph} for paragraph in paragraphs]
+
+    return cap_audio_script_turns(turns)
+
+
+def get_ai_audio_provider_order() -> List[str]:
+    requested = os.environ.get("AI_AUDIO_TTS_PROVIDER", "auto").strip().lower() or "auto"
+    if requested == "auto":
+        order = []
+        if os.environ.get("ELEVENLABS_API_KEY"):
+            order.append("elevenlabs")
+        if os.environ.get("OPENAI_API_KEY"):
+            order.append("openai")
+        order.append("local")
+        return order
+
+    aliases = {"espeak": "local", "espeak-ng": "local"}
+    order = [aliases.get(provider.strip(), provider.strip()) for provider in requested.split(",") if provider.strip()]
+    if parse_bool_env("AI_AUDIO_TTS_LOCAL_FALLBACK", True) and "local" not in order:
+        order.append("local")
+    return order or ["local"]
+
+
+def safe_tts_error(exc: Exception) -> str:
+    return re.sub(r"\s+", " ", str(exc)).strip()[:220]
+
+
+def content_type_for_tts_output(output_format: str) -> str:
+    if output_format.startswith("mp3"):
+        return "audio/mpeg"
+    if output_format.startswith("wav"):
+        return "audio/wav"
+    if output_format.startswith("pcm"):
+        return "audio/L16"
+    return "audio/mpeg"
+
+
+def extension_for_content_type(content_type: str) -> str:
+    if content_type == "audio/wav":
+        return "wav"
+    if content_type == "audio/L16":
+        return "pcm"
+    return "mp3"
+
+
+def stitch_audio_segments(segments: List[bytes], extension: str = "mp3") -> bytes:
+    if len(segments) == 1:
+        return segments[0]
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        raise RuntimeError("ffmpeg is required to stitch multi-voice TTS audio segments")
+
+    with tempfile.TemporaryDirectory(prefix="audioraq-tts-stitch-") as temp_dir:
+        temp_path = Path(temp_dir)
+        concat_path = temp_path / "concat.txt"
+        output_path = temp_path / f"episode.{extension}"
+        concat_lines = []
+        for index, segment in enumerate(segments):
+            segment_path = temp_path / f"segment-{index:03d}.{extension}"
+            segment_path.write_bytes(segment)
+            concat_lines.append(f"file '{segment_path}'")
+        concat_path.write_text("\n".join(concat_lines), encoding="utf-8")
+        cmd = [
+            ffmpeg,
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            "concat",
+            "-safe",
+            "0",
+            "-i",
+            str(concat_path),
+            "-vn",
+            "-acodec",
+            "libmp3lame" if extension == "mp3" else "pcm_s16le",
+            "-b:a",
+            "128k",
+            str(output_path),
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=240)
+        if result.returncode != 0:
+            raise RuntimeError(result.stderr or result.stdout or "ffmpeg stitching failed")
+        data = output_path.read_bytes()
+        if len(data) < 1024:
+            raise RuntimeError("ffmpeg stitched an empty audio file")
+        return data
+
+
+def render_local_ai_audio(script_text: str) -> Dict[str, Any]:
     renderer = shutil.which("espeak-ng") or shutil.which("espeak")
     if not renderer:
-        raise HTTPException(
-            status_code=503,
-            detail="AI audio rendering is not available on this server yet. Please try again after the audio renderer is installed.",
-        )
+        raise RuntimeError("local AI audio renderer is not installed")
 
     voice = os.environ.get("AI_AUDIO_TTS_VOICE", "en-us").strip() or "en-us"
     speed = os.environ.get("AI_AUDIO_TTS_SPEED", "155").strip() or "155"
@@ -1464,16 +1700,160 @@ def render_ai_audio_bytes(script_text: str) -> Dict[str, Any]:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=240)
         if result.returncode != 0:
             logger.error(f"AI audio renderer failed: {result.stderr or result.stdout}")
-            raise HTTPException(status_code=502, detail="AI audio rendering failed. Please retry.")
+            raise RuntimeError("local AI audio rendering failed")
         data = output_path.read_bytes()
         if len(data) < 1024:
-            raise HTTPException(status_code=502, detail="AI audio renderer produced an empty file. Please retry.")
+            raise RuntimeError("local AI audio renderer produced an empty file")
         return {
             "data": data,
             "content_type": "audio/wav",
             "provider": Path(renderer).name,
+            "provider_kind": "local",
+            "model": Path(renderer).name,
+            "voices": {"host": voice},
+            "turn_count": 1,
+            "extension": "wav",
             "filename": "ai-generated-episode.wav",
         }
+
+
+def render_elevenlabs_ai_audio(turns: List[Dict[str, str]]) -> Dict[str, Any]:
+    api_key = os.environ.get("ELEVENLABS_API_KEY", "").strip()
+    if not api_key:
+        raise RuntimeError("ELEVENLABS_API_KEY is not configured")
+
+    voice_ids = {
+        "host": os.environ.get("ELEVENLABS_VOICE_ID_HOST", "JBFqnCBsd6RMkjVDRZzb").strip(),
+        "guest": os.environ.get("ELEVENLABS_VOICE_ID_GUEST", "Aw4FAjKCGjjNkVhN1Xmq").strip(),
+        "narrator": os.environ.get("ELEVENLABS_VOICE_ID_NARRATOR", "").strip(),
+    }
+    if not voice_ids["narrator"]:
+        voice_ids["narrator"] = voice_ids["host"]
+
+    model_id = os.environ.get("ELEVENLABS_MODEL_ID", "eleven_v3").strip() or "eleven_v3"
+    output_format = os.environ.get("ELEVENLABS_OUTPUT_FORMAT", "mp3_44100_128").strip() or "mp3_44100_128"
+    content_type = content_type_for_tts_output(output_format)
+    inputs = []
+    for turn in split_audio_turns_for_tts(turns):
+        voice_role = turn.get("voice_role") if turn.get("voice_role") in AI_AUDIO_VOICE_ROLES else "host"
+        inputs.append({"text": turn["text"], "voice_id": voice_ids[voice_role]})
+    if not inputs:
+        raise RuntimeError("no voice turns were available for ElevenLabs TTS")
+
+    body = {"inputs": inputs, "model_id": model_id}
+    language_code = os.environ.get("ELEVENLABS_LANGUAGE_CODE", "").strip()
+    if language_code:
+        body["language_code"] = language_code
+
+    response = requests.post(
+        "https://api.elevenlabs.io/v1/text-to-dialogue",
+        params={"output_format": output_format},
+        headers={"xi-api-key": api_key, "Content-Type": "application/json", "Accept": content_type},
+        json=body,
+        timeout=parse_int_env("AI_AUDIO_TTS_TIMEOUT_SECONDS", 240),
+    )
+    if response.status_code >= 400:
+        raise RuntimeError(f"ElevenLabs TTS failed with {response.status_code}: {response.text[:300]}")
+    data = response.content
+    if len(data) < 1024:
+        raise RuntimeError("ElevenLabs TTS produced an empty file")
+    extension = extension_for_content_type(content_type)
+    return {
+        "data": data,
+        "content_type": content_type,
+        "provider": f"elevenlabs:{model_id}",
+        "provider_kind": "elevenlabs",
+        "model": model_id,
+        "voices": {role: voice for role, voice in voice_ids.items() if voice},
+        "turn_count": len(inputs),
+        "extension": extension,
+        "filename": f"ai-generated-episode.{extension}",
+    }
+
+
+def render_openai_ai_audio(turns: List[Dict[str, str]]) -> Dict[str, Any]:
+    api_key = os.environ.get("OPENAI_API_KEY", "").strip()
+    if not api_key:
+        raise RuntimeError("OPENAI_API_KEY is not configured")
+
+    model = os.environ.get("OPENAI_TTS_MODEL", "gpt-4o-mini-tts").strip() or "gpt-4o-mini-tts"
+    response_format = os.environ.get("OPENAI_TTS_RESPONSE_FORMAT", "mp3").strip() or "mp3"
+    content_type = "audio/mpeg" if response_format == "mp3" else f"audio/{response_format}"
+    gpt4o_voice_defaults = {"host": "marin", "guest": "cedar", "narrator": "coral"}
+    legacy_voice_defaults = {"host": "alloy", "guest": "nova", "narrator": "onyx"}
+    defaults = gpt4o_voice_defaults if model.startswith("gpt-4o") else legacy_voice_defaults
+    voices = {
+        "host": os.environ.get("OPENAI_TTS_VOICE_HOST", defaults["host"]).strip() or defaults["host"],
+        "guest": os.environ.get("OPENAI_TTS_VOICE_GUEST", defaults["guest"]).strip() or defaults["guest"],
+        "narrator": os.environ.get("OPENAI_TTS_VOICE_NARRATOR", defaults["narrator"]).strip() or defaults["narrator"],
+    }
+    base_instructions = os.environ.get(
+        "OPENAI_TTS_INSTRUCTIONS",
+        "Natural podcast delivery: warm, clear, conversational, and expressive without imitating any real person.",
+    ).strip()
+
+    segments = []
+    rendered_turns = split_audio_turns_for_tts(turns)
+    if not rendered_turns:
+        raise RuntimeError("no voice turns were available for OpenAI TTS")
+    for turn in rendered_turns:
+        voice_role = turn.get("voice_role") if turn.get("voice_role") in AI_AUDIO_VOICE_ROLES else "host"
+        payload = {
+            "model": model,
+            "voice": voices[voice_role],
+            "input": turn["text"],
+            "response_format": response_format,
+        }
+        if model.startswith("gpt-4o") and base_instructions:
+            payload["instructions"] = f"{base_instructions} Speaker role: {turn.get('speaker') or voice_role}."
+        response = requests.post(
+            "https://api.openai.com/v1/audio/speech",
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json=payload,
+            timeout=parse_int_env("AI_AUDIO_TTS_TIMEOUT_SECONDS", 240),
+        )
+        if response.status_code >= 400:
+            raise RuntimeError(f"OpenAI TTS failed with {response.status_code}: {response.text[:300]}")
+        if len(response.content) < 1024:
+            raise RuntimeError("OpenAI TTS produced an empty segment")
+        segments.append(response.content)
+
+    extension = "mp3" if response_format == "mp3" else response_format
+    data = stitch_audio_segments(segments, extension=extension)
+    return {
+        "data": data,
+        "content_type": content_type,
+        "provider": f"openai:{model}",
+        "provider_kind": "openai",
+        "model": model,
+        "voices": voices,
+        "turn_count": len(rendered_turns),
+        "extension": extension,
+        "filename": f"ai-generated-episode.{extension}",
+    }
+
+
+def render_ai_audio_bytes(script_text: str, turns: Optional[List[Dict[str, str]]] = None) -> Dict[str, Any]:
+    voice_turns = cap_audio_script_turns(turns or [{"speaker": "Host", "voice_role": "host", "text": script_text}])
+    provider_errors = []
+    for provider in get_ai_audio_provider_order():
+        try:
+            if provider == "elevenlabs":
+                return render_elevenlabs_ai_audio(voice_turns)
+            if provider == "openai":
+                return render_openai_ai_audio(voice_turns)
+            if provider == "local":
+                return render_local_ai_audio(script_text)
+            raise RuntimeError(f"unknown provider '{provider}'")
+        except Exception as exc:
+            error = safe_tts_error(exc)
+            provider_errors.append(f"{provider}: {error}")
+            logger.warning(f"AI audio provider {provider} failed; trying fallback if available: {error}")
+
+    raise HTTPException(
+        status_code=502,
+        detail=f"AI audio rendering failed across configured providers. Last errors: {'; '.join(provider_errors[-3:])}",
+    )
 
 
 def build_fallback_ai_generation(brief: Dict[str, Any], show: Dict[str, Any]) -> Dict[str, Any]:
@@ -1540,6 +1920,79 @@ def build_fallback_ai_generation(brief: Dict[str, Any], show: Dict[str, Any]) ->
     if known_issues:
         talking_points.append(f"Address this known risk directly: {known_issues}")
 
+    if format_name == "interview":
+        audio_script_turns = [
+            {
+                "speaker": "Host",
+                "voice_role": "host",
+                "text": f"Welcome back to {podcast_name}. Today we are unpacking {topic} for {audience}. {hook}",
+            }
+        ]
+        questions = [
+            f"What do most people misunderstand about {topic}?",
+            f"What changed your own thinking about {topic}?",
+            f"What should listeners do next if they want a better result?",
+        ]
+        for index, question in enumerate(questions[:3]):
+            answer = talking_points[index] if index < len(talking_points) else desired_outcome
+            audio_script_turns.extend(
+                [
+                    {"speaker": "Host", "voice_role": "host", "text": question},
+                    {
+                        "speaker": "Guest",
+                        "voice_role": "guest",
+                        "text": f"The useful way to think about it is this: {answer}. For {audience}, the practical takeaway is to connect that idea back to {desired_outcome}.",
+                    },
+                ]
+            )
+        audio_script_turns.append(
+            {
+                "speaker": "Host",
+                "voice_role": "host",
+                "text": f"That is the roadmap for {topic}. Follow {podcast_name} on Audioraq for the next episode.",
+            }
+        )
+    elif format_name == "narrative":
+        audio_script_turns = [
+            {"speaker": "Narrator", "voice_role": "narrator", "text": hook},
+            {
+                "speaker": "Host",
+                "voice_role": "host",
+                "text": f"This episode follows {topic} through the lens of {audience}, with one promise: {desired_outcome}.",
+            },
+        ]
+        for point in talking_points[:4]:
+            audio_script_turns.append({"speaker": "Narrator", "voice_role": "narrator", "text": point})
+        audio_script_turns.append(
+            {
+                "speaker": "Host",
+                "voice_role": "host",
+                "text": f"Keep this takeaway close: {desired_outcome}.",
+            }
+        )
+    else:
+        audio_script_turns = [
+            {
+                "speaker": "Host",
+                "voice_role": "host",
+                "text": f"Welcome back to {podcast_name}. {hook}",
+            },
+            {
+                "speaker": "Host",
+                "voice_role": "host",
+                "text": f"Today I am taking a {tone} look at {topic}, with a focus on helping {audience} {desired_outcome}.",
+            },
+        ]
+        for point in talking_points[:5]:
+            audio_script_turns.append({"speaker": "Host", "voice_role": "host", "text": point})
+        audio_script_turns.append(
+            {
+                "speaker": "Host",
+                "voice_role": "host",
+                "text": f"If this was useful, follow {podcast_name} on Audioraq for the next episode.",
+            }
+        )
+
     generation = {
         "episode_title": f"{topic}: A clearer roadmap for {audience}",
         "one_line_promise": f"{podcast_name} helps {audience} understand {topic} and {desired_outcome}.",
@@ -1580,6 +2033,7 @@ def build_fallback_ai_generation(brief: Dict[str, Any], show: Dict[str, Any]) ->
             f"This episode is designed for {audience}, stays aligned with a {tone} voice, "
             f"and favors {optimize_for} over low-signal filler."
         ),
+        "audio_script_turns": audio_script_turns,
         "recommended_category": (show.get("category") or DEFAULT_SHOW_CATEGORY).lower(),
     }
     generation["suggested_description"] = build_ai_publish_description(generation)
@@ -1612,6 +2066,13 @@ def normalize_ai_generation_response(raw: Dict[str, Any], brief: Dict[str, Any],
         values = normalize_string_list(raw.get(list_field), limit=10)
         if values:
             generation[list_field] = values
+
+    audio_script_turns = normalize_audio_script_turns(
+        raw.get("audio_script_turns") or raw.get("audioScriptTurns") or raw.get("audio_script"),
+        limit=48,
+    )
+    if audio_script_turns:
+        generation["audio_script_turns"] = audio_script_turns
 
     recommended_category = str(raw.get("recommended_category") or "").strip().lower()
     if recommended_category:
@@ -1664,6 +2125,13 @@ async def generate_ai_podcast_package(brief: Dict[str, Any], show: Dict[str, Any
             "suggested_description": "string",
             "suggested_keywords": ["string"],
             "why_this_episode_fits": "string",
+            "audio_script_turns": [
+                {
+                    "speaker": "Host | Guest | Narrator",
+                    "voice_role": "host | guest | narrator",
+                    "text": "voice-ready spoken text for this turn",
+                }
+            ],
             "recommended_category": "string",
         }
         prompt = (
@@ -1675,6 +2143,9 @@ async def generate_ai_podcast_package(brief: Dict[str, Any], show: Dict[str, Any
             "- The hook should be sharp, but not clickbait.\n"
             "- Align the outline to the requested tone, format, audience, and desired outcome.\n"
             "- If the format is not interview, guest_questions can be an empty list.\n"
+            "- audio_script_turns should be ready for text-to-speech and sound like a polished podcast, not outline notes.\n"
+            "- For interview or dialogue formats, alternate Host and Guest turns with distinct voices; for solo formats, use Host only unless a Narrator improves clarity.\n"
+            f"- Do not imitate or claim to be any real person's voice. Add no disclosure text unless it fits naturally; the platform stores this separately: {AI_AUDIO_DISCLOSURE}\n"
             "- Keep suggested keywords concise and usable for search/discovery.\n"
             "- recommended_category should be a single lowercase category.\n\n"
             f"Return JSON matching this schema exactly:\n{json.dumps(schema, ensure_ascii=True)}"
@@ -3786,8 +4257,9 @@ async def create_ai_podcast_episode(
     ).lower()
     keywords = await extract_keywords(f"{final_title} {final_description} {normalized_category} {show['title']}")
     selected_rating = normalize_content_rating(audience_rating)
-    audio_script = build_ai_audio_script(show, final_title, ai_draft.get("generation", {}))
-    rendered_audio = render_ai_audio_bytes(audio_script)
+    audio_turns = build_ai_audio_turns(show, final_title, ai_draft.get("generation", {}), ai_draft.get("intake", {}))
+    audio_script = audio_turns_to_script(audio_turns) or build_ai_audio_script(show, final_title, ai_draft.get("generation", {}))
+    rendered_audio = render_ai_audio_bytes(audio_script, audio_turns)
     media_analysis = build_script_media_analysis(audio_script, f"ai-script:{rendered_audio['provider']}")
     moderation = await review_episode_safety(
         show,
@@ -3808,8 +4280,9 @@ async def create_ai_podcast_episode(
     moderation = merge_agent2_quality_into_moderation(moderation, quality_agent)
     resolved_rating = MATURE_RATING if moderation.get("recommended_age_gate") == MATURE_RATING else selected_rating
     episode_id = str(uuid.uuid4())
-    original_filename = f"{slugify_filename(final_title)}.wav"
-    media_path = f"{APP_NAME}/episodes/{user['_id']}/{episode_id}.wav"
+    audio_extension = rendered_audio.get("extension") or extension_for_content_type(rendered_audio["content_type"])
+    original_filename = f"{slugify_filename(final_title)}.{audio_extension}"
+    media_path = f"{APP_NAME}/episodes/{user['_id']}/{episode_id}.{audio_extension}"
     put_object(media_path, rendered_audio["data"], rendered_audio["content_type"])
 
     podcast_doc = {
@@ -3850,7 +4323,13 @@ async def create_ai_podcast_episode(
         "ai_draft_id": ai_draft["id"],
         "ai_assisted": True,
         "ai_audio_provider": rendered_audio["provider"],
+        "ai_audio_provider_kind": rendered_audio.get("provider_kind", ""),
+        "ai_audio_model": rendered_audio.get("model", ""),
+        "ai_audio_voices": rendered_audio.get("voices", {}),
+        "ai_audio_turn_count": rendered_audio.get("turn_count", len(audio_turns)),
         "ai_audio_script": audio_script,
+        "ai_audio_turns": audio_turns,
+        "ai_voice_disclosure": AI_AUDIO_DISCLOSURE,
         "media_policy": ai_draft.get("media_policy", {}),
         "script_package": ai_draft.get("generation", {}),
     }
