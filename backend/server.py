@@ -1745,13 +1745,25 @@ def render_elevenlabs_ai_audio(turns: List[Dict[str, str]]) -> Dict[str, Any]:
     if language_code:
         body["language_code"] = language_code
 
+    request_timeout = parse_int_env("AI_AUDIO_TTS_TIMEOUT_SECONDS", 240)
     response = requests.post(
         "https://api.elevenlabs.io/v1/text-to-dialogue",
         params={"output_format": output_format},
         headers={"xi-api-key": api_key, "Content-Type": "application/json", "Accept": content_type},
         json=body,
-        timeout=parse_int_env("AI_AUDIO_TTS_TIMEOUT_SECONDS", 240),
+        timeout=request_timeout,
     )
+    if response.status_code == 404 and "voice_not_found" in response.text and len(set(voice_ids.values())) > 1:
+        logger.warning("ElevenLabs secondary voice was not available; retrying dialogue render with host voice only")
+        voice_ids = {role: voice_ids["host"] for role in voice_ids}
+        body["inputs"] = [{**item, "voice_id": voice_ids["host"]} for item in inputs]
+        response = requests.post(
+            "https://api.elevenlabs.io/v1/text-to-dialogue",
+            params={"output_format": output_format},
+            headers={"xi-api-key": api_key, "Content-Type": "application/json", "Accept": content_type},
+            json=body,
+            timeout=request_timeout,
+        )
     if response.status_code >= 400:
         raise RuntimeError(f"ElevenLabs TTS failed with {response.status_code}: {response.text[:300]}")
     data = response.content
