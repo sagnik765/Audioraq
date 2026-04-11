@@ -151,7 +151,7 @@ export default function PodcasterDashboard() {
         withCredentials: true,
         headers: { 'Content-Type': 'multipart/form-data' },
       });
-      notifyEpisodeOutcome(data, publishMode === 'upload' ? 'Episode published' : 'AI episode draft created');
+      notifyEpisodeOutcome(data, publishMode === 'upload' ? 'Episode published' : 'AI audio episode published');
       resetUploadForm();
       setShowUpload(false);
       fetchStudio();
@@ -499,8 +499,8 @@ export default function PodcasterDashboard() {
                       : 'border-[#27272A] bg-[#0A0A0B] hover:border-[#8A8A93]'
                   }`}
                 >
-                  <p className="text-sm font-semibold text-white mb-1">Create audio-only AI draft</p>
-                  <p className="text-xs text-[#8A8A93]">Create a non-playable audio episode draft using the generated hook, outline, notes, and Agent 2 review.</p>
+                  <p className="text-sm font-semibold text-white mb-1">Create rendered AI audio</p>
+                  <p className="text-xs text-[#8A8A93]">Render a playable audio episode from the generated script, then attach the Agent 2 review.</p>
                 </button>
               </div>
             )}
@@ -617,7 +617,7 @@ export default function PodcasterDashboard() {
                 <div className="bg-[#0A0A0B] border border-[#27272A] rounded-2xl px-4 py-4">
                   <p className="text-xs uppercase tracking-[0.18em] text-[#8A8A93] mb-2">AI draft outcome</p>
                   <p className="text-sm text-[#C7C7D1]">
-                    This creates an audio-only draft episode inside Creator Studio using the AI package. It shows up with the generated script package, safety review, and Agent 2 quality report, but it will not be playable until audio is added later.
+                    This renders an audio-only episode from the AI package, publishes it as playable audio, and stores the generated script package, safety review, and Agent 2 quality report.
                   </p>
                 </div>
               )}
@@ -628,7 +628,7 @@ export default function PodcasterDashboard() {
                 className="bg-[#F5A623] hover:bg-[#F7B84B] text-[#0A0A0B] font-bold rounded-full px-6 py-3 transition-colors disabled:opacity-50"
                 data-testid="upload-submit-btn"
               >
-                {uploading ? 'Publishing...' : publishMode === 'upload' ? 'Publish Episode' : 'Create Audio-Only AI Draft'}
+                {uploading ? 'Publishing...' : publishMode === 'upload' ? 'Publish Episode' : 'Create AI Audio Episode'}
               </button>
             </form>
           </div>

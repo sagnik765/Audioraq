@@ -1380,6 +1380,102 @@ async def revise_ai_generation_with_agent2_feedback(
         return None
 
 
+def slugify_filename(value: str, fallback: str = "episode") -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", (value or "").lower()).strip("-")
+    return (slug or fallback)[:80]
+
+
+def build_ai_audio_script(show: Dict[str, Any], title: str, generation: Dict[str, Any]) -> str:
+    lines = [
+        title,
+        "",
+    ]
+    if generation.get("hook"):
+        lines.extend([generation["hook"], ""])
+    if generation.get("intro_script"):
+        lines.extend([generation["intro_script"], ""])
+    elif generation.get("one_line_promise"):
+        lines.extend([generation["one_line_promise"], ""])
+
+    outline = generation.get("outline") or []
+    for section in outline[:5]:
+        section_title = str(section.get("section_title") or "").strip()
+        purpose = str(section.get("purpose") or "").strip()
+        beats = normalize_string_list(section.get("beats"), limit=4)
+        if section_title:
+            lines.append(section_title)
+        if purpose:
+            lines.append(purpose)
+        for beat in beats:
+            lines.append(beat)
+        lines.append("")
+
+    talking_points = normalize_string_list(generation.get("talking_points"), limit=6)
+    if talking_points:
+        lines.append("Here are the main takeaways.")
+        lines.extend(talking_points)
+        lines.append("")
+
+    if generation.get("show_notes_summary"):
+        lines.extend([generation["show_notes_summary"], ""])
+    if generation.get("outro_cta"):
+        lines.append(generation["outro_cta"])
+    else:
+        lines.append(f"If this helped, follow {show.get('title') or 'this show'} on Audioraq for the next episode.")
+
+    script = "\n".join(line.strip() for line in lines if line is not None)
+    script = re.sub(r"\n{3,}", "\n\n", script).strip()
+    words = script.split()
+    max_words = parse_int_env("AI_AUDIO_MAX_WORDS", 900)
+    if len(words) > max_words:
+        script = " ".join(words[:max_words]).rsplit(".", 1)[0].strip() + "."
+    return script
+
+
+def build_script_media_analysis(script_text: str, provider: str) -> Dict[str, Any]:
+    return {
+        "status": "script_reviewed",
+        "provider": provider,
+        "media_reviewed": True,
+        "transcript_text": script_text,
+        "transcript_excerpt": build_transcript_excerpt(script_text),
+        "word_count": len((script_text or "").split()),
+        "transcript_truncated": False,
+        "error": "",
+    }
+
+
+def render_ai_audio_bytes(script_text: str) -> Dict[str, Any]:
+    renderer = shutil.which("espeak-ng") or shutil.which("espeak")
+    if not renderer:
+        raise HTTPException(
+            status_code=503,
+            detail="AI audio rendering is not available on this server yet. Please try again after the audio renderer is installed.",
+        )
+
+    voice = os.environ.get("AI_AUDIO_TTS_VOICE", "en-us").strip() or "en-us"
+    speed = os.environ.get("AI_AUDIO_TTS_SPEED", "155").strip() or "155"
+    with tempfile.TemporaryDirectory(prefix="audioraq-ai-audio-") as temp_dir:
+        temp_path = Path(temp_dir)
+        script_path = temp_path / "script.txt"
+        output_path = temp_path / "episode.wav"
+        script_path.write_text(script_text, encoding="utf-8")
+        cmd = [renderer, "-v", voice, "-s", speed, "-f", str(script_path), "-w", str(output_path)]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=240)
+        if result.returncode != 0:
+            logger.error(f"AI audio renderer failed: {result.stderr or result.stdout}")
+            raise HTTPException(status_code=502, detail="AI audio rendering failed. Please retry.")
+        data = output_path.read_bytes()
+        if len(data) < 1024:
+            raise HTTPException(status_code=502, detail="AI audio renderer produced an empty file. Please retry.")
+        return {
+            "data": data,
+            "content_type": "audio/wav",
+            "provider": Path(renderer).name,
+            "filename": "ai-generated-episode.wav",
+        }
+
+
 def build_fallback_ai_generation(brief: Dict[str, Any], show: Dict[str, Any]) -> Dict[str, Any]:
     identity = brief.get("identity", {})
     episode_intent = brief.get("episodeIntent", {})
@@ -3690,6 +3786,9 @@ async def create_ai_podcast_episode(
     ).lower()
     keywords = await extract_keywords(f"{final_title} {final_description} {normalized_category} {show['title']}")
     selected_rating = normalize_content_rating(audience_rating)
+    audio_script = build_ai_audio_script(show, final_title, ai_draft.get("generation", {}))
+    rendered_audio = render_ai_audio_bytes(audio_script)
+    media_analysis = build_script_media_analysis(audio_script, f"ai-script:{rendered_audio['provider']}")
     moderation = await review_episode_safety(
         show,
         final_title,
@@ -3697,28 +3796,34 @@ async def create_ai_podcast_episode(
         normalized_category,
         selected_rating=selected_rating,
         generation=ai_draft.get("generation"),
+        media_analysis=media_analysis,
     )
     quality_agent = evaluate_agent2_quality(
         final_title,
         final_description,
         generation=ai_draft.get("generation"),
-        source_kind="ai_audio_draft",
+        media_analysis=media_analysis,
+        source_kind="ai_audio_render",
     )
     moderation = merge_agent2_quality_into_moderation(moderation, quality_agent)
     resolved_rating = MATURE_RATING if moderation.get("recommended_age_gate") == MATURE_RATING else selected_rating
+    episode_id = str(uuid.uuid4())
+    original_filename = f"{slugify_filename(final_title)}.wav"
+    media_path = f"{APP_NAME}/episodes/{user['_id']}/{episode_id}.wav"
+    put_object(media_path, rendered_audio["data"], rendered_audio["content_type"])
 
     podcast_doc = {
-        "id": str(uuid.uuid4()),
+        "id": episode_id,
         "show_id": show["id"],
         "show_title": show["title"],
         "title": final_title,
         "description": final_description,
         "category": normalized_category,
         "keywords": keywords,
-        "media_path": "",
+        "media_path": media_path,
         "media_type": "audio",
-        "content_type": "",
-        "original_filename": "",
+        "content_type": rendered_audio["content_type"],
+        "original_filename": original_filename,
         "thumbnail_path": thumbnail_path,
         "podcaster_id": user["_id"],
         "podcaster_name": user["name"],
@@ -3734,15 +3839,18 @@ async def create_ai_podcast_episode(
         "quality_agent": quality_agent,
         "quality_status": quality_agent.get("status", "pass"),
         "quality_score": quality_agent.get("quality_score", 0),
-        "publication_status": PUBLICATION_STATUS_DRAFT,
-        "is_playable": False,
+        "publication_status": PUBLICATION_STATUS_PUBLISHED,
+        "is_playable": True,
         "source_kind": "ai",
-        "file_size": 0,
+        "file_size": len(rendered_audio["data"]),
+        "transcript_status": media_analysis.get("status", ""),
         "created_at": now_iso(),
         "updated_at": now_iso(),
         "is_deleted": False,
         "ai_draft_id": ai_draft["id"],
         "ai_assisted": True,
+        "ai_audio_provider": rendered_audio["provider"],
+        "ai_audio_script": audio_script,
         "media_policy": ai_draft.get("media_policy", {}),
         "script_package": ai_draft.get("generation", {}),
     }
@@ -4010,18 +4118,22 @@ async def delete_podcast(podcast_id: str, request: Request):
     if podcast["podcaster_id"] != user["_id"] and user["role"] != "admin":
         raise HTTPException(status_code=403, detail="Not authorized")
 
-    cleanup_result = cleanup_storage_paths([podcast.get("media_path"), podcast.get("thumbnail_path")], strict=True)
+    cleanup_result = cleanup_storage_paths([podcast.get("media_path"), podcast.get("thumbnail_path")], strict=False)
+    cleanup_pending = bool(cleanup_result.get("failures"))
     timestamp = now_iso()
+    delete_updates = {
+        "is_deleted": True,
+        "updated_at": timestamp,
+        "deleted_at": timestamp,
+        "storage_cleanup_pending": cleanup_pending,
+        "storage_cleanup_result": cleanup_result,
+        "storage_cleanup_last_attempt_at": timestamp,
+    }
+    if not cleanup_pending:
+        delete_updates["storage_cleaned_at"] = timestamp
     await db.podcasts.update_one(
         {"id": podcast_id},
-        {
-            "$set": {
-                "is_deleted": True,
-                "updated_at": timestamp,
-                "deleted_at": timestamp,
-                "storage_cleaned_at": timestamp,
-            }
-        },
+        {"$set": delete_updates},
     )
     return {"message": "Episode deleted", "storage_cleanup": cleanup_result}
 
