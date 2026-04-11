@@ -1477,7 +1477,7 @@ def build_ai_audio_script(show: Dict[str, Any], title: str, generation: Dict[str
     script = "\n".join(line.strip() for line in lines if line is not None)
     script = re.sub(r"\n{3,}", "\n\n", script).strip()
     words = script.split()
-    max_words = parse_int_env("AI_AUDIO_MAX_WORDS", 900)
+    max_words = parse_int_env("AI_AUDIO_MAX_WORDS", 1200)
     if len(words) > max_words:
         script = " ".join(words[:max_words]).rsplit(".", 1)[0].strip() + "."
     return script
@@ -1505,26 +1505,78 @@ def audio_turns_to_script(turns: List[Dict[str, str]]) -> str:
 
 
 def cap_audio_script_turns(turns: List[Dict[str, str]]) -> List[Dict[str, str]]:
-    max_words = parse_int_env("AI_AUDIO_MAX_WORDS", 900)
-    max_chars = parse_int_env("AI_AUDIO_TTS_MAX_CHARS", 4800)
+    max_words = parse_int_env("AI_AUDIO_MAX_WORDS", 1200)
+    max_chars = parse_int_env("AI_AUDIO_TTS_MAX_CHARS", 4500)
+    min_final_turn_words = parse_int_env("AI_AUDIO_MIN_FINAL_TURN_WORDS", 18)
+    reserved_end_turns = max(0, parse_int_env("AI_AUDIO_RESERVED_END_TURNS", 2))
+
+    def trim_text_to_budget(text: str, remaining_words: int, remaining_chars: int) -> str:
+        text = (text or "").strip()
+        if not text or remaining_words <= 0 or remaining_chars <= 0:
+            return ""
+
+        truncated = False
+        words = text.split()
+        if len(words) > remaining_words:
+            if remaining_words < min_final_turn_words:
+                return ""
+            text = " ".join(words[:remaining_words])
+            truncated = True
+
+        if len(text) > remaining_chars:
+            if remaining_chars < 140:
+                return ""
+            text = text[:remaining_chars].rsplit(" ", 1)[0].strip()
+            sentence_boundary = max(text.rfind("."), text.rfind("?"), text.rfind("!"))
+            if sentence_boundary >= 120:
+                text = text[: sentence_boundary + 1].strip()
+            elif text and text[-1] not in ".!?":
+                text = f"{text.rstrip(' ,;:')}."
+            truncated = True
+
+        if truncated and len(text.split()) < min_final_turn_words:
+            return ""
+        return text.strip()
+
+    normalized_turns = []
+    for turn in turns:
+        text = (turn.get("text") or "").strip()
+        if text:
+            normalized_turns.append({**turn, "text": text})
+
+    if not normalized_turns:
+        return []
+
+    reserved_turns = []
+    main_turns = normalized_turns
+    if reserved_end_turns and len(normalized_turns) > reserved_end_turns + 2:
+        reserved_turns = normalized_turns[-reserved_end_turns:]
+        main_turns = normalized_turns[:-reserved_end_turns]
+
+    reserved_words = sum(len(turn["text"].split()) for turn in reserved_turns)
+    reserved_chars = sum(len(turn["text"]) for turn in reserved_turns)
+    main_word_budget = max(max_words - reserved_words, 0) if reserved_turns else max_words
+    main_char_budget = max(max_chars - reserved_chars, 0) if reserved_turns else max_chars
     capped = []
     word_count = 0
     char_count = 0
-    for turn in turns:
-        text = (turn.get("text") or "").strip()
+
+    for turn in main_turns:
+        remaining_words = main_word_budget - word_count
+        remaining_chars = main_char_budget - char_count
+        text = trim_text_to_budget(turn["text"], remaining_words, remaining_chars)
         if not text:
-            continue
-        words = text.split()
+            break
+        capped.append({**turn, "text": text})
+        word_count += len(text.split())
+        char_count += len(text)
+
+    for turn in reserved_turns:
         remaining_words = max_words - word_count
         remaining_chars = max_chars - char_count
-        if remaining_words <= 0 or remaining_chars <= 0:
-            break
-        if len(words) > remaining_words:
-            text = " ".join(words[:remaining_words])
-        if len(text) > remaining_chars:
-            text = text[:remaining_chars].rsplit(" ", 1)[0].strip()
+        text = trim_text_to_budget(turn["text"], remaining_words, remaining_chars)
         if not text:
-            break
+            continue
         capped.append({**turn, "text": text})
         word_count += len(text.split())
         char_count += len(text)
@@ -1656,7 +1708,7 @@ def stitch_audio_segments(segments: List[bytes], extension: str = "mp3") -> byte
             segment_path = temp_path / f"segment-{index:03d}.{extension}"
             segment_path.write_bytes(segment)
             concat_lines.append(f"file '{segment_path}'")
-        concat_path.write_text("\n".join(concat_lines), encoding="utf-8")
+        concat_path.write_text("\n".join(concat_lines) + "\n", encoding="utf-8")
         cmd = [
             ffmpeg,
             "-hide_banner",
@@ -1677,6 +1729,12 @@ def stitch_audio_segments(segments: List[bytes], extension: str = "mp3") -> byte
         ]
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=240)
         if result.returncode != 0:
+            if extension == "mp3":
+                logger.warning(f"ffmpeg MP3 stitching failed; using safe byte concatenation fallback: {result.stderr or result.stdout}")
+                data = b"".join(segments)
+                if len(data) < 1024:
+                    raise RuntimeError("byte-concatenated audio was empty after ffmpeg stitching failed")
+                return data
             raise RuntimeError(result.stderr or result.stdout or "ffmpeg stitching failed")
         data = output_path.read_bytes()
         if len(data) < 1024:
@@ -1722,54 +1780,62 @@ def render_elevenlabs_ai_audio(turns: List[Dict[str, str]]) -> Dict[str, Any]:
     if not api_key:
         raise RuntimeError("ELEVENLABS_API_KEY is not configured")
 
+    host_voice = os.environ.get("ELEVENLABS_VOICE_ID_HOST", "JBFqnCBsd6RMkjVDRZzb").strip() or "JBFqnCBsd6RMkjVDRZzb"
     voice_ids = {
-        "host": os.environ.get("ELEVENLABS_VOICE_ID_HOST", "JBFqnCBsd6RMkjVDRZzb").strip(),
-        "guest": os.environ.get("ELEVENLABS_VOICE_ID_GUEST", "Aw4FAjKCGjjNkVhN1Xmq").strip(),
-        "narrator": os.environ.get("ELEVENLABS_VOICE_ID_NARRATOR", "").strip(),
+        "host": host_voice,
+        "guest": os.environ.get("ELEVENLABS_VOICE_ID_GUEST", "").strip() or host_voice,
+        "narrator": os.environ.get("ELEVENLABS_VOICE_ID_NARRATOR", "").strip() or host_voice,
     }
-    if not voice_ids["narrator"]:
-        voice_ids["narrator"] = voice_ids["host"]
 
     model_id = os.environ.get("ELEVENLABS_MODEL_ID", "eleven_v3").strip() or "eleven_v3"
     output_format = os.environ.get("ELEVENLABS_OUTPUT_FORMAT", "mp3_44100_128").strip() or "mp3_44100_128"
     content_type = content_type_for_tts_output(output_format)
-    inputs = []
-    for turn in split_audio_turns_for_tts(turns):
-        voice_role = turn.get("voice_role") if turn.get("voice_role") in AI_AUDIO_VOICE_ROLES else "host"
-        inputs.append({"text": turn["text"], "voice_id": voice_ids[voice_role]})
-    if not inputs:
+    extension = extension_for_content_type(content_type)
+    rendered_turns = split_audio_turns_for_tts(turns)
+    if not rendered_turns:
         raise RuntimeError("no voice turns were available for ElevenLabs TTS")
 
-    body = {"inputs": inputs, "model_id": model_id}
+    def build_inputs(active_voice_ids: Dict[str, str]) -> List[Dict[str, str]]:
+        tts_inputs = []
+        for turn in rendered_turns:
+            voice_role = turn.get("voice_role") if turn.get("voice_role") in AI_AUDIO_VOICE_ROLES else "host"
+            tts_inputs.append({"text": turn["text"], "voice_id": active_voice_ids[voice_role]})
+        return tts_inputs
+
+    body_template = {"model_id": model_id}
     language_code = os.environ.get("ELEVENLABS_LANGUAGE_CODE", "").strip()
     if language_code:
-        body["language_code"] = language_code
+        body_template["language_code"] = language_code
 
     request_timeout = parse_int_env("AI_AUDIO_TTS_TIMEOUT_SECONDS", 240)
-    response = requests.post(
-        "https://api.elevenlabs.io/v1/text-to-dialogue",
-        params={"output_format": output_format},
-        headers={"xi-api-key": api_key, "Content-Type": "application/json", "Accept": content_type},
-        json=body,
-        timeout=request_timeout,
-    )
-    if response.status_code == 404 and "voice_not_found" in response.text and len(set(voice_ids.values())) > 1:
-        logger.warning("ElevenLabs secondary voice was not available; retrying dialogue render with host voice only")
-        voice_ids = {role: voice_ids["host"] for role in voice_ids}
-        body["inputs"] = [{**item, "voice_id": voice_ids["host"]} for item in inputs]
-        response = requests.post(
+    max_request_chars = max(1000, parse_int_env("ELEVENLABS_MAX_REQUEST_CHARS", 4500))
+
+    def post_dialogue(tts_inputs: List[Dict[str, str]]):
+        return requests.post(
             "https://api.elevenlabs.io/v1/text-to-dialogue",
             params={"output_format": output_format},
             headers={"xi-api-key": api_key, "Content-Type": "application/json", "Accept": content_type},
-            json=body,
+            json={**body_template, "inputs": tts_inputs},
             timeout=request_timeout,
         )
+
+    inputs = build_inputs(voice_ids)
+    input_chars = sum(len(item.get("text") or "") for item in inputs)
+    if input_chars > max_request_chars:
+        raise RuntimeError(f"ElevenLabs TTS input has {input_chars} characters, above the configured {max_request_chars}-character cap")
+
+    response = post_dialogue(inputs)
+    if response.status_code == 404 and "voice_not_found" in response.text and len(set(voice_ids.values())) > 1:
+        logger.warning("ElevenLabs secondary voice was not available; retrying dialogue render with host voice only")
+        voice_ids = {role: voice_ids["host"] for role in voice_ids}
+        inputs = build_inputs(voice_ids)
+        response = post_dialogue(inputs)
     if response.status_code >= 400:
         raise RuntimeError(f"ElevenLabs TTS failed with {response.status_code}: {response.text[:300]}")
+
     data = response.content
     if len(data) < 1024:
         raise RuntimeError("ElevenLabs TTS produced an empty file")
-    extension = extension_for_content_type(content_type)
     return {
         "data": data,
         "content_type": content_type,
@@ -1777,7 +1843,8 @@ def render_elevenlabs_ai_audio(turns: List[Dict[str, str]]) -> Dict[str, Any]:
         "provider_kind": "elevenlabs",
         "model": model_id,
         "voices": {role: voice for role, voice in voice_ids.items() if voice},
-        "turn_count": len(inputs),
+        "turn_count": len(rendered_turns),
+        "chunk_count": 1,
         "extension": extension,
         "filename": f"ai-generated-episode.{extension}",
     }

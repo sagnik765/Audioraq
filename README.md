@@ -163,8 +163,9 @@ AI_AUDIO_TTS_PROVIDER=auto
 ELEVENLABS_API_KEY=<your-elevenlabs-key>
 ELEVENLABS_MODEL_ID=eleven_v3
 ELEVENLABS_OUTPUT_FORMAT=mp3_44100_128
+ELEVENLABS_MAX_REQUEST_CHARS=4500
 ELEVENLABS_VOICE_ID_HOST=<host-voice-id>
-ELEVENLABS_VOICE_ID_GUEST=<guest-voice-id>
+ELEVENLABS_VOICE_ID_GUEST=<optional-guest-voice-id>
 ELEVENLABS_VOICE_ID_NARRATOR=<optional-narrator-voice-id>
 ```
 
@@ -179,7 +180,9 @@ OPENAI_TTS_VOICE_GUEST=cedar
 OPENAI_TTS_VOICE_NARRATOR=coral
 ```
 
-Keep `AI_AUDIO_TTS_LOCAL_FALLBACK=true` so Audioraq still publishes an audio episode if the paid provider is temporarily unavailable. New AI drafts include `audio_script_turns` so interview-style episodes can render with distinct host/guest/narrator voices. Do not configure cloned voices or voices imitating real people without permission.
+Keep `AI_AUDIO_TTS_LOCAL_FALLBACK=true` so Audioraq still publishes an audio episode if the paid provider is temporarily unavailable. New AI drafts include `audio_script_turns` so interview-style episodes can render with distinct host/guest/narrator voices. If guest/narrator ElevenLabs voice IDs are blank, Audioraq safely reuses the host voice until valid additional voices are configured. Do not configure cloned voices or voices imitating real people without permission.
+
+`AI_AUDIO_MAX_WORDS`, `AI_AUDIO_TTS_MAX_CHARS`, `AI_AUDIO_MIN_FINAL_TURN_WORDS`, and `AI_AUDIO_RESERVED_END_TURNS` control how much of a generated script becomes audio while preserving a clean ending. The default total audio cap stays under one ElevenLabs dialogue request for reliability; `ELEVENLABS_MAX_REQUEST_CHARS` protects direct provider requests from exceeding the account limit.
 
 ### 3b. Enable Google and Apple sign-in
 
