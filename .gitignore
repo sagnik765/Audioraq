@@ -19,6 +19,7 @@ node_modules/
 # Testing
 /coverage
 qa/ai-podcast-agent/
+qa/podcast-improvement-agent/
 
 # Next.js
 /.next/
