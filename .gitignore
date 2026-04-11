@@ -20,6 +20,7 @@ node_modules/
 /coverage
 qa/ai-podcast-agent/
 qa/podcast-improvement-agent/
+qa/published-improved-podcasts/
 
 # Next.js
 /.next/
