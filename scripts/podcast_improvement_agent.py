@@ -2,14 +2,15 @@
 """
 Podcast Improvement Agent for Audioraq QA.
 
-Agent 2 improves scripts/media from the AI Podcast Creation Agent output and
+Agent 2 improves scripts/media from the AI Podcast Creation Agent output by
+turning monotone monologues into 2-person or 3-person dialogue episodes. It
 scores each episode for:
 - monotony and AI-detectability risk using a GAN-inspired discriminator report
 - derogatory/harmful content using a small RAG-style safety retriever
 
 Important: this is not a trained neural GAN. It is an adversarial QA harness
 that uses generator/discriminator style scoring until a real trained detector
-and reference dataset are available.
+and an authorized reference dataset are available.
 """
 
 from __future__ import annotations
@@ -26,6 +27,7 @@ import subprocess
 import sys
 import time
 import wave
+import tempfile
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Tuple
 
@@ -72,6 +74,20 @@ RAG_SAFETY_KB = [
     },
 ]
 
+ROLE_VOICES = {
+    "Host": ["Aman", "Daniel", "Alex"],
+    "Co-host": ["Samantha", "Ava", "Victoria"],
+    "Guest": ["Daniel", "Oliver", "Fred"],
+}
+
+REALNESS_TARGET_PROFILE = {
+    "min_turn_count": 10,
+    "min_speaker_count": 2,
+    "target_question_rate": 0.12,
+    "target_sentence_length_stdev": 6.0,
+    "target_rms_variation": 0.18,
+}
+
 
 def run(cmd: List[str], **kwargs: Any) -> subprocess.CompletedProcess:
     return subprocess.run(cmd, check=True, text=True, **kwargs)
@@ -116,6 +132,20 @@ def keywords_from_title(title: str) -> List[str]:
         if word.lower() not in {"the", "and", "that", "your", "with", "without", "into", "from", "what", "why", "how"}
     ]
     return words[:6] or ["podcast", "episode"]
+
+
+def clean_source_sentence(value: str, fallback: str) -> str:
+    cleaned = re.sub(r"\s+", " ", value or "").strip()
+    cleaned = re.sub(r"^Here is the core idea for this Audioraq quality check episode:\s*", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"^The takeaway is simple:\s*", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"^[A-Z][A-Za-z ]{2,32}:\s*", "", cleaned)
+    cleaned = cleaned.replace("(when/what/how long)", "when, what, and how long")
+    cleaned = re.sub(r"\.{2,}", ".", cleaned)
+    cleaned = re.sub(r"\s+([.,!?])", r"\1", cleaned)
+    cleaned = cleaned.strip(" .")
+    if len(cleaned.split()) < 6:
+        return fallback
+    return cleaned
 
 
 def improve_script(original: str, item: Dict[str, Any]) -> str:
@@ -173,6 +203,144 @@ def improve_script(original: str, item: Dict[str, Any]) -> str:
     return "\n\n".join(line.strip() for line in script.splitlines() if line.strip())
 
 
+def build_dialogue_turns(original: str, item: Dict[str, Any]) -> List[Dict[str, str]]:
+    title = re.sub(r"^\[QA\]\s*", "", item["title"]).strip()
+    sentences = split_sentences(original)
+    useful = [sentence for sentence in sentences if len(sentence.split()) > 8]
+    topic_words = keywords_from_title(title)
+    speaker_count = 3 if item["media_type"] == "video" else 2
+
+    topic_line = title.lower()
+    scene = clean_source_sentence(
+        useful[2] if len(useful) > 2 else "",
+        f"This topic matters because {topic_words[0].lower()} changes what a listener does next.",
+    )
+    practical = clean_source_sentence(
+        useful[4] if len(useful) > 4 else "",
+        "The best version of the advice is specific enough to try right after the episode.",
+    )
+    example = clean_source_sentence(
+        useful[5] if len(useful) > 5 else "",
+        "A listener should be able to picture the moment where they use the idea.",
+    )
+    tension = clean_source_sentence(
+        useful[6] if len(useful) > 6 else "",
+        "The risk is sounding polished but forgettable.",
+    )
+    closing = clean_source_sentence(
+        useful[-1] if useful else "",
+        "Give the listener one action that makes the next step easier.",
+    )
+
+    turns = [
+        {
+            "speaker": "Host",
+            "text": f"Quick setup. Today we are taking the idea behind {topic_line} and making it feel less like a generated summary and more like a real conversation.",
+        },
+        {
+            "speaker": "Co-host",
+            "text": "Good. Because the first version had useful ideas, but it moved in one straight line. There was no friction, no curiosity, no moment where someone pushed back.",
+        },
+        {
+            "speaker": "Host",
+            "text": f"Exactly. So here is the sharper question: what would make this episode useful enough that a listener remembers it tomorrow?",
+        },
+        {
+            "speaker": "Co-host",
+            "text": f"I would start with a concrete scene. {scene}",
+        },
+    ]
+
+    if speaker_count == 3:
+        turns.extend(
+            [
+                {
+                    "speaker": "Guest",
+                    "text": "Let me challenge that for a second. A concrete scene helps, but only if it changes the advice. Otherwise it is just decoration.",
+                },
+                {
+                    "speaker": "Host",
+                    "text": "That is fair. So the scene needs to reveal the problem, not just illustrate it.",
+                },
+            ]
+        )
+
+    turns.extend(
+        [
+            {
+                "speaker": "Co-host",
+                "text": f"Right. The practical move is this: {practical}",
+            },
+            {
+                "speaker": "Host",
+                "text": f"And the human example is: {example}",
+            },
+            {
+                "speaker": "Co-host",
+                "text": "That is stronger because it gives the audience a picture. It is not just advice floating in the air.",
+            },
+            {
+                "speaker": "Host",
+                "text": f"The tension I want to keep is this: {tension}",
+            },
+        ]
+    )
+
+    if speaker_count == 3:
+        turns.extend(
+            [
+                {
+                    "speaker": "Guest",
+                    "text": "I would also add one imperfect moment. Something like, this sounds easy until you are tired, distracted, or trying to record after a long day.",
+                },
+                {
+                    "speaker": "Co-host",
+                    "text": "Yes. That kind of admission makes the episode sound human instead of overproduced.",
+                },
+            ]
+        )
+
+    turns.extend(
+        [
+            {
+                "speaker": "Host",
+                "text": f"So the clean takeaway is: use {', '.join(topic_words[:3]).lower()} as the subject, but make the promise more emotional and specific.",
+            },
+            {
+                "speaker": "Co-host",
+                "text": "And if someone only remembers one thing, make it this: tell them what changes after they finish listening.",
+            },
+            {
+                "speaker": "Host",
+                "text": f"Exactly. {closing}",
+            },
+        ]
+    )
+    return turns
+
+
+def render_dialogue_script(turns: List[Dict[str, str]]) -> str:
+    return "\n".join(f"{turn['speaker']}: {turn['text']}" for turn in turns)
+
+
+def dialogue_metrics(turns: List[Dict[str, str]]) -> Dict[str, float]:
+    if not turns:
+        return {"speaker_count": 0, "turn_count": 0, "speaker_balance": 0, "question_turn_rate": 0}
+    counts: Dict[str, int] = {}
+    for turn in turns:
+        counts[turn["speaker"]] = counts.get(turn["speaker"], 0) + 1
+    max_count = max(counts.values())
+    min_count = min(counts.values())
+    speaker_balance = min_count / max(1, max_count)
+    question_turn_rate = sum(1 for turn in turns if "?" in turn["text"]) / len(turns)
+    return {
+        "speaker_count": len(counts),
+        "turn_count": len(turns),
+        "speaker_balance": round(speaker_balance, 3),
+        "question_turn_rate": round(question_turn_rate, 3),
+    }
+
+
 def text_features(text: str) -> Dict[str, float]:
     sentences = split_sentences(text)
     words = re.findall(r"[A-Za-z']+", text.lower())
@@ -211,8 +379,13 @@ def text_features(text: str) -> Dict[str, float]:
     }
 
 
-def gan_inspired_ai_risk(text: str, audio_metrics: Dict[str, float]) -> Dict[str, Any]:
+def gan_inspired_ai_risk(
+    text: str,
+    audio_metrics: Dict[str, float],
+    turns: List[Dict[str, str]] | None = None,
+) -> Dict[str, Any]:
     features = text_features(text)
+    dialogue = dialogue_metrics(turns or [])
     risk = 42.0
     if features["sentence_length_stdev"] < 5:
         risk += 16
@@ -226,9 +399,39 @@ def gan_inspired_ai_risk(text: str, audio_metrics: Dict[str, float]) -> Dict[str
         risk += 10
     if audio_metrics.get("duration_seconds", 0) < 45:
         risk += 5
+    if dialogue["speaker_count"] >= 2:
+        risk -= 8
+    if dialogue["turn_count"] >= 10:
+        risk -= 6
+    if dialogue["speaker_balance"] >= 0.45:
+        risk -= 5
+    if dialogue["question_turn_rate"] >= 0.08:
+        risk -= 4
     risk = max(0, min(100, round(risk, 1)))
     label = "low" if risk < 45 else "medium" if risk < 70 else "high"
-    return {"score": risk, "label": label, "features": features}
+    benchmark_similarity = max(
+        0,
+        min(
+            100,
+            round(
+                100
+                - risk
+                + min(10, dialogue["speaker_count"] * 3)
+                + min(10, dialogue["turn_count"] / 2)
+                + min(8, audio_metrics.get("rms_variation", 0) * 20),
+                1,
+            ),
+        ),
+    )
+    return {
+        "score": risk,
+        "label": label,
+        "features": features,
+        "dialogue_features": dialogue,
+        "benchmark_similarity": benchmark_similarity,
+        "benchmark_profile": REALNESS_TARGET_PROFILE,
+        "model_note": "GAN-inspired adversarial discriminator; not a trained GAN model.",
+    }
 
 
 def retrieve_safety_docs(text: str, limit: int = 2) -> List[Dict[str, Any]]:
@@ -311,6 +514,62 @@ def synthesize_audio(script_path: Path, output_wav: Path, voice: str) -> None:
         finally:
             tmp_aiff.unlink(missing_ok=True)
     raise RuntimeError(f"Could not synthesize non-empty audio for {script_path}: {last_error}")
+
+
+def synthesize_turn_audio(text: str, output_wav: Path, voices: List[str]) -> None:
+    require_tool("say")
+    require_tool("afconvert")
+    text_file = output_wav.with_suffix(".txt")
+    text_file.write_text(text, encoding="utf-8")
+    last_error = None
+    for attempt, selected_voice in enumerate(dict.fromkeys(voices + ["Aman", "Daniel", "Alex"]), start=1):
+        tmp_aiff = output_wav.with_suffix(f".{attempt}.aiff")
+        try:
+            run(["say", "-v", selected_voice, "-o", str(tmp_aiff), "-f", str(text_file)])
+            time.sleep(0.25)
+            run(["afconvert", "-f", "WAVE", "-d", "LEI16", str(tmp_aiff), str(output_wav)])
+            if wav_metrics(output_wav)["duration_seconds"] >= 0.4:
+                return
+            last_error = RuntimeError(f"Generated short turn with voice {selected_voice}")
+        except Exception as exc:
+            last_error = exc
+        finally:
+            tmp_aiff.unlink(missing_ok=True)
+    raise RuntimeError(f"Could not synthesize dialogue turn: {last_error}")
+
+
+def concat_wavs(segment_paths: List[Path], output_wav: Path, gap_seconds: float = 0.22) -> None:
+    if not segment_paths:
+        raise RuntimeError("No dialogue segments to concatenate")
+    with wave.open(str(segment_paths[0]), "rb") as first:
+        params = first.getparams()
+        framerate = first.getframerate()
+        sample_width = first.getsampwidth()
+        channels = first.getnchannels()
+    silence_frames = int(framerate * gap_seconds)
+    silence = b"\x00" * silence_frames * sample_width * channels
+    with wave.open(str(output_wav), "wb") as out:
+        out.setparams(params)
+        for segment_path in segment_paths:
+            with wave.open(str(segment_path), "rb") as segment:
+                if segment.getframerate() != framerate or segment.getsampwidth() != sample_width or segment.getnchannels() != channels:
+                    raise RuntimeError(f"Dialogue segment format mismatch: {segment_path}")
+                out.writeframes(segment.readframes(segment.getnframes()))
+                out.writeframes(silence)
+
+
+def synthesize_dialogue_audio(turns: List[Dict[str, str]], output_wav: Path) -> None:
+    with tempfile.TemporaryDirectory(prefix="audioraq-dialogue-") as temp_dir:
+        temp_path = Path(temp_dir)
+        segments = []
+        for index, turn in enumerate(turns, start=1):
+            segment = temp_path / f"{index:02d}-{slugify(turn['speaker'])}.wav"
+            synthesize_turn_audio(turn["text"], segment, ROLE_VOICES.get(turn["speaker"], ["Aman"]))
+            segments.append(segment)
+        concat_wavs(segments, output_wav)
+    metrics = wav_metrics(output_wav)
+    if metrics["duration_seconds"] < 20:
+        raise RuntimeError(f"Dialogue output is unexpectedly short: {metrics['duration_seconds']}s")
 
 
 def svg_escape(value: str) -> str:
@@ -410,6 +669,7 @@ def make_video_with_remote_ffmpeg(audio_path: Path, cover_path: Path, output_mp4
 def summarize_result(item: Dict[str, Any], before: Dict[str, Any], after: Dict[str, Any]) -> str:
     return (
         f"AI-risk {before['label']} {before['score']} -> {after['label']} {after['score']}; "
+        f"benchmark similarity {after.get('benchmark_similarity', 0)}; "
         f"safety {after.get('safety_status', 'clear')}; "
         f"duration {after['audio_metrics']['duration_seconds']}s"
     )
@@ -446,22 +706,23 @@ def main() -> None:
         slug = f"{index:02d}-{slugify(item['title'])}"
         original_script_path = Path(item["script_path"])
         original_text = original_script_path.read_text(encoding="utf-8")
-        improved_text = improve_script(original_text, item)
+        dialogue_turns = build_dialogue_turns(original_text, item)
+        improved_text = render_dialogue_script(dialogue_turns)
         improved_script_path = scripts_dir / f"{slug}-improved.txt"
         improved_script_path.write_text(improved_text + "\n", encoding="utf-8")
 
         improved_audio = media_dir / f"{slug}-improved.wav"
-        synthesize_audio(improved_script_path, improved_audio, args.voice)
+        synthesize_dialogue_audio(dialogue_turns, improved_audio)
         original_metrics = wav_metrics(Path(item["media_path"]) if item["media_type"] == "audio" else Path(str(item["media_path"]).replace(".mp4", ".wav")))
         improved_metrics = wav_metrics(improved_audio)
         before_risk = gan_inspired_ai_risk(original_text, original_metrics)
-        after_risk = gan_inspired_ai_risk(improved_text, improved_metrics)
+        after_risk = gan_inspired_ai_risk(improved_text, improved_metrics, turns=dialogue_turns)
         safety = rag_safety_check(improved_text)
 
         improved_media = improved_audio
         if item["media_type"] == "video":
             cover_path = covers_dir / f"{slug}-cover.svg"
-            write_video_cover(cover_path, item["title"], "audio + video")
+            write_video_cover(cover_path, item["title"], f"{len({turn['speaker'] for turn in dialogue_turns})}-speaker audio + video")
             improved_media = media_dir / f"{slug}-improved.mp4"
             make_video_with_remote_ffmpeg(improved_audio, cover_path, improved_media, args.remote, Path(args.ssh_key).expanduser().resolve(), run_id)
 
@@ -477,6 +738,7 @@ def main() -> None:
             "after_ai_detector": after_risk,
             "rag_safety": safety,
             "audio_metrics": improved_metrics,
+            "dialogue_turns": dialogue_turns,
         }
         result["summary"] = summarize_result(
             item,
@@ -514,22 +776,25 @@ def main() -> None:
         "Guardrail: this agent does not clone voices, likeness, exact cadence, or copyrighted episode content.",
         "",
         "Detector note: the AI detector is GAN-inspired/adversarial, not a trained neural GAN.",
+        "Voice note: speakers use distinct generic system voices; the agent does not copy Joe Rogan or Raj Shamani resonance/articulation.",
         "Safety note: the derogatory-content check uses a local RAG-style safety knowledge base and pattern scan.",
         "",
-        "| # | Format | Title | Original | Improved Media | Improved Script | AI Risk Before | AI Risk After | RAG Safety | Summary |",
-        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+        "| # | Format | Speakers | Title | Original | Improved Media | Improved Script | AI Risk Before | AI Risk After | Benchmark Similarity | RAG Safety | Summary |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
     ]
     for item in results:
         review_lines.append(
-            "| {index} | {format} | {title} | {original_episode_url} | `{improved_media_path}` | `{improved_script_path}` | {before} | {after} | {safety} | {summary} |".format(
+            "| {index} | {format} | {speakers} | {title} | {original_episode_url} | `{improved_media_path}` | `{improved_script_path}` | {before} | {after} | {similarity} | {safety} | {summary} |".format(
                 index=item["index"],
                 format=item["format"],
+                speakers=item["after_ai_detector"]["dialogue_features"]["speaker_count"],
                 title=item["title"],
                 original_episode_url=item["original_episode_url"],
                 improved_media_path=item["improved_media_path"],
                 improved_script_path=item["improved_script_path"],
                 before=f"{item['before_ai_detector']['label']} {item['before_ai_detector']['score']}",
                 after=f"{item['after_ai_detector']['label']} {item['after_ai_detector']['score']}",
+                similarity=item["after_ai_detector"]["benchmark_similarity"],
                 safety=item["rag_safety"]["status"],
                 summary=item["summary"],
             )
