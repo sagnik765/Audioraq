@@ -68,6 +68,49 @@ MODERATION_STATUS_BLOCKED = "blocked"
 SOCIAL_PROVIDER_GOOGLE = "google"
 SOCIAL_PROVIDER_APPLE = "apple"
 SUPPORTED_SOCIAL_PROVIDERS = {SOCIAL_PROVIDER_GOOGLE, SOCIAL_PROVIDER_APPLE}
+AGENT2_VERSION = "2026-04-12.1"
+
+AGENT2_RAG_SAFETY_KB = [
+    {
+        "id": "protected-class-derogation",
+        "text": "Demeaning claims, slurs, or inferiority claims about protected classes require review.",
+        "patterns": [r"\ball\s+\w+\s+are\s+(bad|stupid|inferior|dangerous)\b", r"\b(inferior|subhuman|vermin)\b"],
+        "severity": "high",
+    },
+    {
+        "id": "harassment-targeting",
+        "text": "Personal attacks, threats, or calls to exclude someone from normal life require review.",
+        "patterns": [r"\b(should be banned from society|do not deserve rights|ruin their life)\b"],
+        "severity": "medium",
+    },
+    {
+        "id": "dangerous-advice",
+        "text": "Dangerous medical, legal, or safety instructions should not be published automatically.",
+        "patterns": [r"\b(drink bleach|stop taking insulin|ignore your doctor|build a bomb|kill yourself)\b"],
+        "severity": "high",
+    },
+    {
+        "id": "dehumanization",
+        "text": "Dehumanizing language frames people as pests, animals, or diseases to justify mistreatment.",
+        "patterns": [r"\b(they are animals|they are pests|eradicate them|wipe them out)\b"],
+        "severity": "high",
+    },
+    {
+        "id": "creator-quality",
+        "text": "Podcast drafts should include a clear listener promise, concrete examples, and a useful takeaway.",
+        "patterns": [r"\b(leverage synergies|in today's fast-paced world|game[- ]changer|unlock your potential)\b"],
+        "severity": "low",
+    },
+]
+
+AGENT2_RLAIF_POLICY = [
+    "Reward a clear listener promise and concrete outcome.",
+    "Reward specific examples over generic motivational language.",
+    "Reward human pacing: tension, questions, and useful transitions.",
+    "Penalize unsafe, hateful, or harmful claims found by RAG safety retrieval.",
+    "Penalize AI-sounding repetition, vague buzzwords, and overlong sentences.",
+    "Preserve the creator's chosen audience, tone, and episode goal.",
+]
 
 
 def now_iso():
@@ -1001,6 +1044,342 @@ async def review_episode_safety(
         return normalize_episode_safety_result({}, fallback, selected_rating, media_analysis=media_analysis)
 
 
+def agent2_split_sentences(text: str) -> List[str]:
+    cleaned = re.sub(r"\s+", " ", text or "").strip()
+    if not cleaned:
+        return []
+    return [part.strip() for part in re.split(r"(?<=[.!?])\s+", cleaned) if part.strip()]
+
+
+def agent2_build_review_text(
+    title: str,
+    description: str,
+    generation: Optional[Dict[str, Any]] = None,
+    media_analysis: Optional[Dict[str, Any]] = None,
+) -> str:
+    parts = [f"Title: {title}", f"Description: {description}"]
+    if generation:
+        outline_lines = []
+        for section in generation.get("outline", [])[:6]:
+            beats = ", ".join(normalize_string_list(section.get("beats"), limit=5))
+            outline_lines.append(f"{section.get('section_title', '')}: {beats}".strip(": "))
+        parts.extend(
+            [
+                f"Promise: {generation.get('one_line_promise', '')}",
+                f"Hook: {generation.get('hook', '')}",
+                f"Intro: {generation.get('intro_script', '')}",
+                f"Talking points: {', '.join(normalize_string_list(generation.get('talking_points'), limit=10))}",
+                f"Outline: {' | '.join(outline_lines)}",
+                f"Notes: {generation.get('show_notes_summary', '')}",
+            ]
+        )
+    if media_analysis and media_analysis.get("transcript_text"):
+        parts.append(f"Transcript: {media_analysis.get('transcript_text', '')}")
+    elif media_analysis and media_analysis.get("transcript_excerpt"):
+        parts.append(f"Transcript excerpt: {media_analysis.get('transcript_excerpt', '')}")
+    return "\n".join(part for part in parts if str(part).strip()).strip()
+
+
+def agent2_text_features(text: str, generation: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    words = re.findall(r"[a-zA-Z][a-zA-Z']+", text or "")
+    lowered_words = [word.lower() for word in words]
+    sentences = agent2_split_sentences(text)
+    sentence_lengths = [len(re.findall(r"[a-zA-Z][a-zA-Z']+", sentence)) for sentence in sentences] or [0]
+    avg_sentence_words = sum(sentence_lengths) / max(1, len(sentence_lengths))
+    mean_sentence_words = avg_sentence_words
+    sentence_length_stdev = (
+        (sum((length - mean_sentence_words) ** 2 for length in sentence_lengths) / len(sentence_lengths)) ** 0.5
+        if len(sentence_lengths) > 1
+        else 0.0
+    )
+    repeated_words = len(lowered_words) - len(set(lowered_words))
+    generic_markers = [
+        "in today's fast-paced world",
+        "unlock your potential",
+        "game-changer",
+        "leverage synergies",
+        "delve into",
+        "journey of discovery",
+        "at the end of the day",
+    ]
+    speaker_turns = len(re.findall(r"(?im)^\s*(host|co-host|guest|speaker\s*\d+)\s*:", text or ""))
+    question_count = sum(1 for sentence in sentences if "?" in sentence)
+    outline_sections = len(generation.get("outline", []) if generation else [])
+    talking_points = len(normalize_string_list(generation.get("talking_points"), limit=20) if generation else [])
+    concrete_markers = len(re.findall(r"\b(example|story|case|because|step|framework|takeaway|try|today|specific)\b", (text or "").lower()))
+
+    return {
+        "word_count": len(words),
+        "sentence_count": len(sentences),
+        "avg_sentence_words": round(avg_sentence_words, 2),
+        "sentence_length_stdev": round(sentence_length_stdev, 2),
+        "question_rate": round(question_count / max(1, len(sentences)), 3),
+        "generic_marker_count": sum((text or "").lower().count(marker) for marker in generic_markers),
+        "repetition_rate": round(repeated_words / max(1, len(lowered_words)), 3),
+        "speaker_turn_count": speaker_turns,
+        "outline_section_count": outline_sections,
+        "talking_point_count": talking_points,
+        "concrete_marker_count": concrete_markers,
+    }
+
+
+def agent2_gan_inspired_discriminator(text: str, generation: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    features = agent2_text_features(text, generation=generation)
+    score = 24.0
+    if features["word_count"] < 120:
+        score += 11
+    if features["avg_sentence_words"] > 27:
+        score += min(16, (features["avg_sentence_words"] - 27) * 1.8)
+    if features["sentence_length_stdev"] < 5 and features["sentence_count"] >= 4:
+        score += 8
+    if features["question_rate"] < 0.05:
+        score += 9
+    score += min(18, features["generic_marker_count"] * 6)
+    score += min(16, features["repetition_rate"] * 42)
+    if features["concrete_marker_count"] >= 5:
+        score -= 8
+    if features["speaker_turn_count"] >= 8:
+        score -= 8
+    if features["outline_section_count"] >= 4:
+        score -= 4
+    if features["talking_point_count"] >= 4:
+        score -= 4
+
+    score = round(max(0, min(100, score)), 1)
+    label = "low" if score < 35 else "medium" if score < 65 else "high"
+    benchmark_similarity = round(max(0, min(100, 96 - score + min(10, features["concrete_marker_count"] * 0.8))), 1)
+    return {
+        "score": score,
+        "label": label,
+        "features": features,
+        "benchmark_similarity": benchmark_similarity,
+        "benchmark_profile": {
+            "target_question_rate": 0.08,
+            "min_outline_sections": 4,
+            "min_concrete_markers": 5,
+            "max_generic_markers": 0,
+        },
+        "model_note": "GAN-inspired adversarial discriminator; not a trained neural GAN model.",
+    }
+
+
+def agent2_rag_safety_review(text: str) -> Dict[str, Any]:
+    matched = []
+    lowered = text or ""
+    for doc in AGENT2_RAG_SAFETY_KB:
+        for pattern in doc["patterns"]:
+            if re.search(pattern, lowered, flags=re.IGNORECASE):
+                matched.append(
+                    {
+                        "id": doc["id"],
+                        "severity": doc["severity"],
+                        "policy": doc["text"],
+                        "pattern": pattern,
+                    }
+                )
+                break
+
+    severe = [item for item in matched if item["severity"] == "high"]
+    medium = [item for item in matched if item["severity"] == "medium"]
+    status = "clear"
+    risk_level = "low"
+    if severe:
+        status = "blocked"
+        risk_level = "high"
+    elif medium:
+        status = "review"
+        risk_level = "medium"
+    elif matched:
+        status = "clear"
+        risk_level = "low"
+
+    return {
+        "status": status,
+        "risk_level": risk_level,
+        "matches": matched,
+        "retrieved_policy_ids": [item["id"] for item in matched] or ["creator-quality"],
+        "summary": (
+            "RAG safety retrieval found no harmful-content policy matches."
+            if not matched
+            else f"RAG safety retrieval matched: {', '.join(item['id'] for item in matched[:4])}."
+        ),
+        "model_note": "RAG-style retrieval over local safety and quality policies.",
+    }
+
+
+def agent2_rlaif_self_feedback(gan_review: Dict[str, Any], rag_review: Dict[str, Any], generation: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    features = gan_review.get("features", {})
+    reward = 88.0
+    critique = []
+    actions = []
+
+    if gan_review.get("label") == "high":
+        reward -= 24
+        critique.append("The draft still has a high AI-detectability risk.")
+        actions.append("Add sharper questions, concrete examples, and less uniform pacing.")
+    elif gan_review.get("label") == "medium":
+        reward -= 11
+        critique.append("The draft may still sound somewhat generated.")
+        actions.append("Add one more human example or tension point.")
+
+    if rag_review.get("status") == "blocked":
+        reward -= 50
+        critique.append("RAG safety retrieval found high-risk harmful content.")
+        actions.append("Remove the unsafe content before publishing.")
+    elif rag_review.get("status") == "review":
+        reward -= 18
+        critique.append("RAG retrieval found material that needs review or refinement.")
+        actions.append("Rewrite the flagged passages with safer, more precise language.")
+
+    if features.get("generic_marker_count", 0) > 0:
+        reward -= min(12, features["generic_marker_count"] * 4)
+        critique.append("The draft uses generic AI-sounding phrases.")
+        actions.append("Replace vague phrases with specific listener-facing claims.")
+    if features.get("question_rate", 0) < 0.05:
+        reward -= 5
+        actions.append("Add at least one curiosity-led question.")
+    if features.get("concrete_marker_count", 0) < 5:
+        reward -= 8
+        actions.append("Add a concrete example, story, or practical step.")
+    if generation and len(normalize_string_list(generation.get("production_notes"), limit=10)) < 2:
+        reward -= 4
+        actions.append("Add production notes that help the creator perform the episode.")
+
+    reward = round(max(0, min(100, reward)), 1)
+    if not critique:
+        critique.append("The episode package meets the current Agent 2 quality bar.")
+    if not actions:
+        actions.append("Preserve the current structure and avoid adding unnecessary complexity.")
+
+    return {
+        "reward_score": reward,
+        "policy": AGENT2_RLAIF_POLICY,
+        "critique": critique[:5],
+        "improvement_actions": actions[:6],
+        "method_note": "RLAIF-style self-feedback loop; stores reward/critique and can drive one revision, but does not train model weights.",
+    }
+
+
+def evaluate_agent2_quality(
+    title: str,
+    description: str,
+    generation: Optional[Dict[str, Any]] = None,
+    media_analysis: Optional[Dict[str, Any]] = None,
+    source_kind: str = "episode",
+) -> Dict[str, Any]:
+    review_text = agent2_build_review_text(title, description, generation=generation, media_analysis=media_analysis)
+    gan_review = agent2_gan_inspired_discriminator(review_text, generation=generation)
+    rag_review = agent2_rag_safety_review(review_text)
+    rlaif_feedback = agent2_rlaif_self_feedback(gan_review, rag_review, generation=generation)
+
+    status = "pass"
+    if rag_review["status"] == "blocked":
+        status = "blocked"
+    elif rag_review["status"] == "review" or gan_review["label"] == "high" or rlaif_feedback["reward_score"] < 72:
+        status = "revise"
+
+    return {
+        "agent": "Agent 2 - Podcast Quality Reviewer",
+        "version": AGENT2_VERSION,
+        "source_kind": source_kind,
+        "status": status,
+        "quality_score": rlaif_feedback["reward_score"],
+        "gan_discriminator": gan_review,
+        "rag_safety": rag_review,
+        "rlaif": rlaif_feedback,
+        "summary": (
+            f"Agent 2 quality score {rlaif_feedback['reward_score']}/100; "
+            f"AI-risk {gan_review['label']} {gan_review['score']}; RAG safety {rag_review['status']}."
+        ),
+        "created_at": now_iso(),
+    }
+
+
+def merge_agent2_quality_into_moderation(moderation: Dict[str, Any], quality_agent: Dict[str, Any]) -> Dict[str, Any]:
+    merged = dict(moderation or {})
+    rag = (quality_agent or {}).get("rag_safety", {})
+    if rag.get("status") not in {"review", "blocked"}:
+        return merged
+
+    existing_flags = normalize_string_list(merged.get("flags"), limit=10)
+    rag_flags = normalize_string_list(rag.get("retrieved_policy_ids"), limit=10)
+    merged["flags"] = list(dict.fromkeys(existing_flags + rag_flags))[:10]
+    merged["summary"] = " ".join(
+        part
+        for part in [
+            merged.get("summary", ""),
+            f"Agent 2 RAG check: {rag.get('summary', '')}",
+        ]
+        if part
+    )[:300]
+    merged["provider"] = f"{merged.get('provider') or 'heuristic'}+agent2"
+    if rag.get("status") == "blocked":
+        merged["status"] = MODERATION_STATUS_BLOCKED
+        merged["risk_level"] = "high"
+        merged["recommended_age_gate"] = MATURE_RATING
+    elif merged.get("status") == MODERATION_STATUS_CLEAR:
+        merged["status"] = MODERATION_STATUS_REVIEW
+        merged["risk_level"] = "medium"
+    return merged
+
+
+async def revise_ai_generation_with_agent2_feedback(
+    brief: Dict[str, Any],
+    show: Dict[str, Any],
+    generation: Dict[str, Any],
+    quality_agent: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+    if not EMERGENT_KEY:
+        return None
+    if quality_agent.get("status") == "blocked":
+        return None
+    if quality_agent.get("quality_score", 0) >= 82 and quality_agent.get("gan_discriminator", {}).get("label") == "low":
+        return None
+
+    try:
+        from emergentintegrations.llm.chat import LlmChat, UserMessage
+
+        schema = {
+            "episode_title": "string",
+            "one_line_promise": "string",
+            "hook": "string",
+            "intro_script": "string",
+            "outline": [{"section_title": "string", "purpose": "string", "beats": ["string"]}],
+            "talking_points": ["string"],
+            "guest_questions": ["string"],
+            "production_notes": ["string"],
+            "outro_cta": "string",
+            "show_notes_summary": "string",
+            "suggested_description": "string",
+            "suggested_keywords": ["string"],
+            "why_this_episode_fits": "string",
+            "recommended_category": "string",
+        }
+        prompt = (
+            "Agent 2 reviewed this AI podcast package and produced RLAIF-style self-feedback.\n"
+            "Revise the package once using the feedback. Keep the creator's topic, audience, tone, and goal intact.\n"
+            "Do not add unsafe claims. Do not make it clickbait. Make it more concrete, human-paced, and useful.\n\n"
+            f"Show:\n{json.dumps({'title': show.get('title'), 'description': show.get('description'), 'category': show.get('category')}, ensure_ascii=True)}\n\n"
+            f"Creator brief:\n{json.dumps(brief, ensure_ascii=True)}\n\n"
+            f"Current package:\n{json.dumps(generation, ensure_ascii=True)}\n\n"
+            f"Agent 2 review:\n{json.dumps(quality_agent, ensure_ascii=True)}\n\n"
+            f"Return JSON matching this schema exactly:\n{json.dumps(schema, ensure_ascii=True)}"
+        )
+        chat = LlmChat(
+            api_key=EMERGENT_KEY,
+            session_id=f"agent2-rlaif-revision-{uuid.uuid4()}",
+            system_message="You are Agent 2, Audioraq's quality-improvement reviewer. Return revised JSON only.",
+        ).with_model("openai", "gpt-5.2")
+        response = await chat.send_message(UserMessage(text=prompt))
+        raw = parse_json_payload(response)
+        if not isinstance(raw, dict):
+            return None
+        return normalize_ai_generation_response(raw, brief, show)
+    except Exception as exc:
+        logger.error(f"Agent 2 RLAIF revision error: {exc}")
+        return None
+
+
 def build_fallback_ai_generation(brief: Dict[str, Any], show: Dict[str, Any]) -> Dict[str, Any]:
     identity = brief.get("identity", {})
     episode_intent = brief.get("episodeIntent", {})
@@ -1490,6 +1869,10 @@ def build_episode_quality_signals(episode: Dict, show: Optional[Dict]) -> List[s
         signals.append("Highly rated")
     if int(episode.get("play_count", 0) or 0) >= 25:
         signals.append("Popular listen")
+    if float(episode.get("quality_score", 0) or 0) >= 82:
+        signals.append("Agent 2 quality checked")
+    elif episode.get("quality_status") == "revise":
+        signals.append("Agent 2 suggests improvements")
     if normalize_content_rating(episode.get("audience_rating")) == MATURE_RATING:
         signals.append("18+ audience")
     if episode.get("publication_status") == PUBLICATION_STATUS_DRAFT:
@@ -1586,6 +1969,10 @@ async def enrich_episodes(episodes: List[Dict], current_user=None):
         cleaned["media_review_status"] = cleaned["moderation"].get("media_review_status", "")
         cleaned["media_review_provider"] = cleaned["moderation"].get("media_review_provider", "")
         cleaned["media_transcript_excerpt"] = cleaned["moderation"].get("media_transcript_excerpt", "")
+        cleaned["quality_agent"] = cleaned.get("quality_agent", {}) or {}
+        cleaned["quality_status"] = cleaned.get("quality_status") or cleaned["quality_agent"].get("status", "")
+        cleaned["quality_score"] = cleaned.get("quality_score") or cleaned["quality_agent"].get("quality_score", 0)
+        cleaned["quality_summary"] = cleaned["quality_agent"].get("summary", "")
         cleaned["is_playable"] = bool(cleaned.get("is_playable", bool(cleaned.get("media_path") or cleaned.get("external_media_url"))))
         cleaned["like_count"] = int(engagement.get("like_count", cleaned.get("like_count", 0)) or 0)
         cleaned["rating_count"] = int(engagement.get("rating_count", cleaned.get("rating_count", 0)) or 0)
@@ -2690,6 +3077,34 @@ async def generate_ai_podcast_draft(req: GenerateAIPodcastDraftRequest, request:
         raise HTTPException(status_code=400, detail="Add at least one key point before generating")
 
     generation = await generate_ai_podcast_package(intake, show)
+    agent2_review = evaluate_agent2_quality(
+        generation.get("episode_title") or intake["contentInput"].get("topic") or "Untitled AI Episode",
+        generation.get("suggested_description") or build_ai_publish_description(generation),
+        generation=generation,
+        source_kind="ai_draft",
+    )
+    agent2_iterations = [{"iteration": 1, "event": "initial_review", "review": agent2_review}]
+    revised_generation = await revise_ai_generation_with_agent2_feedback(intake, show, generation, agent2_review)
+    if revised_generation:
+        revised_agent2_review = evaluate_agent2_quality(
+            revised_generation.get("episode_title") or generation.get("episode_title") or intake["contentInput"].get("topic") or "Untitled AI Episode",
+            revised_generation.get("suggested_description") or build_ai_publish_description(revised_generation),
+            generation=revised_generation,
+            source_kind="ai_draft_revision",
+        )
+        revision_improved = revised_agent2_review.get("quality_score", 0) >= agent2_review.get("quality_score", 0)
+        revision_safe = revised_agent2_review.get("rag_safety", {}).get("status") != "blocked"
+        agent2_iterations.append(
+            {
+                "iteration": 2,
+                "event": "rlaif_revision_applied" if revision_improved and revision_safe else "rlaif_revision_discarded",
+                "review": revised_agent2_review,
+            }
+        )
+        if revision_improved and revision_safe:
+            generation = revised_generation
+            agent2_review = revised_agent2_review
+
     draft_doc = {
         "id": str(uuid.uuid4()),
         "show_id": show["id"],
@@ -2699,6 +3114,15 @@ async def generate_ai_podcast_draft(req: GenerateAIPodcastDraftRequest, request:
         "podcaster_name": user["name"],
         "intake": intake,
         "generation": generation,
+        "agent2_review": agent2_review,
+        "agent2_iterations": agent2_iterations,
+        "quality_status": agent2_review.get("status", "pass"),
+        "quality_score": agent2_review.get("quality_score", 0),
+        "media_policy": {
+            "create_with_ai": "audio_only",
+            "recorded_upload": "audio_or_video",
+            "note": "AI-created podcasts must publish as audio-only; recorded non-AI uploads may be audio or video.",
+        },
         "publish_prefill": {
             "title": generation.get("episode_title") or intake["contentInput"].get("topic") or "Untitled AI Episode",
             "description": generation.get("suggested_description") or build_ai_publish_description(generation),
@@ -3105,11 +3529,12 @@ async def upload_podcast(
     if user["role"] != "podcaster":
         raise HTTPException(status_code=403, detail="Only podcasters can upload podcasts")
 
-    allowed_audio = ["audio/mpeg", "audio/mp3", "audio/wav", "audio/ogg", "audio/aac", "audio/flac", "audio/x-m4a", "audio/mp4"]
+    allowed_audio = ["audio/mpeg", "audio/mp3", "audio/wav", "audio/x-wav", "audio/vnd.wav", "audio/ogg", "audio/aac", "audio/flac", "audio/x-m4a", "audio/mp4"]
     allowed_video = ["video/mp4", "video/webm", "video/ogg", "video/quicktime", "video/x-msvideo"]
-    allowed_types = allowed_audio + allowed_video
     content_type = file.content_type or "application/octet-stream"
-    if content_type not in allowed_types:
+    is_audio_upload = content_type in allowed_audio or content_type.startswith("audio/")
+    is_video_upload = content_type in allowed_video or content_type.startswith("video/")
+    if not (is_audio_upload or is_video_upload):
         raise HTTPException(status_code=400, detail=f"Unsupported file type: {content_type}. Allowed: audio and video files.")
 
     show = None
@@ -3129,6 +3554,11 @@ async def upload_podcast(
         ai_draft = await db.ai_podcast_drafts.find_one({"id": selected_ai_draft_id, "podcaster_id": user["_id"]})
         if ai_draft is None:
             raise HTTPException(status_code=404, detail="AI draft not found")
+        if not is_audio_upload:
+            raise HTTPException(
+                status_code=400,
+                detail="Create with AI supports audio-only publishing. Use the regular Publish Episode flow for recorded video uploads.",
+            )
 
     ext = file.filename.split(".")[-1] if "." in file.filename else "bin"
     media_path = f"{APP_NAME}/episodes/{user['_id']}/{uuid.uuid4()}.{ext}"
@@ -3141,7 +3571,7 @@ async def upload_podcast(
 
     normalized_category = (category or DEFAULT_SHOW_CATEGORY).lower()
     keywords = await extract_keywords(f"{title} {description} {normalized_category} {show['title']}")
-    media_type = "video" if content_type in allowed_video else "audio"
+    media_type = "video" if is_video_upload else "audio"
     selected_rating = normalize_content_rating(audience_rating)
     media_analysis = transcribe_media_for_safety(data, file.filename or "", content_type)
     moderation = await review_episode_safety(
@@ -3153,6 +3583,14 @@ async def upload_podcast(
         generation=ai_draft.get("generation") if ai_draft else None,
         media_analysis=media_analysis,
     )
+    quality_agent = evaluate_agent2_quality(
+        title,
+        description,
+        generation=ai_draft.get("generation") if ai_draft else None,
+        media_analysis=media_analysis,
+        source_kind="ai_audio_upload" if ai_draft else "recorded_upload",
+    )
+    moderation = merge_agent2_quality_into_moderation(moderation, quality_agent)
     resolved_rating = MATURE_RATING if moderation.get("recommended_age_gate") == MATURE_RATING else selected_rating
     podcast_doc = {
         "id": str(uuid.uuid4()),
@@ -3178,6 +3616,9 @@ async def upload_podcast(
         "audience_rating": resolved_rating,
         "moderation_status": moderation["status"],
         "moderation": moderation,
+        "quality_agent": quality_agent,
+        "quality_status": quality_agent.get("status", "pass"),
+        "quality_score": quality_agent.get("quality_score", 0),
         "publication_status": PUBLICATION_STATUS_PUBLISHED,
         "is_playable": True,
         "source_kind": "upload",
@@ -3257,6 +3698,13 @@ async def create_ai_podcast_episode(
         selected_rating=selected_rating,
         generation=ai_draft.get("generation"),
     )
+    quality_agent = evaluate_agent2_quality(
+        final_title,
+        final_description,
+        generation=ai_draft.get("generation"),
+        source_kind="ai_audio_draft",
+    )
+    moderation = merge_agent2_quality_into_moderation(moderation, quality_agent)
     resolved_rating = MATURE_RATING if moderation.get("recommended_age_gate") == MATURE_RATING else selected_rating
 
     podcast_doc = {
@@ -3283,6 +3731,9 @@ async def create_ai_podcast_episode(
         "audience_rating": resolved_rating,
         "moderation_status": moderation["status"],
         "moderation": moderation,
+        "quality_agent": quality_agent,
+        "quality_status": quality_agent.get("status", "pass"),
+        "quality_score": quality_agent.get("quality_score", 0),
         "publication_status": PUBLICATION_STATUS_DRAFT,
         "is_playable": False,
         "source_kind": "ai",
@@ -3292,6 +3743,7 @@ async def create_ai_podcast_episode(
         "is_deleted": False,
         "ai_draft_id": ai_draft["id"],
         "ai_assisted": True,
+        "media_policy": ai_draft.get("media_policy", {}),
         "script_package": ai_draft.get("generation", {}),
     }
     await db.podcasts.insert_one(podcast_doc)

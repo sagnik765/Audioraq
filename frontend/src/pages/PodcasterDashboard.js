@@ -122,6 +122,10 @@ export default function PodcasterDashboard() {
       toast.error('Generate an AI episode package first');
       return;
     }
+    if (publishMode === 'upload' && aiDraftApplied?.id && file && !file.type.startsWith('audio/')) {
+      toast.error('Create with AI supports audio-only publishing. Use regular Publish Episode for recorded video uploads.');
+      return;
+    }
     if (!selectedShowId) {
       toast.error('Create a show first');
       return;
@@ -269,7 +273,7 @@ export default function PodcasterDashboard() {
     setPublishMode('ai');
     setShowUpload(true);
     setShowAICreator(false);
-    toast.success('AI draft applied. Choose whether to upload media or create an AI draft episode.');
+    toast.success('AI draft applied. AI-created episodes are audio-only; recorded video still belongs in regular Publish Episode.');
     setTimeout(() => {
       document.querySelector('[data-testid="upload-podcast-form"]')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
     }, 100);
@@ -452,8 +456,24 @@ export default function PodcasterDashboard() {
                 <p className="text-xs uppercase tracking-[0.18em] text-[#8A8A93] mb-2">AI draft applied</p>
                 <p className="text-sm text-white mb-2">{aiDraftApplied.generation?.episode_title || aiDraftApplied.publish_prefill?.title}</p>
                 <p className="text-sm text-[#8A8A93]">
-                  Title, description, and category were prefilled from your AI episode package. You can upload final media or create a non-playable AI draft episode first.
+                  Title, description, and category were prefilled from your AI episode package. Create with AI is audio-only, and Agent 2 will attach a quality report before publishing.
                 </p>
+                {aiDraftApplied.agent2_review && (
+                  <p className="text-xs text-[#F5A623] mt-3">
+                    Agent 2 score: {aiDraftApplied.agent2_review.quality_score}/100 · {aiDraftApplied.agent2_review.status}
+                  </p>
+                )}
+                <button
+                  type="button"
+                  onClick={() => {
+                    setAiDraftApplied(null);
+                    setPublishMode('upload');
+                    toast.message('AI draft cleared. Regular uploads can use audio or video.');
+                  }}
+                  className="text-xs text-[#C7C7D1] hover:text-white underline underline-offset-4 mt-3"
+                >
+                  Clear AI draft and publish a recorded file instead
+                </button>
               </div>
             )}
             {aiDraftApplied && (
@@ -467,8 +487,8 @@ export default function PodcasterDashboard() {
                       : 'border-[#27272A] bg-[#0A0A0B] hover:border-[#8A8A93]'
                   }`}
                 >
-                  <p className="text-sm font-semibold text-white mb-1">Upload media</p>
-                  <p className="text-xs text-[#8A8A93]">Publish the episode with an audio or video file and optional thumbnail.</p>
+                  <p className="text-sm font-semibold text-white mb-1">Upload final audio</p>
+                  <p className="text-xs text-[#8A8A93]">Publish this AI-created episode with an audio file and optional thumbnail.</p>
                 </button>
                 <button
                   type="button"
@@ -479,8 +499,8 @@ export default function PodcasterDashboard() {
                       : 'border-[#27272A] bg-[#0A0A0B] hover:border-[#8A8A93]'
                   }`}
                 >
-                  <p className="text-sm font-semibold text-white mb-1">Create episode with AI</p>
-                  <p className="text-xs text-[#8A8A93]">Create an AI draft episode in your studio using the generated hook, outline, and notes.</p>
+                  <p className="text-sm font-semibold text-white mb-1">Create audio-only AI draft</p>
+                  <p className="text-xs text-[#8A8A93]">Create a non-playable audio episode draft using the generated hook, outline, notes, and Agent 2 review.</p>
                 </button>
               </div>
             )}
@@ -569,11 +589,16 @@ export default function PodcasterDashboard() {
                     <label className="text-xs uppercase tracking-[0.2em] font-semibold text-[#8A8A93] mb-2 block">Episode File</label>
                     <input
                       type="file"
-                      accept="audio/*,video/*"
+                      accept={aiDraftApplied ? 'audio/*' : 'audio/*,video/*'}
                       onChange={(e) => setFile(e.target.files[0])}
                       className="w-full bg-[#0A0A0B] border border-[#27272A] rounded-xl text-white px-4 py-3 file:mr-4 file:rounded-full file:border-0 file:bg-[#F5A623] file:text-[#0A0A0B] file:font-bold file:px-4 file:py-1 file:text-sm"
                       data-testid="upload-file-input"
                     />
+                    <p className="text-xs text-[#8A8A93] mt-2">
+                      {aiDraftApplied
+                        ? 'AI-created episodes only accept audio here. To publish a recorded video, clear this AI draft and use Publish Episode normally.'
+                        : 'Recorded uploads can be audio or audio + video.'}
+                    </p>
                   </div>
                 )}
                 <div>
@@ -592,7 +617,7 @@ export default function PodcasterDashboard() {
                 <div className="bg-[#0A0A0B] border border-[#27272A] rounded-2xl px-4 py-4">
                   <p className="text-xs uppercase tracking-[0.18em] text-[#8A8A93] mb-2">AI draft outcome</p>
                   <p className="text-sm text-[#C7C7D1]">
-                    This creates a draft episode inside Creator Studio using the AI package. It shows up in your catalog with the generated script package and safety review, but it will not be playable until media is added in a later step.
+                    This creates an audio-only draft episode inside Creator Studio using the AI package. It shows up with the generated script package, safety review, and Agent 2 quality report, but it will not be playable until audio is added later.
                   </p>
                 </div>
               )}
@@ -603,7 +628,7 @@ export default function PodcasterDashboard() {
                 className="bg-[#F5A623] hover:bg-[#F7B84B] text-[#0A0A0B] font-bold rounded-full px-6 py-3 transition-colors disabled:opacity-50"
                 data-testid="upload-submit-btn"
               >
-                {uploading ? 'Publishing...' : publishMode === 'upload' ? 'Publish Episode' : 'Create AI Episode Draft'}
+                {uploading ? 'Publishing...' : publishMode === 'upload' ? 'Publish Episode' : 'Create Audio-Only AI Draft'}
               </button>
             </form>
           </div>

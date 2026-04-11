@@ -68,6 +68,12 @@ function normalizeListInput(value) {
     .filter(Boolean);
 }
 
+function qualityTone(status) {
+  if (status === 'blocked') return 'text-[#FF6B6B] border-[#FF6B6B]/40 bg-[#FF6B6B]/10';
+  if (status === 'revise') return 'text-[#F5A623] border-[#F5A623]/40 bg-[#F5A623]/10';
+  return 'text-[#2EC4B6] border-[#2EC4B6]/40 bg-[#2EC4B6]/10';
+}
+
 function isStepComplete(step, value) {
   if (step.optional) return true;
   if (step.type === 'list') return Array.isArray(value) && value.length > 0;
@@ -447,7 +453,7 @@ export default function AIPodcastCreator({
           <p className="text-xs uppercase tracking-[0.2em] font-semibold text-[#F5A623] mb-2">Create Podcast with AI</p>
           <h2 className="font-['Outfit'] text-2xl font-semibold text-white mb-2">Build an episode brief one answer at a time</h2>
           <p className="text-sm text-[#8A8A93] max-w-3xl">
-            Audioraq keeps this conversational on purpose. You answer one focused question, we store the brief as structured JSON, and the AI turns it into a podcast-ready outline, hook, and publish copy.
+            Audioraq keeps this conversational on purpose. You answer one focused question, we store the brief as structured JSON, and the AI turns it into an audio-only podcast package. Agent 2 checks the result with GAN-inspired quality scoring, RAG safety retrieval, and RLAIF-style self-feedback before it reaches publishing.
           </p>
         </div>
 
@@ -582,9 +588,26 @@ export default function AIPodcastCreator({
                         className="bg-[#F5A623] hover:bg-[#F7B84B] text-[#0A0A0B] font-bold rounded-full px-5 py-3 transition-colors whitespace-nowrap"
                         data-testid="ai-apply-draft-btn"
                       >
-                        Use in Publish Flow
+                        Use Audio Draft
                       </button>
                     </div>
+
+                    {generatedDraft.agent2_review && (
+                      <div className={`border rounded-2xl p-4 mb-4 ${qualityTone(generatedDraft.agent2_review.status)}`}>
+                        <p className="text-xs uppercase tracking-[0.18em] mb-2">Agent 2 Quality Gate</p>
+                        <p className="text-sm font-semibold text-white mb-1">
+                          Score {generatedDraft.agent2_review.quality_score}/100 · {generatedDraft.agent2_review.status}
+                        </p>
+                        <p className="text-xs text-[#C7C7D1] leading-relaxed">
+                          {generatedDraft.agent2_review.summary}
+                        </p>
+                        {generatedDraft.agent2_review.rlaif?.improvement_actions?.length > 0 && (
+                          <p className="text-xs text-[#8A8A93] mt-2">
+                            Next improvement: {generatedDraft.agent2_review.rlaif.improvement_actions[0]}
+                          </p>
+                        )}
+                      </div>
+                    )}
 
                     <div className="bg-[#141417] border border-[#27272A] rounded-2xl p-4 mb-4">
                       <p className="text-xs uppercase tracking-[0.18em] text-[#8A8A93] mb-2">Hook</p>
@@ -647,7 +670,8 @@ export default function AIPodcastCreator({
                       {[
                         'A structured episode outline that matches the show, audience, and goal.',
                         'A sharper intro hook without turning the episode into generic clickbait.',
-                        'Talking points, production notes, and publish-ready copy you can carry into the upload flow.',
+                        'Talking points, production notes, and publish-ready copy for an audio-only AI episode.',
+                        'An Agent 2 quality report with GAN-inspired scoring, RAG safety retrieval, and RLAIF-style feedback.',
                       ].map((line) => (
                         <div key={line} className="bg-[#141417] border border-[#27272A] rounded-2xl p-4">
                           <p className="text-sm text-[#C7C7D1]">{line}</p>
@@ -682,6 +706,11 @@ export default function AIPodcastCreator({
                         {draft.publish_prefill?.category || draft.recommended_category}
                       </span>
                     </div>
+                    {draft.agent2_review && (
+                      <div className={`inline-flex rounded-full border px-3 py-1 text-[10px] uppercase tracking-[0.16em] mb-3 ${qualityTone(draft.agent2_review.status)}`}>
+                        Agent 2 {draft.agent2_review.quality_score}/100 · {draft.agent2_review.status}
+                      </div>
+                    )}
                     <p className="text-sm text-[#C7C7D1] line-clamp-3 mb-4">
                       {draft.generation?.hook || draft.generation?.one_line_promise}
                     </p>
