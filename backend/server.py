@@ -12,6 +12,7 @@ from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel
 from starlette.middleware.cors import CORSMiddleware
 
+from array import array
 import bcrypt
 import asyncio
 import base64
@@ -19,6 +20,7 @@ import email.utils
 import json
 import jwt
 import logging
+import math
 import mimetypes
 import os
 import re
@@ -26,6 +28,7 @@ import requests
 import secrets
 import shutil
 import subprocess
+import sys
 import tempfile
 import uuid
 import wave
@@ -1040,8 +1043,12 @@ def normalize_episode_safety_result(
         "media_transcript_word_count": 0,
         "media_transcript_truncated": False,
         "media_review_error": "",
+        "voice_clarity": {},
+        "voice_clarity_status": "",
+        "voice_clarity_score": 0,
     }
     if media_analysis:
+        voice_clarity = media_analysis.get("voice_clarity") or {}
         media_fields.update(
             {
                 "media_reviewed": bool(media_analysis.get("media_reviewed")),
@@ -1051,6 +1058,9 @@ def normalize_episode_safety_result(
                 "media_transcript_word_count": int(media_analysis.get("word_count") or 0),
                 "media_transcript_truncated": bool(media_analysis.get("transcript_truncated")),
                 "media_review_error": str(media_analysis.get("error") or "")[:240],
+                "voice_clarity": voice_clarity,
+                "voice_clarity_status": voice_clarity.get("status", ""),
+                "voice_clarity_score": voice_clarity.get("score", 0),
             }
         )
 
@@ -1100,6 +1110,168 @@ def build_transcript_excerpt(transcript_text: str, max_chars: int = 2600) -> str
     parts.append(tail)
     excerpt = "\n".join(part for part in parts if part)
     return excerpt[: max_chars + 400]
+
+
+def voice_clarity_unavailable(status: str, error: str = "") -> Dict[str, Any]:
+    return {
+        "status": status,
+        "score": 0,
+        "summary": error or "Voice clarity could not be measured.",
+        "provider": "ffmpeg+pcm-metrics",
+        "duration_seconds": 0,
+        "rms_dbfs": None,
+        "peak_dbfs": None,
+        "silence_ratio": None,
+        "clipping_ratio": None,
+        "zero_crossing_rate": None,
+        "error": error[:240],
+        "method_note": "Signal-level clarity heuristic over extracted mono PCM audio; not a human listening review.",
+    }
+
+
+def analyze_voice_clarity(data: bytes, filename: str, content_type: str, provider: str = "") -> Dict[str, Any]:
+    if not data:
+        return voice_clarity_unavailable("empty_audio", "No audio data was available for voice clarity analysis.")
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        return voice_clarity_unavailable("unavailable", "ffmpeg is required for voice clarity analysis.")
+
+    max_seconds = max(0, parse_int_env("AI_AUDIO_CLARITY_MAX_SECONDS", 900))
+    suffix = Path(filename or "episode.bin").suffix or ".bin"
+    source_path = ""
+    extracted_path = ""
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as media_file:
+            media_file.write(data)
+            source_path = media_file.name
+
+        extracted_path = f"{source_path}.clarity.wav"
+        ffmpeg_cmd = [ffmpeg, "-y", "-i", source_path]
+        if max_seconds:
+            ffmpeg_cmd.extend(["-t", str(max_seconds)])
+        ffmpeg_cmd.extend(["-vn", "-ac", "1", "-ar", "16000", "-sample_fmt", "s16", extracted_path])
+        ffmpeg_run = subprocess.run(ffmpeg_cmd, capture_output=True, text=True, timeout=240)
+        if ffmpeg_run.returncode != 0:
+            raise RuntimeError((ffmpeg_run.stderr or ffmpeg_run.stdout or "ffmpeg conversion failed").strip())
+
+        total_samples = 0
+        sum_squares = 0.0
+        peak_abs = 0
+        quiet_samples = 0
+        clipped_samples = 0
+        zero_crossings = 0
+        previous_sign = 0
+        sample_rate = 16000
+        silence_threshold = int(32768 * 0.012)
+        clipping_threshold = int(32768 * 0.98)
+
+        with wave.open(extracted_path, "rb") as wav_file:
+            sample_rate = wav_file.getframerate() or sample_rate
+            if wav_file.getsampwidth() != 2:
+                raise RuntimeError("Voice clarity analyzer expected 16-bit PCM audio")
+            while True:
+                frames = wav_file.readframes(sample_rate)
+                if not frames:
+                    break
+                samples = array("h")
+                samples.frombytes(frames)
+                if sys.byteorder != "little":
+                    samples.byteswap()
+                for sample in samples:
+                    value = int(sample)
+                    abs_value = abs(value)
+                    total_samples += 1
+                    sum_squares += value * value
+                    peak_abs = max(peak_abs, abs_value)
+                    if abs_value <= silence_threshold:
+                        quiet_samples += 1
+                    if abs_value >= clipping_threshold:
+                        clipped_samples += 1
+                    sign = 1 if value > silence_threshold else -1 if value < -silence_threshold else 0
+                    if sign and previous_sign and sign != previous_sign:
+                        zero_crossings += 1
+                    if sign:
+                        previous_sign = sign
+
+        if total_samples <= 0:
+            return voice_clarity_unavailable("empty_audio", "No decodable audio samples were found.")
+
+        duration_seconds = total_samples / max(1, sample_rate)
+        rms = math.sqrt(sum_squares / total_samples)
+        rms_dbfs = 20 * math.log10(max(rms, 1) / 32768)
+        peak_dbfs = 20 * math.log10(max(peak_abs, 1) / 32768)
+        silence_ratio = quiet_samples / total_samples
+        clipping_ratio = clipped_samples / total_samples
+        zero_crossing_rate = zero_crossings / total_samples
+
+        score = 100.0
+        if duration_seconds < 5:
+            score -= 35
+        if rms_dbfs < -32:
+            score -= min(28, (-32 - rms_dbfs) * 1.4)
+        elif rms_dbfs > -8:
+            score -= min(20, (rms_dbfs + 8) * 4)
+        if peak_dbfs > -0.5:
+            score -= 8
+        if clipping_ratio > 0.0005:
+            score -= min(30, clipping_ratio * 2400)
+        if silence_ratio > 0.72:
+            score -= min(24, (silence_ratio - 0.72) * 100)
+        if zero_crossing_rate > 0.18:
+            score -= min(12, (zero_crossing_rate - 0.18) * 80)
+        elif zero_crossing_rate < 0.005 and duration_seconds > 10:
+            score -= 8
+
+        score = round(max(0, min(100, score)), 1)
+        status = "clear" if score >= 75 else "review" if score >= 55 else "poor"
+        if status == "clear":
+            summary = "Voice signal is clear enough for publishing based on loudness, clipping, silence, and noise heuristics."
+        elif status == "review":
+            summary = "Voice signal is usable but should be reviewed for loudness, silence, or harshness before promotion."
+        else:
+            summary = "Voice signal has clarity risks and should be re-rendered or re-uploaded before publishing."
+
+        return {
+            "status": status,
+            "score": score,
+            "summary": summary,
+            "provider": "ffmpeg+pcm-metrics",
+            "source_provider": provider,
+            "content_type": content_type,
+            "duration_seconds": round(duration_seconds, 2),
+            "rms_dbfs": round(rms_dbfs, 2),
+            "peak_dbfs": round(peak_dbfs, 2),
+            "silence_ratio": round(silence_ratio, 4),
+            "clipping_ratio": round(clipping_ratio, 6),
+            "zero_crossing_rate": round(zero_crossing_rate, 6),
+            "error": "",
+            "method_note": "Signal-level clarity heuristic over extracted mono PCM audio; not a human listening review.",
+        }
+    except Exception as exc:
+        logger.error(f"Voice clarity analysis failed for {filename or content_type}: {exc}")
+        return voice_clarity_unavailable("analysis_failed", str(exc))
+    finally:
+        for path in [source_path, extracted_path]:
+            if path and os.path.exists(path):
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+
+
+def attach_voice_clarity(
+    media_analysis: Dict[str, Any],
+    data: bytes,
+    filename: str,
+    content_type: str,
+    provider: str = "",
+) -> Dict[str, Any]:
+    enriched = dict(media_analysis or {})
+    clarity = analyze_voice_clarity(data, filename, content_type, provider=provider)
+    enriched["voice_clarity"] = clarity
+    enriched["voice_clarity_status"] = clarity.get("status", "")
+    enriched["voice_clarity_score"] = clarity.get("score", 0)
+    return enriched
 
 
 def get_vosk_model():
@@ -1325,6 +1497,15 @@ def agent2_build_review_text(
         parts.append(f"Transcript: {media_analysis.get('transcript_text', '')}")
     elif media_analysis and media_analysis.get("transcript_excerpt"):
         parts.append(f"Transcript excerpt: {media_analysis.get('transcript_excerpt', '')}")
+    if media_analysis and media_analysis.get("voice_clarity"):
+        clarity = media_analysis.get("voice_clarity") or {}
+        parts.append(
+            "Voice clarity: "
+            f"{clarity.get('score', 0)}/100 {clarity.get('status', '')}; "
+            f"rms {clarity.get('rms_dbfs')}; peak {clarity.get('peak_dbfs')}; "
+            f"silence {clarity.get('silence_ratio')}; clipping {clarity.get('clipping_ratio')}. "
+            f"{clarity.get('summary', '')}"
+        )
     return "\n".join(part for part in parts if str(part).strip()).strip()
 
 
@@ -1529,33 +1710,47 @@ def build_agent2_scorecard(
     talking_points = normalize_string_list(generation.get("talking_points"), limit=12)
     production_notes = normalize_string_list(generation.get("production_notes"), limit=12)
     hook = str(generation.get("hook") or generation.get("intro_script") or "").strip()
+    voice_clarity = (media_analysis or {}).get("voice_clarity") or {}
 
     speaker_count = len({(turn.get("speaker") or turn.get("voice_role") or "Host").strip().lower() for turn in turns if turn.get("text")})
     concrete_count = float(features.get("concrete_marker_count", 0) or 0)
     generic_count = float(features.get("generic_marker_count", 0) or 0)
     question_rate = float(features.get("question_rate", 0) or 0)
     media_words = int((media_analysis or {}).get("word_count") or 0)
+    voice_clarity_score = float(voice_clarity.get("score", 0) or 0) if voice_clarity else None
 
     hook_score = 72 + min(len(hook.split()), 28) * 0.6 - generic_count * 3
     dialogue_score = 68 + min(speaker_count, 3) * 8 + min(len(turns), 16) * 0.7 + min(question_rate * 100, 12)
     specificity_score = 62 + min(concrete_count, 8) * 4 + min(len(talking_points), 8) * 2 - generic_count * 5
     structure_score = 64 + min(len(outline), 5) * 5 + min(sum(len(section.get("beats") or []) for section in outline), 16) * 1.2
     factual_score = 90 if rag_review.get("status") == "clear" else 66 if rag_review.get("status") == "review" else 20
-    audio_score = 70 + min(len(turns), 18) * 0.8 + min(len(production_notes), 6) * 2 + min(media_words / 50, 8)
-    readiness_score = min(
-        100,
-        (hook_score + dialogue_score + specificity_score + structure_score + factual_score + audio_score + rlaif_feedback.get("reward_score", 0)) / 7,
-    )
+    script_audio_score = 70 + min(len(turns), 18) * 0.8 + min(len(production_notes), 6) * 2 + min(media_words / 50, 8)
+    audio_score = (script_audio_score * 0.55 + voice_clarity_score * 0.45) if voice_clarity_score is not None else script_audio_score
+    readiness_inputs = [
+        hook_score,
+        dialogue_score,
+        specificity_score,
+        structure_score,
+        factual_score,
+        audio_score,
+        rlaif_feedback.get("reward_score", 0),
+    ]
+    if voice_clarity_score is not None:
+        readiness_inputs.append(voice_clarity_score)
+    readiness_score = min(100, sum(readiness_inputs) / max(1, len(readiness_inputs)))
 
-    return {
+    scorecard = {
         "hook_strength": agent2_scorecard_item(hook_score, "Cold-open clarity, listener promise, and avoidance of generic setup."),
         "dialogue_realism": agent2_scorecard_item(dialogue_score, "Speaker variation, turn-taking, and question-led pacing."),
         "specificity": agent2_scorecard_item(specificity_score, "Concrete examples, named constraints, and low filler density."),
         "structure": agent2_scorecard_item(structure_score, "Outline completeness and section-to-beat cohesion."),
         "factual_safety": agent2_scorecard_item(factual_score, "RAG-style safety retrieval and claim-risk screening."),
-        "audio_readiness": agent2_scorecard_item(audio_score, "Voice-ready turns, production notes, and render preparedness."),
-        "publish_readiness": agent2_scorecard_item(readiness_score, "Combined Agent 2 signal for whether this can move toward publishing."),
+        "audio_readiness": agent2_scorecard_item(audio_score, "Voice-ready turns, production notes, render preparedness, and measured audio clarity."),
     }
+    if voice_clarity_score is not None:
+        scorecard["voice_clarity"] = agent2_scorecard_item(voice_clarity_score, voice_clarity.get("summary") or "Measured signal clarity from rendered or uploaded audio.")
+    scorecard["publish_readiness"] = agent2_scorecard_item(readiness_score, "Combined Agent 2 signal for whether this can move toward publishing.")
+    return scorecard
 
 
 def evaluate_agent2_quality(
@@ -1574,8 +1769,15 @@ def evaluate_agent2_quality(
     status = "pass"
     if rag_review["status"] == "blocked":
         status = "blocked"
+    voice_clarity = (media_analysis or {}).get("voice_clarity") or {}
+    if voice_clarity.get("status") == "poor":
+        status = "revise"
     elif rag_review["status"] == "review" or gan_review["label"] == "high" or rlaif_feedback["reward_score"] < 72:
         status = "revise"
+
+    clarity_summary = ""
+    if voice_clarity:
+        clarity_summary = f"; voice clarity {voice_clarity.get('score', 0)}/100 {voice_clarity.get('status', '')}"
 
     return {
         "agent": "Agent 2 - Podcast Quality Reviewer",
@@ -1587,9 +1789,10 @@ def evaluate_agent2_quality(
         "rag_safety": rag_review,
         "rlaif": rlaif_feedback,
         "scorecard": scorecard,
+        "voice_clarity": voice_clarity,
         "summary": (
             f"Agent 2 quality score {rlaif_feedback['reward_score']}/100; "
-            f"AI-risk {gan_review['label']} {gan_review['score']}; RAG safety {rag_review['status']}."
+            f"AI-risk {gan_review['label']} {gan_review['score']}; RAG safety {rag_review['status']}{clarity_summary}."
         ),
         "created_at": now_iso(),
     }
@@ -1736,7 +1939,7 @@ def build_ai_audio_script(show: Dict[str, Any], title: str, generation: Dict[str
     return script
 
 
-def build_script_media_analysis(script_text: str, provider: str) -> Dict[str, Any]:
+def build_script_media_analysis(script_text: str, provider: str, voice_clarity: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     return {
         "status": "script_reviewed",
         "provider": provider,
@@ -1746,6 +1949,9 @@ def build_script_media_analysis(script_text: str, provider: str) -> Dict[str, An
         "word_count": len((script_text or "").split()),
         "transcript_truncated": False,
         "error": "",
+        "voice_clarity": voice_clarity or {},
+        "voice_clarity_status": (voice_clarity or {}).get("status", ""),
+        "voice_clarity_score": (voice_clarity or {}).get("score", 0),
     }
 
 
@@ -3274,6 +3480,9 @@ async def enrich_episodes(episodes: List[Dict], current_user=None):
         cleaned["quality_status"] = cleaned.get("quality_status") or cleaned["quality_agent"].get("status", "")
         cleaned["quality_score"] = cleaned.get("quality_score") or cleaned["quality_agent"].get("quality_score", 0)
         cleaned["quality_summary"] = cleaned["quality_agent"].get("summary", "")
+        cleaned["voice_clarity"] = cleaned["quality_agent"].get("voice_clarity") or cleaned["moderation"].get("voice_clarity", {})
+        cleaned["voice_clarity_status"] = cleaned["voice_clarity"].get("status", "")
+        cleaned["voice_clarity_score"] = cleaned["voice_clarity"].get("score", 0)
         cleaned["is_playable"] = bool(cleaned.get("is_playable", bool(cleaned.get("media_path") or cleaned.get("external_media_url"))))
         cleaned["like_count"] = int(engagement.get("like_count", cleaned.get("like_count", 0)) or 0)
         cleaned["rating_count"] = int(engagement.get("rating_count", cleaned.get("rating_count", 0)) or 0)
@@ -5147,7 +5356,13 @@ async def upload_podcast(
     keywords = await extract_keywords(f"{title} {description} {normalized_category} {show['title']}")
     media_type = "video" if is_video_upload else "audio"
     selected_rating = normalize_content_rating(audience_rating)
-    media_analysis = transcribe_media_for_safety(data, file.filename or "", content_type)
+    media_analysis = attach_voice_clarity(
+        transcribe_media_for_safety(data, file.filename or "", content_type),
+        data,
+        file.filename or "",
+        content_type,
+        provider="uploaded-media",
+    )
     moderation = await review_episode_safety(
         show,
         title,
@@ -5282,7 +5497,13 @@ async def create_ai_podcast_episode(
     audio_turns = build_ai_audio_turns(show, final_title, ai_draft.get("generation", {}), ai_draft.get("intake", {}))
     audio_script = audio_turns_to_script(audio_turns) or build_ai_audio_script(show, final_title, ai_draft.get("generation", {}))
     rendered_audio = render_ai_audio_bytes(audio_script, audio_turns)
-    media_analysis = build_script_media_analysis(audio_script, f"ai-script:{rendered_audio['provider']}")
+    voice_clarity = analyze_voice_clarity(
+        rendered_audio["data"],
+        rendered_audio.get("filename") or f"{slugify_filename(final_title)}.{rendered_audio.get('extension') or 'audio'}",
+        rendered_audio["content_type"],
+        provider=rendered_audio.get("provider", ""),
+    )
+    media_analysis = build_script_media_analysis(audio_script, f"ai-script:{rendered_audio['provider']}", voice_clarity=voice_clarity)
     moderation = await review_episode_safety(
         show,
         final_title,

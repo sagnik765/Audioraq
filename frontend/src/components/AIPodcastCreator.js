@@ -97,8 +97,24 @@ function formatStatus(status) {
   return String(status || 'pending').replace(/_/g, ' ');
 }
 
+const preferredScorecardOrder = [
+  'hook_strength',
+  'dialogue_realism',
+  'voice_clarity',
+  'specificity',
+  'structure',
+  'factual_safety',
+  'audio_readiness',
+  'publish_readiness',
+];
+
 function firstScorecardEntries(scorecard) {
-  return Object.entries(scorecard || {}).slice(0, 6);
+  const available = scorecard || {};
+  const prioritized = preferredScorecardOrder
+    .filter((key) => available[key])
+    .map((key) => [key, available[key]]);
+  const leftovers = Object.entries(available).filter(([key]) => !preferredScorecardOrder.includes(key));
+  return [...prioritized, ...leftovers].slice(0, 6);
 }
 
 function isStepComplete(step, value) {
