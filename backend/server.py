@@ -121,6 +121,28 @@ AGENT2_RLAIF_POLICY = [
 
 AI_AUDIO_VOICE_ROLES = {"host", "guest", "narrator"}
 AI_AUDIO_DISCLOSURE = "This episode includes AI-generated voice audio."
+AI_STUDIO_STAGES = [
+    "brief",
+    "research",
+    "outline",
+    "script",
+    "cast",
+    "table_read",
+    "final_render",
+    "agent2_review",
+    "publish",
+]
+AI_STUDIO_STAGE_LABELS = {
+    "brief": "Creator Brief",
+    "research": "Research & Claims",
+    "outline": "Episode Outline",
+    "script": "Dialogue Script",
+    "cast": "Cast & Voices",
+    "table_read": "Table Read",
+    "final_render": "Final Audio Render",
+    "agent2_review": "Agent 2 Review",
+    "publish": "Publish",
+}
 
 
 def now_iso():
@@ -1486,6 +1508,56 @@ def agent2_rlaif_self_feedback(gan_review: Dict[str, Any], rag_review: Dict[str,
     }
 
 
+def agent2_scorecard_item(score: float, note: str) -> Dict[str, Any]:
+    return {
+        "score": round(max(0, min(100, score)), 1),
+        "note": note,
+    }
+
+
+def build_agent2_scorecard(
+    gan_review: Dict[str, Any],
+    rag_review: Dict[str, Any],
+    rlaif_feedback: Dict[str, Any],
+    generation: Optional[Dict[str, Any]] = None,
+    media_analysis: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    generation = generation or {}
+    features = gan_review.get("features", {})
+    outline = normalize_outline_items(generation.get("outline"))
+    turns = normalize_audio_script_turns(generation.get("audio_script_turns"), limit=64)
+    talking_points = normalize_string_list(generation.get("talking_points"), limit=12)
+    production_notes = normalize_string_list(generation.get("production_notes"), limit=12)
+    hook = str(generation.get("hook") or generation.get("intro_script") or "").strip()
+
+    speaker_count = len({(turn.get("speaker") or turn.get("voice_role") or "Host").strip().lower() for turn in turns if turn.get("text")})
+    concrete_count = float(features.get("concrete_marker_count", 0) or 0)
+    generic_count = float(features.get("generic_marker_count", 0) or 0)
+    question_rate = float(features.get("question_rate", 0) or 0)
+    media_words = int((media_analysis or {}).get("word_count") or 0)
+
+    hook_score = 72 + min(len(hook.split()), 28) * 0.6 - generic_count * 3
+    dialogue_score = 68 + min(speaker_count, 3) * 8 + min(len(turns), 16) * 0.7 + min(question_rate * 100, 12)
+    specificity_score = 62 + min(concrete_count, 8) * 4 + min(len(talking_points), 8) * 2 - generic_count * 5
+    structure_score = 64 + min(len(outline), 5) * 5 + min(sum(len(section.get("beats") or []) for section in outline), 16) * 1.2
+    factual_score = 90 if rag_review.get("status") == "clear" else 66 if rag_review.get("status") == "review" else 20
+    audio_score = 70 + min(len(turns), 18) * 0.8 + min(len(production_notes), 6) * 2 + min(media_words / 50, 8)
+    readiness_score = min(
+        100,
+        (hook_score + dialogue_score + specificity_score + structure_score + factual_score + audio_score + rlaif_feedback.get("reward_score", 0)) / 7,
+    )
+
+    return {
+        "hook_strength": agent2_scorecard_item(hook_score, "Cold-open clarity, listener promise, and avoidance of generic setup."),
+        "dialogue_realism": agent2_scorecard_item(dialogue_score, "Speaker variation, turn-taking, and question-led pacing."),
+        "specificity": agent2_scorecard_item(specificity_score, "Concrete examples, named constraints, and low filler density."),
+        "structure": agent2_scorecard_item(structure_score, "Outline completeness and section-to-beat cohesion."),
+        "factual_safety": agent2_scorecard_item(factual_score, "RAG-style safety retrieval and claim-risk screening."),
+        "audio_readiness": agent2_scorecard_item(audio_score, "Voice-ready turns, production notes, and render preparedness."),
+        "publish_readiness": agent2_scorecard_item(readiness_score, "Combined Agent 2 signal for whether this can move toward publishing."),
+    }
+
+
 def evaluate_agent2_quality(
     title: str,
     description: str,
@@ -1497,6 +1569,7 @@ def evaluate_agent2_quality(
     gan_review = agent2_gan_inspired_discriminator(review_text, generation=generation)
     rag_review = agent2_rag_safety_review(review_text)
     rlaif_feedback = agent2_rlaif_self_feedback(gan_review, rag_review, generation=generation)
+    scorecard = build_agent2_scorecard(gan_review, rag_review, rlaif_feedback, generation=generation, media_analysis=media_analysis)
 
     status = "pass"
     if rag_review["status"] == "blocked":
@@ -1513,6 +1586,7 @@ def evaluate_agent2_quality(
         "gan_discriminator": gan_review,
         "rag_safety": rag_review,
         "rlaif": rlaif_feedback,
+        "scorecard": scorecard,
         "summary": (
             f"Agent 2 quality score {rlaif_feedback['reward_score']}/100; "
             f"AI-risk {gan_review['label']} {gan_review['score']}; RAG safety {rag_review['status']}."
@@ -2584,6 +2658,264 @@ async def generate_ai_podcast_package(brief: Dict[str, Any], show: Dict[str, Any
     return generation
 
 
+def default_ai_studio_stage_state() -> Dict[str, Dict[str, Any]]:
+    return {
+        stage: {
+            "label": AI_STUDIO_STAGE_LABELS[stage],
+            "status": "pending",
+            "notes": "",
+            "updated_at": "",
+        }
+        for stage in AI_STUDIO_STAGES
+    }
+
+
+def update_ai_studio_stage_state(
+    stage_state: Dict[str, Dict[str, Any]],
+    stage: str,
+    status: str,
+    notes: str = "",
+) -> Dict[str, Dict[str, Any]]:
+    state = dict(stage_state or default_ai_studio_stage_state())
+    current = dict(state.get(stage) or {})
+    current["label"] = AI_STUDIO_STAGE_LABELS.get(stage, stage.replace("_", " ").title())
+    current["status"] = status
+    if notes:
+        current["notes"] = notes
+    current["updated_at"] = now_iso()
+    state[stage] = current
+    return state
+
+
+def build_ai_studio_show_bible(show: Dict[str, Any], intake: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    intake = intake or {}
+    identity = intake.get("identity", {})
+    tone_style = intake.get("toneStyle", {})
+    growth = intake.get("growthOptimization", {})
+    audience = identity.get("targetAudience") or show.get("target_audience") or "curious listeners"
+    niche = identity.get("niche") or show.get("category") or DEFAULT_SHOW_CATEGORY
+    tone = tone_style.get("tone") or "professional"
+    format_name = tone_style.get("format") or "solo"
+    known_issues = normalize_string_list(growth.get("knownIssues"), limit=6)
+
+    return {
+        "show_id": show.get("id", ""),
+        "show_title": show.get("title", ""),
+        "show_description": show.get("description", ""),
+        "niche": niche,
+        "target_audience": audience,
+        "positioning": f"{show.get('title') or 'This show'} helps {audience} understand {niche} with useful, podcast-first depth.",
+        "tone_contract": f"Keep the delivery {tone}, built as a {format_name} episode, and avoid generic AI filler.",
+        "creator_constraints": known_issues,
+        "audio_policy": "AI-created episodes render as audio-only; recorded uploads can still be audio or audio plus video.",
+    }
+
+
+def build_ai_studio_claim_cards(generation: Dict[str, Any], intake: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+    intake = intake or {}
+    references = normalize_string_list((intake.get("contentInput") or {}).get("references"), limit=10)
+    candidates = []
+    if generation.get("hook"):
+        candidates.append(generation["hook"])
+    candidates.extend(normalize_string_list(generation.get("talking_points"), limit=12))
+    for section in normalize_outline_items(generation.get("outline")):
+        candidates.extend(normalize_string_list(section.get("beats"), limit=6))
+
+    cards = []
+    seen = set()
+    for claim in candidates:
+        normalized = claim.strip()
+        if not normalized or normalized.lower() in seen:
+            continue
+        seen.add(normalized.lower())
+        source = references[len(cards)] if len(cards) < len(references) else ""
+        cards.append(
+            {
+                "id": f"claim-{len(cards) + 1}",
+                "claim": normalized,
+                "source": source,
+                "confidence": "creator_reference" if source else "needs_creator_review",
+                "needs_review": not bool(source),
+                "review_note": "Supported by creator-provided reference." if source else "Review before recording if this is a factual claim.",
+            }
+        )
+        if len(cards) >= 10:
+            break
+    return cards
+
+
+def build_ai_studio_cast(intake: Optional[Dict[str, Any]], generation: Dict[str, Any]) -> List[Dict[str, Any]]:
+    intake = intake or {}
+    format_name = ((intake.get("toneStyle") or {}).get("format") or "solo").strip().lower()
+    tone = ((intake.get("toneStyle") or {}).get("tone") or "professional").strip().lower()
+    turns = normalize_audio_script_turns(generation.get("audio_script_turns"), limit=64)
+    if not turns:
+        turns = [{"speaker": "Host", "voice_role": "host", "text": ""}]
+        if format_name == "interview":
+            turns.append({"speaker": "Guest", "voice_role": "guest", "text": ""})
+        if format_name == "narrative":
+            turns.append({"speaker": "Narrator", "voice_role": "narrator", "text": ""})
+
+    cast = []
+    seen = set()
+    for turn in turns:
+        role = turn.get("voice_role") if turn.get("voice_role") in AI_AUDIO_VOICE_ROLES else "host"
+        speaker = (turn.get("speaker") or role.title()).strip() or role.title()
+        key = f"{speaker.lower()}:{role}"
+        if key in seen:
+            continue
+        seen.add(key)
+        cast.append(
+            {
+                "speaker": speaker,
+                "voice_role": role,
+                "delivery": f"{tone} podcast delivery; distinct from the other speakers and never imitating a real person.",
+                "purpose": "Guide the listener" if role == "host" else "Add perspective" if role == "guest" else "Carry narrative transitions",
+            }
+        )
+    return cast[:6]
+
+
+def build_ai_studio_artifacts(
+    intake: Optional[Dict[str, Any]],
+    show: Dict[str, Any],
+    generation: Optional[Dict[str, Any]] = None,
+    agent2_review: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    generation = generation or {}
+    title = generation.get("episode_title") or ((intake or {}).get("contentInput") or {}).get("topic") or "Untitled AI Episode"
+    turns = build_ai_audio_turns(show, title, generation, intake or {}) if generation else []
+    script_text = audio_turns_to_script(turns) if turns else ""
+    claim_cards = build_ai_studio_claim_cards(generation, intake) if generation else []
+
+    return {
+        "brief": intake or {},
+        "show_bible": build_ai_studio_show_bible(show, intake),
+        "research": {
+            "mode": "creator-guided-local-rag",
+            "references": normalize_string_list(((intake or {}).get("contentInput") or {}).get("references"), limit=10),
+            "claim_cards": claim_cards,
+            "needs_creator_review_count": len([card for card in claim_cards if card.get("needs_review")]),
+        },
+        "outline": normalize_outline_items(generation.get("outline")) if generation else [],
+        "script": {
+            "title": title,
+            "hook": generation.get("hook", ""),
+            "intro_script": generation.get("intro_script", ""),
+            "audio_script_turns": turns,
+            "table_read_script": script_text,
+            "estimated_words": len(script_text.split()),
+        },
+        "cast": build_ai_studio_cast(intake, generation) if generation else [],
+        "quality": agent2_review or {},
+        "publish": {
+            "title": title,
+            "description": (generation.get("suggested_description") or build_ai_publish_description(generation)) if generation else "",
+            "category": generation.get("recommended_category") or show.get("category") or DEFAULT_SHOW_CATEGORY,
+            "media_policy": "audio_only_ai_creation",
+        },
+    }
+
+
+def build_ai_studio_stage_state(
+    intake: Optional[Dict[str, Any]] = None,
+    generation: Optional[Dict[str, Any]] = None,
+    agent2_review: Optional[Dict[str, Any]] = None,
+    published_episode_id: str = "",
+) -> Dict[str, Dict[str, Any]]:
+    state = default_ai_studio_stage_state()
+    if intake:
+        state = update_ai_studio_stage_state(state, "brief", "complete", "Structured creator brief captured.")
+    if generation:
+        state = update_ai_studio_stage_state(state, "research", "needs_review", "Claim cards are ready for creator review.")
+        state = update_ai_studio_stage_state(state, "outline", "complete", "Episode outline generated.")
+        state = update_ai_studio_stage_state(state, "script", "complete", "Dialogue-ready script turns generated.")
+        state = update_ai_studio_stage_state(state, "cast", "complete", "Voice roles and speaker purposes assigned.")
+        state = update_ai_studio_stage_state(state, "table_read", "ready", "Table-read script is ready to inspect.")
+        state = update_ai_studio_stage_state(state, "final_render", "ready", "Ready to render an audio-only AI episode.")
+    if agent2_review:
+        review_status = agent2_review.get("status") or "pass"
+        if review_status == "blocked":
+            stage_status = "blocked"
+        elif review_status == "revise":
+            stage_status = "needs_revision"
+        else:
+            stage_status = "complete"
+        state = update_ai_studio_stage_state(
+            state,
+            "agent2_review",
+            stage_status,
+            agent2_review.get("summary", "Agent 2 review complete."),
+        )
+        if review_status == "pass":
+            state = update_ai_studio_stage_state(state, "publish", "ready", "Quality gate passed; ready for creator approval.")
+        elif review_status == "revise":
+            state = update_ai_studio_stage_state(state, "publish", "needs_revision", "Revise before publishing.")
+        else:
+            state = update_ai_studio_stage_state(state, "publish", "blocked", "Safety gate blocked publishing.")
+    if published_episode_id:
+        state = update_ai_studio_stage_state(state, "final_render", "complete", "Final audio rendered and stored.")
+        state = update_ai_studio_stage_state(state, "publish", "published", f"Published episode {published_episode_id}.")
+    return state
+
+
+def resolve_ai_studio_active_stage(
+    generation: Optional[Dict[str, Any]] = None,
+    agent2_review: Optional[Dict[str, Any]] = None,
+    published_episode_id: str = "",
+) -> str:
+    if published_episode_id:
+        return "publish"
+    if agent2_review and agent2_review.get("status") in {"blocked", "revise"}:
+        return "agent2_review"
+    if generation:
+        return "final_render"
+    return "brief"
+
+
+def build_ai_studio_project_doc(
+    user: Dict[str, Any],
+    show: Dict[str, Any],
+    intake: Optional[Dict[str, Any]] = None,
+    generation: Optional[Dict[str, Any]] = None,
+    agent2_review: Optional[Dict[str, Any]] = None,
+    source_draft_id: str = "",
+    title: str = "",
+) -> Dict[str, Any]:
+    created_at = now_iso()
+    episode_title = (
+        title
+        or (generation or {}).get("episode_title")
+        or ((intake or {}).get("contentInput") or {}).get("topic")
+        or "Untitled AI Studio Project"
+    )
+    return {
+        "id": str(uuid.uuid4()),
+        "title": episode_title,
+        "show_id": show["id"],
+        "show_title": show.get("title", ""),
+        "podcaster_id": user["_id"],
+        "podcaster_name": user.get("name", ""),
+        "source_draft_id": source_draft_id,
+        "intake": intake or {},
+        "generation": generation or {},
+        "show_bible": build_ai_studio_show_bible(show, intake),
+        "artifacts": build_ai_studio_artifacts(intake, show, generation, agent2_review),
+        "agent2_review": agent2_review or {},
+        "stage_state": build_ai_studio_stage_state(intake, generation, agent2_review),
+        "active_stage": resolve_ai_studio_active_stage(generation, agent2_review),
+        "status": "draft",
+        "media_policy": {
+            "create_with_ai": "audio_only",
+            "recorded_upload": "audio_or_video",
+        },
+        "created_at": created_at,
+        "updated_at": created_at,
+        "published_episode_id": "",
+        "is_deleted": False,
+    }
+
+
 async def extract_keywords(text):
     result = await run_ai_json_chat(
         "keywords",
@@ -3329,6 +3661,53 @@ class GenerateAIPodcastDraftRequest(BaseModel):
     intake: AIPodcastIntake
 
 
+class CreateAIStudioProjectRequest(BaseModel):
+    show_id: str
+    intake: Optional[AIPodcastIntake] = None
+    title: Optional[str] = ""
+
+
+class UpdateAIStudioProjectRequest(BaseModel):
+    title: Optional[str] = None
+    intake: Optional[AIPodcastIntake] = None
+    active_stage: Optional[Literal[
+        "brief",
+        "research",
+        "outline",
+        "script",
+        "cast",
+        "table_read",
+        "final_render",
+        "agent2_review",
+        "publish",
+    ]] = None
+    show_bible: Optional[Dict[str, Any]] = None
+    cast: Optional[List[Dict[str, Any]]] = None
+
+
+class UpdateAIStudioProjectStageRequest(BaseModel):
+    stage: Literal[
+        "brief",
+        "research",
+        "outline",
+        "script",
+        "cast",
+        "table_read",
+        "final_render",
+        "agent2_review",
+        "publish",
+    ]
+    status: str = "in_progress"
+    notes: Optional[str] = ""
+    artifact: Optional[Dict[str, Any]] = None
+
+
+class CreateAIStudioRenderJobRequest(BaseModel):
+    project_id: str
+    draft_id: Optional[str] = ""
+    render_type: Literal["preview", "final"] = "preview"
+
+
 app = FastAPI()
 api_router = APIRouter(prefix="/api")
 
@@ -3363,6 +3742,11 @@ async def startup():
     await db.ai_podcast_drafts.create_index("id", unique=True)
     await db.ai_podcast_drafts.create_index("podcaster_id")
     await db.ai_podcast_drafts.create_index([("podcaster_id", 1), ("show_id", 1), ("created_at", -1)])
+    await db.ai_studio_projects.create_index("id", unique=True)
+    await db.ai_studio_projects.create_index("podcaster_id")
+    await db.ai_studio_projects.create_index([("podcaster_id", 1), ("show_id", 1), ("updated_at", -1)])
+    await db.ai_studio_render_jobs.create_index("id", unique=True)
+    await db.ai_studio_render_jobs.create_index([("podcaster_id", 1), ("project_id", 1), ("created_at", -1)])
 
     admin_email = os.environ.get("ADMIN_EMAIL", "admin@audioraq.com")
     admin_password = os.environ.get("ADMIN_PASSWORD", "admin123")
@@ -4057,6 +4441,171 @@ async def get_ai_studio_status(request: Request):
     }
 
 
+@api_router.get("/ai-studio/projects/my")
+async def get_my_ai_studio_projects(request: Request, show_id: Optional[str] = None, limit: int = 12):
+    user = await get_current_user(request)
+    if user["role"] != "podcaster":
+        raise HTTPException(status_code=403, detail="Only podcasters can use AI Studio projects")
+
+    query = {"podcaster_id": user["_id"], "is_deleted": {"$ne": True}}
+    if show_id:
+        query["show_id"] = show_id
+
+    safe_limit = max(1, min(limit, 30))
+    projects = await db.ai_studio_projects.find(query).sort("updated_at", -1).limit(safe_limit).to_list(safe_limit)
+    return {"projects": [clean_doc(project) for project in projects]}
+
+
+@api_router.get("/ai-studio/projects/{project_id}")
+async def get_ai_studio_project(project_id: str, request: Request):
+    user = await get_current_user(request)
+    if user["role"] != "podcaster":
+        raise HTTPException(status_code=403, detail="Only podcasters can use AI Studio projects")
+
+    project = await db.ai_studio_projects.find_one({"id": project_id, "podcaster_id": user["_id"], "is_deleted": {"$ne": True}})
+    if project is None:
+        raise HTTPException(status_code=404, detail="AI Studio project not found")
+    return clean_doc(project)
+
+
+@api_router.post("/ai-studio/projects")
+async def create_ai_studio_project(req: CreateAIStudioProjectRequest, request: Request):
+    user = await get_current_user(request)
+    if user["role"] != "podcaster":
+        raise HTTPException(status_code=403, detail="Only podcasters can use AI Studio projects")
+
+    show_id = req.show_id.strip()
+    if not show_id:
+        raise HTTPException(status_code=400, detail="Pick a show before creating an AI Studio project")
+    show = await db.shows.find_one({"id": show_id, "podcaster_id": user["_id"], "is_deleted": False})
+    if show is None:
+        raise HTTPException(status_code=404, detail="Show not found")
+
+    intake = req.intake.dict() if req.intake else None
+    project_doc = build_ai_studio_project_doc(user, show, intake=intake, title=(req.title or "").strip())
+    await db.ai_studio_projects.insert_one(project_doc)
+    return clean_doc(project_doc)
+
+
+@api_router.patch("/ai-studio/projects/{project_id}")
+async def update_ai_studio_project(project_id: str, req: UpdateAIStudioProjectRequest, request: Request):
+    user = await get_current_user(request)
+    if user["role"] != "podcaster":
+        raise HTTPException(status_code=403, detail="Only podcasters can use AI Studio projects")
+
+    project = await db.ai_studio_projects.find_one({"id": project_id, "podcaster_id": user["_id"], "is_deleted": {"$ne": True}})
+    if project is None:
+        raise HTTPException(status_code=404, detail="AI Studio project not found")
+
+    updates: Dict[str, Any] = {"updated_at": now_iso()}
+    if req.title is not None:
+        updates["title"] = req.title.strip() or project.get("title") or "Untitled AI Studio Project"
+    if req.active_stage is not None:
+        updates["active_stage"] = req.active_stage
+    if req.intake is not None:
+        intake = req.intake.dict()
+        show = await db.shows.find_one({"id": project["show_id"], "podcaster_id": user["_id"], "is_deleted": False})
+        if show is None:
+            raise HTTPException(status_code=404, detail="Show not found")
+        updates["intake"] = intake
+        updates["show_bible"] = build_ai_studio_show_bible(show, intake)
+        updates["artifacts"] = build_ai_studio_artifacts(intake, show, project.get("generation") or {}, project.get("agent2_review") or {})
+        updates["stage_state"] = build_ai_studio_stage_state(intake, project.get("generation") or {}, project.get("agent2_review") or {}, project.get("published_episode_id") or "")
+    if req.show_bible is not None:
+        updates["show_bible"] = req.show_bible
+        if "artifacts" in updates:
+            updates["artifacts"]["show_bible"] = req.show_bible
+        else:
+            updates["artifacts.show_bible"] = req.show_bible
+    if req.cast is not None:
+        if "artifacts" in updates:
+            updates["artifacts"]["cast"] = req.cast
+        else:
+            updates["artifacts.cast"] = req.cast
+
+    await db.ai_studio_projects.update_one({"id": project_id}, {"$set": updates})
+    updated = await db.ai_studio_projects.find_one({"id": project_id, "podcaster_id": user["_id"]})
+    return clean_doc(updated)
+
+
+@api_router.post("/ai-studio/projects/{project_id}/stage")
+async def update_ai_studio_project_stage(project_id: str, req: UpdateAIStudioProjectStageRequest, request: Request):
+    user = await get_current_user(request)
+    if user["role"] != "podcaster":
+        raise HTTPException(status_code=403, detail="Only podcasters can use AI Studio projects")
+
+    project = await db.ai_studio_projects.find_one({"id": project_id, "podcaster_id": user["_id"], "is_deleted": {"$ne": True}})
+    if project is None:
+        raise HTTPException(status_code=404, detail="AI Studio project not found")
+
+    stage_state = update_ai_studio_stage_state(project.get("stage_state") or {}, req.stage, req.status.strip() or "in_progress", req.notes or "")
+    updates: Dict[str, Any] = {
+        "stage_state": stage_state,
+        "active_stage": req.stage,
+        "updated_at": now_iso(),
+    }
+    if req.artifact is not None:
+        updates[f"artifacts.{req.stage}"] = req.artifact
+
+    await db.ai_studio_projects.update_one({"id": project_id}, {"$set": updates})
+    updated = await db.ai_studio_projects.find_one({"id": project_id, "podcaster_id": user["_id"]})
+    return clean_doc(updated)
+
+
+@api_router.get("/ai-studio/render-jobs/my")
+async def get_my_ai_studio_render_jobs(request: Request, project_id: Optional[str] = None, limit: int = 12):
+    user = await get_current_user(request)
+    if user["role"] != "podcaster":
+        raise HTTPException(status_code=403, detail="Only podcasters can use AI Studio render jobs")
+
+    query = {"podcaster_id": user["_id"]}
+    if project_id:
+        query["project_id"] = project_id
+    safe_limit = max(1, min(limit, 30))
+    jobs = await db.ai_studio_render_jobs.find(query).sort("created_at", -1).limit(safe_limit).to_list(safe_limit)
+    return {"jobs": [clean_doc(job) for job in jobs]}
+
+
+@api_router.post("/ai-studio/render-jobs")
+async def create_ai_studio_render_job(req: CreateAIStudioRenderJobRequest, request: Request):
+    user = await get_current_user(request)
+    if user["role"] != "podcaster":
+        raise HTTPException(status_code=403, detail="Only podcasters can use AI Studio render jobs")
+
+    project_id = req.project_id.strip()
+    project = await db.ai_studio_projects.find_one({"id": project_id, "podcaster_id": user["_id"], "is_deleted": {"$ne": True}})
+    if project is None:
+        raise HTTPException(status_code=404, detail="AI Studio project not found")
+
+    draft_id = (req.draft_id or project.get("source_draft_id") or "").strip()
+    if draft_id:
+        draft = await db.ai_podcast_drafts.find_one({"id": draft_id, "podcaster_id": user["_id"]})
+        if draft is None:
+            raise HTTPException(status_code=404, detail="AI draft not found")
+
+    job = {
+        "id": str(uuid.uuid4()),
+        "project_id": project["id"],
+        "draft_id": draft_id,
+        "show_id": project.get("show_id", ""),
+        "podcaster_id": user["_id"],
+        "podcaster_name": user.get("name", ""),
+        "render_type": req.render_type,
+        "status": "queued",
+        "provider_order": get_ai_audio_provider_order(),
+        "message": "Queued for the AI Studio render layer. The current publish action can still render synchronously while the async worker is scaled.",
+        "created_at": now_iso(),
+        "updated_at": now_iso(),
+    }
+    await db.ai_studio_render_jobs.insert_one(job)
+    stage_state = update_ai_studio_stage_state(project.get("stage_state") or {}, "final_render", "queued", "Audio render job queued.")
+    await db.ai_studio_projects.update_one(
+        {"id": project["id"]},
+        {"$set": {"stage_state": stage_state, "active_stage": "final_render", "updated_at": now_iso(), "last_render_job_id": job["id"]}},
+    )
+    return clean_doc(job)
+
+
 @api_router.get("/ai-podcast-drafts/my")
 async def get_my_ai_podcast_drafts(request: Request, show_id: Optional[str] = None, limit: int = 12):
     user = await get_current_user(request)
@@ -4146,6 +4695,17 @@ async def generate_ai_podcast_draft(req: GenerateAIPodcastDraftRequest, request:
         "updated_at": now_iso(),
         "last_used_at": "",
     }
+    project_doc = build_ai_studio_project_doc(
+        user,
+        show,
+        intake=intake,
+        generation=generation,
+        agent2_review=agent2_review,
+        source_draft_id=draft_doc["id"],
+    )
+    draft_doc["ai_studio_project_id"] = project_doc["id"]
+    draft_doc["ai_studio_project"] = clean_doc(project_doc)
+    await db.ai_studio_projects.insert_one(project_doc)
     await db.ai_podcast_drafts.insert_one(draft_doc)
     return clean_doc(draft_doc)
 
@@ -4652,6 +5212,21 @@ async def upload_podcast(
             {"id": ai_draft["id"]},
             {"$set": {"last_used_at": now_iso(), "updated_at": now_iso(), "published_episode_id": podcast_doc["id"]}},
         )
+        if ai_draft.get("ai_studio_project_id"):
+            await db.ai_studio_projects.update_one(
+                {"id": ai_draft["ai_studio_project_id"], "podcaster_id": user["_id"]},
+                {
+                    "$set": {
+                        "status": "published",
+                        "published_episode_id": podcast_doc["id"],
+                        "agent2_review": quality_agent,
+                        "artifacts": build_ai_studio_artifacts(ai_draft.get("intake") or {}, show, ai_draft.get("generation") or {}, quality_agent),
+                        "stage_state": build_ai_studio_stage_state(ai_draft.get("intake") or {}, ai_draft.get("generation") or {}, quality_agent, podcast_doc["id"]),
+                        "active_stage": "publish",
+                        "updated_at": now_iso(),
+                    }
+                },
+            )
     enriched = await enrich_episodes([podcast_doc], current_user=user)
     return enriched[0]
 
@@ -4786,6 +5361,21 @@ async def create_ai_podcast_episode(
         {"id": ai_draft["id"]},
         {"$set": {"last_used_at": now_iso(), "updated_at": now_iso(), "generated_episode_id": podcast_doc["id"]}},
     )
+    if ai_draft.get("ai_studio_project_id"):
+        await db.ai_studio_projects.update_one(
+            {"id": ai_draft["ai_studio_project_id"], "podcaster_id": user["_id"]},
+            {
+                "$set": {
+                    "status": "published",
+                    "published_episode_id": podcast_doc["id"],
+                    "agent2_review": quality_agent,
+                    "artifacts": build_ai_studio_artifacts(ai_draft.get("intake") or {}, show, ai_draft.get("generation") or {}, quality_agent),
+                    "stage_state": build_ai_studio_stage_state(ai_draft.get("intake") or {}, ai_draft.get("generation") or {}, quality_agent, podcast_doc["id"]),
+                    "active_stage": "publish",
+                    "updated_at": now_iso(),
+                }
+            },
+        )
     enriched = await enrich_episodes([podcast_doc], current_user=user)
     return enriched[0]
 

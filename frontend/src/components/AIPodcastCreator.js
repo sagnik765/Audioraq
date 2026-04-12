@@ -74,6 +74,33 @@ function qualityTone(status) {
   return 'text-[#2EC4B6] border-[#2EC4B6]/40 bg-[#2EC4B6]/10';
 }
 
+const studioStages = [
+  { id: 'brief', label: 'Brief' },
+  { id: 'research', label: 'Research' },
+  { id: 'outline', label: 'Outline' },
+  { id: 'script', label: 'Script' },
+  { id: 'cast', label: 'Cast' },
+  { id: 'table_read', label: 'Table Read' },
+  { id: 'final_render', label: 'Render' },
+  { id: 'agent2_review', label: 'Agent 2' },
+  { id: 'publish', label: 'Publish' },
+];
+
+function studioStatusTone(status) {
+  if (['blocked', 'needs_revision'].includes(status)) return 'border-[#FF6B6B]/40 bg-[#FF6B6B]/10 text-[#FFB3B3]';
+  if (['needs_review', 'queued', 'ready', 'in_progress'].includes(status)) return 'border-[#F5A623]/40 bg-[#F5A623]/10 text-[#FFD58A]';
+  if (['complete', 'published'].includes(status)) return 'border-[#2EC4B6]/40 bg-[#2EC4B6]/10 text-[#9CF3EA]';
+  return 'border-[#27272A] bg-[#141417] text-[#8A8A93]';
+}
+
+function formatStatus(status) {
+  return String(status || 'pending').replace(/_/g, ' ');
+}
+
+function firstScorecardEntries(scorecard) {
+  return Object.entries(scorecard || {}).slice(0, 6);
+}
+
 function isStepComplete(step, value) {
   if (step.optional) return true;
   if (step.type === 'list') return Array.isArray(value) && value.length > 0;
@@ -92,8 +119,12 @@ export default function AIPodcastCreator({
   const [stepIndex, setStepIndex] = useState(0);
   const [isGenerating, setIsGenerating] = useState(false);
   const [draftsLoading, setDraftsLoading] = useState(false);
+  const [projectsLoading, setProjectsLoading] = useState(false);
+  const [renderJobLoading, setRenderJobLoading] = useState(false);
   const [generatedDraft, setGeneratedDraft] = useState(null);
   const [drafts, setDrafts] = useState([]);
+  const [projects, setProjects] = useState([]);
+  const [activeProject, setActiveProject] = useState(null);
 
   useEffect(() => {
     setBrief((current) => ({
@@ -322,9 +353,41 @@ export default function AIPodcastCreator({
     }
   }, [selectedShowId]);
 
+  const fetchProjects = useCallback(async () => {
+    if (!selectedShowId) {
+      setProjects([]);
+      setActiveProject(null);
+      return;
+    }
+
+    setProjectsLoading(true);
+    try {
+      const { data } = await axios.get(
+        `${API}/ai-studio/projects/my?show_id=${encodeURIComponent(selectedShowId)}`,
+        { withCredentials: true },
+      );
+      const nextProjects = data.projects || [];
+      setProjects(nextProjects);
+      setActiveProject((current) => {
+        if (current?.id && nextProjects.some((project) => project.id === current.id)) {
+          return nextProjects.find((project) => project.id === current.id);
+        }
+        return nextProjects[0] || null;
+      });
+    } catch {
+      setProjects([]);
+    } finally {
+      setProjectsLoading(false);
+    }
+  }, [selectedShowId]);
+
   useEffect(() => {
     fetchDrafts();
   }, [fetchDrafts]);
+
+  useEffect(() => {
+    fetchProjects();
+  }, [fetchProjects]);
 
   const updateBriefValue = (nextValue) => {
     setBrief((current) => setValueAtPath(current, currentStep.path, nextValue));
@@ -354,7 +417,13 @@ export default function AIPodcastCreator({
       );
       setGeneratedDraft(data);
       setDrafts((current) => [data, ...current.filter((draft) => draft.id !== data.id)].slice(0, 8));
-      toast.success('AI episode package is ready');
+      if (data.ai_studio_project) {
+        setActiveProject(data.ai_studio_project);
+        setProjects((current) => [data.ai_studio_project, ...current.filter((project) => project.id !== data.ai_studio_project.id)].slice(0, 12));
+      } else {
+        fetchProjects();
+      }
+      toast.success('AI Studio project is ready');
     } catch (error) {
       toast.error(error.response?.data?.detail || 'Could not generate the AI podcast draft');
     } finally {
@@ -373,14 +442,42 @@ export default function AIPodcastCreator({
   const handleStartFresh = () => {
     setBrief(buildInitialBrief(activeShow));
     setGeneratedDraft(null);
+    setActiveProject(null);
     setStepIndex(0);
   };
 
   const handleReuseDraft = (draft) => {
     setBrief(draft.intake || buildInitialBrief(activeShow));
     setGeneratedDraft(draft);
+    setActiveProject(draft.ai_studio_project || projects.find((project) => project.id === draft.ai_studio_project_id) || null);
     setStepIndex(0);
     toast.success('Loaded that AI brief back into the flow');
+  };
+
+  const handleQueueRender = async () => {
+    const project = activeProject || generatedDraft?.ai_studio_project;
+    if (!project?.id) {
+      toast.error('Generate or select an AI Studio project first.');
+      return;
+    }
+    setRenderJobLoading(true);
+    try {
+      await axios.post(
+        `${API}/ai-studio/render-jobs`,
+        {
+          project_id: project.id,
+          draft_id: generatedDraft?.id || project.source_draft_id || '',
+          render_type: 'preview',
+        },
+        { withCredentials: true },
+      );
+      toast.success('Preview render queued for the AI Studio pipeline');
+      fetchProjects();
+    } catch (error) {
+      toast.error(error.response?.data?.detail || 'Could not queue the render job');
+    } finally {
+      setRenderJobLoading(false);
+    }
   };
 
   const renderInput = () => {
@@ -446,6 +543,16 @@ export default function AIPodcastCreator({
     );
   };
 
+  const displayedProject = activeProject || generatedDraft?.ai_studio_project || null;
+  const projectArtifacts = displayedProject?.artifacts || {};
+  const stageState = displayedProject?.stage_state || {};
+  const claimCards = projectArtifacts.research?.claim_cards || [];
+  const cast = projectArtifacts.cast || [];
+  const scriptTurns = projectArtifacts.script?.audio_script_turns || [];
+  const scorecardEntries = firstScorecardEntries(
+    displayedProject?.agent2_review?.scorecard || generatedDraft?.agent2_review?.scorecard,
+  );
+
   return (
     <section className="bg-[#141417] border border-[#27272A] rounded-3xl p-8 mb-10" data-testid="ai-podcast-creator">
       <div className="flex flex-col lg:flex-row lg:items-end lg:justify-between gap-5 mb-8">
@@ -470,6 +577,114 @@ export default function AIPodcastCreator({
           </select>
         </div>
       </div>
+
+      {shows.length > 0 && (
+        <div className="bg-[#0A0A0B] border border-[#27272A] rounded-3xl p-6 mb-8" data-testid="ai-studio-production-room">
+          <div className="flex flex-col lg:flex-row lg:items-start lg:justify-between gap-5 mb-6">
+            <div>
+              <p className="text-xs uppercase tracking-[0.18em] text-[#F5A623] mb-2">AI Creator Studio</p>
+              <h3 className="font-['Outfit'] text-xl font-semibold text-white mb-2">Production-room workflow</h3>
+              <p className="text-sm text-[#8A8A93] max-w-3xl">
+                This keeps Audioraq&apos;s USP focused: creators get guided podcast strategy, dialogue structure, source review, voice casting, Agent 2 QA, and audio-only AI publishing in one simple pipeline.
+              </p>
+            </div>
+            <div className="flex flex-wrap gap-3">
+              {projectsLoading && <span className="text-sm text-[#8A8A93] px-3 py-2">Loading Studio projects...</span>}
+              <button
+                type="button"
+                onClick={handleQueueRender}
+                disabled={!displayedProject?.id || renderJobLoading}
+                className="bg-[#141417] hover:bg-[#27272A] border border-[#27272A] text-white rounded-full px-4 py-2 transition-colors disabled:opacity-40"
+              >
+                {renderJobLoading ? 'Queueing...' : 'Queue Preview Render'}
+              </button>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-9 gap-3 mb-6">
+            {studioStages.map((stage) => {
+              const state = stageState[stage.id] || {};
+              return (
+                <div key={stage.id} className={`rounded-2xl border p-3 min-h-[92px] ${studioStatusTone(state.status)}`}>
+                  <p className="text-xs font-semibold uppercase tracking-[0.14em] mb-2">{stage.label}</p>
+                  <p className="text-[11px] uppercase tracking-[0.12em]">{formatStatus(state.status)}</p>
+                  {state.notes && <p className="text-[11px] text-[#C7C7D1] mt-2 line-clamp-2">{state.notes}</p>}
+                </div>
+              );
+            })}
+          </div>
+
+          {displayedProject ? (
+            <div className="grid grid-cols-1 xl:grid-cols-4 gap-4">
+              <div className="bg-[#141417] border border-[#27272A] rounded-2xl p-4">
+                <p className="text-xs uppercase tracking-[0.18em] text-[#8A8A93] mb-2">Show Bible</p>
+                <h4 className="text-white font-semibold mb-2">{displayedProject.show_bible?.show_title || displayedProject.show_title}</h4>
+                <p className="text-sm text-[#C7C7D1] leading-relaxed mb-3">
+                  {displayedProject.show_bible?.positioning || 'Generate a brief to create the show bible.'}
+                </p>
+                <p className="text-xs text-[#F5A623] leading-relaxed">
+                  {displayedProject.show_bible?.tone_contract || 'Tone contract appears after generation.'}
+                </p>
+              </div>
+
+              <div className="bg-[#141417] border border-[#27272A] rounded-2xl p-4">
+                <p className="text-xs uppercase tracking-[0.18em] text-[#8A8A93] mb-2">Research Cards</p>
+                {claimCards.length > 0 ? (
+                  <div className="space-y-3 max-h-[260px] overflow-auto pr-1">
+                    {claimCards.slice(0, 5).map((card) => (
+                      <div key={card.id} className="border border-[#27272A] rounded-xl p-3">
+                        <p className="text-sm text-white line-clamp-3">{card.claim}</p>
+                        <p className="text-[11px] text-[#8A8A93] mt-2">
+                          {card.source ? `Source: ${card.source}` : 'Needs creator review before factual recording'}
+                        </p>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="text-sm text-[#8A8A93]">Claim cards appear after the AI builds an episode package.</p>
+                )}
+              </div>
+
+              <div className="bg-[#141417] border border-[#27272A] rounded-2xl p-4">
+                <p className="text-xs uppercase tracking-[0.18em] text-[#8A8A93] mb-2">Cast & Table Read</p>
+                <div className="space-y-3 mb-4">
+                  {(cast.length ? cast : [{ speaker: 'Host', voice_role: 'host', delivery: 'Generate a script to assign voice roles.' }]).slice(0, 4).map((member) => (
+                    <div key={`${member.speaker}-${member.voice_role}`} className="border border-[#27272A] rounded-xl p-3">
+                      <p className="text-sm font-semibold text-white">{member.speaker} <span className="text-[#8A8A93] font-normal">/{member.voice_role}</span></p>
+                      <p className="text-xs text-[#C7C7D1] mt-1">{member.delivery}</p>
+                    </div>
+                  ))}
+                </div>
+                <p className="text-xs text-[#8A8A93]">
+                  {scriptTurns.length ? `${scriptTurns.length} voice-ready turns prepared for audio rendering.` : 'No voice-ready turns yet.'}
+                </p>
+              </div>
+
+              <div className="bg-[#141417] border border-[#27272A] rounded-2xl p-4">
+                <p className="text-xs uppercase tracking-[0.18em] text-[#8A8A93] mb-2">Agent 2 Scorecard</p>
+                {scorecardEntries.length > 0 ? (
+                  <div className="space-y-2">
+                    {scorecardEntries.map(([key, item]) => (
+                      <div key={key} className="flex items-center justify-between gap-3 border-b border-[#27272A] pb-2 last:border-b-0">
+                        <span className="text-xs text-[#C7C7D1] capitalize">{key.replace(/_/g, ' ')}</span>
+                        <span className="text-sm font-semibold text-white">{Math.round(item.score || 0)}</span>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="text-sm text-[#8A8A93]">Agent 2 scores appear after generation and review.</p>
+                )}
+              </div>
+            </div>
+          ) : (
+            <div className="bg-[#141417] border border-[#27272A] rounded-2xl p-5">
+              <p className="text-sm text-[#8A8A93]">
+                Answer the brief questions and generate an episode to create the first persistent AI Studio project.
+              </p>
+            </div>
+          )}
+        </div>
+      )}
 
       {!shows.length ? (
         <div className="bg-[#0A0A0B] border border-[#27272A] rounded-3xl p-8 text-center">
@@ -606,6 +821,16 @@ export default function AIPodcastCreator({
                             Next improvement: {generatedDraft.agent2_review.rlaif.improvement_actions[0]}
                           </p>
                         )}
+                        {generatedDraft.agent2_review.scorecard && (
+                          <div className="grid grid-cols-2 md:grid-cols-3 gap-2 mt-4">
+                            {firstScorecardEntries(generatedDraft.agent2_review.scorecard).map(([key, item]) => (
+                              <div key={key} className="bg-[#0A0A0B]/70 border border-[#27272A] rounded-xl p-3">
+                                <p className="text-[10px] uppercase tracking-[0.14em] text-[#8A8A93] mb-1">{key.replace(/_/g, ' ')}</p>
+                                <p className="text-sm font-semibold text-white">{Math.round(item.score || 0)}/100</p>
+                              </div>
+                            ))}
+                          </div>
+                        )}
                       </div>
                     )}
 
@@ -684,6 +909,49 @@ export default function AIPodcastCreator({
             </div>
           </div>
 
+          <div className="bg-[#0A0A0B] border border-[#27272A] rounded-3xl p-6 mb-6">
+            <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4 mb-5">
+              <div>
+                <p className="text-xs uppercase tracking-[0.18em] text-[#8A8A93] mb-1">Recent Studio Projects</p>
+                <h3 className="font-['Outfit'] text-xl font-semibold text-white">Production work in progress</h3>
+              </div>
+              {projectsLoading && <span className="text-sm text-[#8A8A93]">Refreshing projects...</span>}
+            </div>
+
+            {projects.length > 0 ? (
+              <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
+                {projects.slice(0, 6).map((project) => (
+                  <button
+                    key={project.id}
+                    type="button"
+                    onClick={() => {
+                      setActiveProject(project);
+                      const linkedDraft = drafts.find((draft) => draft.id === project.source_draft_id);
+                      if (linkedDraft) setGeneratedDraft(linkedDraft);
+                    }}
+                    className={`text-left bg-[#141417] border rounded-2xl p-5 transition-colors ${
+                      activeProject?.id === project.id ? 'border-[#F5A623]' : 'border-[#27272A] hover:border-[#8A8A93]'
+                    }`}
+                  >
+                    <p className="text-sm font-semibold text-white mb-1 line-clamp-2">{project.title}</p>
+                    <p className="text-xs text-[#8A8A93] mb-3">{project.show_title} · {formatDate(project.updated_at || project.created_at)}</p>
+                    <div className="flex flex-wrap gap-2">
+                      {studioStages.slice(0, 4).map((stage) => (
+                        <span key={stage.id} className={`rounded-full border px-2 py-1 text-[10px] uppercase tracking-[0.12em] ${studioStatusTone(project.stage_state?.[stage.id]?.status)}`}>
+                          {stage.label}: {formatStatus(project.stage_state?.[stage.id]?.status)}
+                        </span>
+                      ))}
+                    </div>
+                  </button>
+                ))}
+              </div>
+            ) : (
+              <div className="bg-[#141417] border border-[#27272A] rounded-2xl p-6 text-center">
+                <p className="text-sm text-[#8A8A93]">Studio projects will appear here once a creator generates or saves an AI episode package.</p>
+              </div>
+            )}
+          </div>
+
           <div className="bg-[#0A0A0B] border border-[#27272A] rounded-3xl p-6">
             <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4 mb-5">
               <div>
@@ -733,7 +1001,10 @@ export default function AIPodcastCreator({
                       </button>
                       <button
                         type="button"
-                        onClick={() => setGeneratedDraft(draft)}
+                        onClick={() => {
+                          setGeneratedDraft(draft);
+                          setActiveProject(draft.ai_studio_project || projects.find((project) => project.id === draft.ai_studio_project_id) || null);
+                        }}
                         className="bg-[#0A0A0B] hover:bg-[#27272A] border border-[#27272A] text-white rounded-full px-4 py-2 transition-colors inline-flex items-center gap-2"
                       >
                         <Plus className="w-4 h-4" />
