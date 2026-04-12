@@ -15,6 +15,8 @@ Important constraints:
 - The default plan creates 300 episodes total: 275 across 25 shows plus 25
   single-episode capsule shows. The user's requested 280 show episodes plus
   25 singles would equal 305, so 275 is the default to honor "stop at 300".
+- A smaller 125-episode campaign is available as 125 episodes across 10
+  shows, with no singles, for lower-risk proof-of-work seeding.
 - Use --require-provider-kind elevenlabs for production proof-of-work runs so
   provider fallbacks are deleted instead of quietly seeding lower-quality audio.
 """
@@ -38,6 +40,8 @@ DEFAULT_BASE_URL = "https://www.audioraq.com"
 DEFAULT_PUBLIC_ORIGIN = "https://www.audioraq.com"
 DEFAULT_PASSWORD_PREFIX = "AudioraqSeed"
 SHOW_EPISODE_COUNTS_275 = [17, 15, 14, 14, 13, 13, 12, 12, 12, 11, 11, 11, 11, 10, 10, 10, 10, 9, 9, 9, 9, 9, 8, 8, 8]
+SHOW_EPISODE_COUNTS_125 = [16, 16, 15, 14, 12, 12, 10, 10, 10, 10]
+SHOW_INDEXES_125 = [4, 0, 5, 3, 1, 2, 6, 7, 8, 10]
 
 
 @dataclass(frozen=True)
@@ -208,7 +212,7 @@ def build_episode_plan(
 ) -> EpisodeBlueprint:
     topic = build_episode_topic(show, episode_number)
     length_preference = normalize_length_preference(show.length_band)
-    requested_media_kind = "audio" if global_index % 5 else "planned_video"
+    requested_media_kind = "audio" if global_index % 4 else "video_ready_audio"
     return EpisodeBlueprint(
         global_index=global_index,
         account_kind=account_kind,
@@ -276,12 +280,20 @@ def build_single_plan(global_index: int, single_index: int, category: str, topic
 def build_catalog_plan(target_total: int = 300, single_count: int = 25) -> List[EpisodeBlueprint]:
     if len(SHOWS) != 25:
         raise RuntimeError("The seed catalog requires exactly 25 show blueprints")
+    if target_total == 300 and single_count == 25:
+        selected_shows = SHOWS
+        show_episode_counts = SHOW_EPISODE_COUNTS_275
+    elif target_total == 125 and single_count == 0:
+        selected_shows = [SHOWS[index] for index in SHOW_INDEXES_125]
+        show_episode_counts = SHOW_EPISODE_COUNTS_125
+    else:
+        raise RuntimeError("Supported seed plans are 300 total with 25 singles, or 125 total with 0 singles")
     show_episode_total = target_total - single_count
-    if show_episode_total != 275:
-        raise RuntimeError("This version is tuned for 275 show episodes plus 25 singles")
+    if sum(show_episode_counts) != show_episode_total:
+        raise RuntimeError(f"Expected {show_episode_total} show episodes, got {sum(show_episode_counts)}")
     plans: List[EpisodeBlueprint] = []
     global_index = 1
-    for show_index, (show, episode_count) in enumerate(zip(SHOWS, SHOW_EPISODE_COUNTS_275), start=1):
+    for show_index, (show, episode_count) in enumerate(zip(selected_shows, show_episode_counts), start=1):
         for episode_number in range(1, episode_count + 1):
             plans.append(build_episode_plan(global_index, show, show_index, episode_number, "show"))
             global_index += 1
@@ -509,6 +521,7 @@ def main() -> None:
     parser.add_argument("--publish", action="store_true", help="Actually create accounts, drafts, and episodes on the target Audioraq deployment.")
     parser.add_argument("--password", default="", help="Optional shared password for generated seed accounts.")
     parser.add_argument("--require-provider-kind", default="", help="If set, delete and reject episodes that publish with a different TTS provider kind.")
+    parser.add_argument("--continue-on-provider-mismatch", action="store_true", help="Keep processing after a required-provider mismatch. Off by default to avoid burning credits or seeding low-quality audio.")
     args = parser.parse_args()
 
     base_url = args.base_url.rstrip("/")
@@ -522,6 +535,7 @@ def main() -> None:
     results = []
 
     for plan in selected:
+        provider_mismatch = False
         email = f"audioraq-originals-{args.run_id}-{plan.account_kind}-{plan.show_index:02d}@audioraq.test"
         result = {
             **plan_to_dict(plan),
@@ -555,6 +569,7 @@ def main() -> None:
                 result["delete_result"] = delete_episode(session, base_url, auth["token"], episode_result["episode_id"])
                 result["status"] = "deleted_provider_mismatch"
                 result["provider_requirement"] = required_provider
+                provider_mismatch = True
             print(json.dumps(result, ensure_ascii=True), flush=True)
         else:
             print(json.dumps(result, ensure_ascii=True), flush=True)
@@ -574,10 +589,17 @@ def main() -> None:
                     "Create with AI publishes audio-only episodes.",
                     "Single episodes use one-episode capsule shows because the data model is show-first.",
                     "Default distribution is 275 show episodes plus 25 singles, totaling 300.",
+                    "The 125-episode campaign is 125 show episodes across 10 topic shows.",
+                    "Video-suitable episodes are tagged video_ready_audio, but Create with AI publishes audio only.",
                 ],
                 "results": results,
             },
         )
+        if provider_mismatch and not args.continue_on_provider_mismatch:
+            raise RuntimeError(
+                f"Stopped after provider mismatch. Required {required_provider}, got {actual_provider or 'unknown'}; "
+                "deleted the fallback episode to protect product quality."
+            )
 
     print(json.dumps({"output_dir": str(output_dir), "published": args.publish, "processed": len(results)}, ensure_ascii=True))
 
