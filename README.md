@@ -139,14 +139,54 @@ Fill in:
 - `MONGO_INITDB_ROOT_PASSWORD`
 - `JWT_SECRET`
 - `ADMIN_PASSWORD`
-- `EMERGENT_LLM_KEY`
-- Optional production voice key: `ELEVENLABS_API_KEY` or `OPENAI_API_KEY`
+- Optional legacy remote keys: `EMERGENT_LLM_KEY`, `ELEVENLABS_API_KEY`, or `OPENAI_API_KEY`
 
 The default domains in that file are already:
 - `APEX_DOMAIN=audioraq.com`
 - `WWW_DOMAIN=www.audioraq.com`
 
-### 3a. Enable production AI voices
+### 3a. Run Create with AI locally first
+
+Audioraq now has local-first provider seams for the Create with AI USP:
+
+```dotenv
+STORAGE_BACKEND=local
+LOCAL_STORAGE_DIR=/app/data/media
+AI_TEXT_PROVIDER=ollama,deterministic
+AI_TEXT_ALLOW_REMOTE=false
+AI_TEXT_LOCAL_ENABLED=true
+AI_TEXT_LOCAL_BASE_URL=http://host.docker.internal:11434
+AI_TEXT_LOCAL_MODEL=llama3.2:3b
+AI_AUDIO_TTS_PROVIDER=local_http,local
+AI_AUDIO_LOCAL_TTS_URL=http://host.docker.internal:8015
+AI_AUDIO_LOCAL_TTS_PROFILE=podcast-dialogue
+AI_AUDIO_LOCAL_TTS_FORMAT=wav
+AI_AUDIO_TARGET_LUFS=-16
+```
+
+`AI_TEXT_PROVIDER=ollama,deterministic` routes draft writing, Agent 2 revision, safety review, keyword extraction, and AI recommendations to a local Ollama-compatible endpoint first, then falls back to deterministic logic instead of a paid LLM API. The current code does not bundle an Ollama model; install/run the local model outside the web container and point `AI_TEXT_LOCAL_BASE_URL` at it.
+
+`AI_AUDIO_TTS_PROVIDER=local_http,local` routes audio rendering to a local neural TTS worker first. The worker contract is `POST /v1/render` with JSON `{script_text, turns, target_loudness_lufs, format, quality_profile}` and either an audio response or JSON containing `audio_base64`, `content_type`, `extension`, `provider`, and `model`. This is the seam we will use for Chatterbox/Dia/Kokoro without tying Audioraq to a paid TTS server.
+
+The worker implementation lives in [workers/ai_studio_tts_worker.py](/Users/sagnikroy/Documents/New%20project/Podlyzer-Centralized-Podcast-Hub/workers/ai_studio_tts_worker.py). It supports a local engine order such as `kokoro,chatterbox,espeak`, exposes `/health` and `/v1/status`, masters audio toward `AI_AUDIO_TARGET_LUFS`, and marks fallback audio with `X-Audioraq-TTS-Provider-Kind: local`. For proof-of-work publishing, set `AI_AUDIO_REQUIRE_NEURAL_WORKER=true` and `AUDIORAQ_TTS_ALLOW_ESPEAK_FALLBACK=false` so low-quality fallback audio blocks publishing instead of going live.
+
+`STORAGE_BACKEND=local` removes the hidden dependency on `EMERGENT_LLM_KEY` for media storage. Do not switch an existing live catalog from `emergent` to `local` until existing media has been migrated, otherwise old episode media paths will stop resolving.
+
+The OCI worker Dockerfile preinstalls CPU-only PyTorch before optional neural engines so Kokoro/Chatterbox do not resolve large CUDA wheels on the small free-tier server. Override `AI_STUDIO_PYTORCH_CPU_VERSION` only after confirming the matching CPU wheel exists.
+
+You can inspect the live provider state from a podcaster account with:
+
+```text
+GET /api/ai-studio/status
+```
+
+The Oracle Compose file also includes an optional `ai-studio-worker` profile. It is off by default so the website stays lightweight:
+
+```bash
+docker compose --env-file deploy/oracle/oracle.env -f deploy/oracle/docker-compose.oracle.yml --profile ai-studio up -d --build ai-studio-worker
+```
+
+### 3b. Enable production AI voices
 
 `Create with AI` renders playable audio with a provider chain. By default, `AI_AUDIO_TTS_PROVIDER=auto` tries:
 
@@ -184,7 +224,9 @@ Keep `AI_AUDIO_TTS_LOCAL_FALLBACK=true` so Audioraq still publishes an audio epi
 
 `AI_AUDIO_MAX_WORDS`, `AI_AUDIO_TTS_MAX_CHARS`, `AI_AUDIO_MIN_FINAL_TURN_WORDS`, and `AI_AUDIO_RESERVED_END_TURNS` control how much of a generated script becomes audio while preserving a clean ending. The default total audio cap stays under one ElevenLabs dialogue request for reliability; `ELEVENLABS_MAX_REQUEST_CHARS` protects direct provider requests from exceeding the account limit.
 
-### 3b. Enable Google and Apple sign-in
+The built-in local fallback can be improved, but it is still not a neural production TTS provider. Set `AI_AUDIO_TTS_LOCAL_MULTIVOICE=true` and `AI_AUDIO_TTS_LOCAL_POSTPROCESS=true` to render host/guest/narrator turns with different `espeak-ng` voice variants, pacing, pitch, and ffmpeg normalization. This is useful for low-cost seeding or outages, but it should be labeled as local fallback quality rather than ElevenLabs-equivalent audio.
+
+### 3c. Enable Google and Apple sign-in
 
 The live app already contains the full OAuth flow. The last step is adding real provider credentials to [deploy/oracle/oracle.env.example](/Users/sagnikroy/Documents/New%20project/Podlyzer-Centralized-Podcast-Hub/deploy/oracle/oracle.env.example) and your deployed `deploy/oracle/oracle.env`.
 
@@ -320,7 +362,8 @@ Add `--drop-target` if you want the target database cleared before import.
 | GET | `/api/shows` | Browse and search shows |
 | GET | `/api/podcasts` | Browse and search episodes |
 | POST | `/api/podcasts/upload` | Upload a new episode |
-| POST | `/api/podcasts/ai-create` | Create an AI-generated episode draft |
+| POST | `/api/podcasts/ai-create` | Publish an AI-generated audio episode from a draft |
+| GET | `/api/ai-studio/status` | Inspect local/remote AI provider configuration |
 | GET | `/api/recommendations` | Personalized recommendations |
 | GET | `/api/trending` | Trending content |
 | GET | `/api/health` | Deployment health check |

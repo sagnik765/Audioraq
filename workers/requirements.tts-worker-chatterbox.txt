@@ -1,0 +1,3 @@
+# Optional expressive neural TTS engine for workers/ai_studio_tts_worker.py.
+# Use only reference prompt audio that you own or have explicit permission to use.
+chatterbox-tts>=0.1.6,<0.2

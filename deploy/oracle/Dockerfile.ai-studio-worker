@@ -1,0 +1,35 @@
+FROM python:3.11-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    AUDIORAQ_TTS_HOST=0.0.0.0 \
+    AUDIORAQ_TTS_PORT=8015
+
+ARG INSTALL_KOKORO=false
+ARG INSTALL_CHATTERBOX=false
+ARG PYTORCH_CPU_VERSION=2.8.0
+ARG TORCHAUDIO_CPU_VERSION=2.8.0
+
+WORKDIR /app
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ffmpeg espeak-ng \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY workers/requirements.tts-worker.txt ./workers/requirements.tts-worker.txt
+COPY workers/requirements.tts-worker-kokoro.txt ./workers/requirements.tts-worker-kokoro.txt
+COPY workers/requirements.tts-worker-chatterbox.txt ./workers/requirements.tts-worker-chatterbox.txt
+
+RUN pip install --no-cache-dir -r workers/requirements.tts-worker.txt \
+    && if [ "$INSTALL_KOKORO" = "true" ] || [ "$INSTALL_CHATTERBOX" = "true" ]; then pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu "torch==${PYTORCH_CPU_VERSION}"; fi \
+    && if [ "$INSTALL_CHATTERBOX" = "true" ]; then pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu "torchaudio==${TORCHAUDIO_CPU_VERSION}"; fi \
+    && if [ "$INSTALL_KOKORO" = "true" ]; then pip install --no-cache-dir -r workers/requirements.tts-worker-kokoro.txt; fi \
+    && if [ "$INSTALL_CHATTERBOX" = "true" ]; then pip install --no-cache-dir -r workers/requirements.tts-worker-chatterbox.txt; fi
+
+COPY workers ./workers
+
+WORKDIR /app/workers
+
+EXPOSE 8015
+
+CMD ["python", "ai_studio_tts_worker.py"]

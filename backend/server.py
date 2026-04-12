@@ -13,10 +13,13 @@ from pydantic import BaseModel
 from starlette.middleware.cors import CORSMiddleware
 
 import bcrypt
+import asyncio
+import base64
 import email.utils
 import json
 import jwt
 import logging
+import mimetypes
 import os
 import re
 import requests
@@ -69,6 +72,10 @@ SOCIAL_PROVIDER_GOOGLE = "google"
 SOCIAL_PROVIDER_APPLE = "apple"
 SUPPORTED_SOCIAL_PROVIDERS = {SOCIAL_PROVIDER_GOOGLE, SOCIAL_PROVIDER_APPLE}
 AGENT2_VERSION = "2026-04-12.1"
+AI_TEXT_PROVIDER_DETERMINISTIC = "deterministic"
+AI_TEXT_PROVIDER_EMERGENT = "emergent"
+AI_TEXT_PROVIDER_OLLAMA = "ollama"
+AI_TEXT_PROVIDERS = {AI_TEXT_PROVIDER_DETERMINISTIC, AI_TEXT_PROVIDER_EMERGENT, AI_TEXT_PROVIDER_OLLAMA}
 
 AGENT2_RAG_SAFETY_KB = [
     {
@@ -132,6 +139,13 @@ def parse_bool_env(name: str, default: bool = False) -> bool:
     if value is None:
         return default
     return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def parse_float_env(name: str, default: float) -> float:
+    try:
+        return float(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        return default
 
 
 def get_google_client_id() -> str:
@@ -390,15 +404,50 @@ def clear_auth_cookies(response: Response):
 
 def init_storage():
     global storage_key
+    if get_storage_backend() == "local":
+        return "local"
     if storage_key:
         return storage_key
+    if not EMERGENT_KEY:
+        raise RuntimeError("EMERGENT_LLM_KEY is required for emergent object storage. Set STORAGE_BACKEND=local to use local disk storage.")
     resp = requests.post(f"{STORAGE_URL}/init", json={"emergent_key": EMERGENT_KEY}, timeout=30)
     resp.raise_for_status()
     storage_key = resp.json()["storage_key"]
     return storage_key
 
 
+def get_storage_backend() -> str:
+    backend = os.environ.get("STORAGE_BACKEND", "emergent").strip().lower()
+    return backend if backend in {"emergent", "local"} else "emergent"
+
+
+def local_storage_root() -> Path:
+    configured = Path(os.environ.get("LOCAL_STORAGE_DIR", str(PROJECT_DIR / "data" / "media"))).expanduser()
+    return (configured if configured.is_absolute() else PROJECT_DIR / configured).resolve()
+
+
+def local_storage_path(path: str) -> Path:
+    normalized = (path or "").strip().lstrip("/")
+    if not normalized:
+        raise ValueError("Storage path is required")
+    destination = (local_storage_root() / normalized).resolve()
+    if local_storage_root() not in destination.parents and destination != local_storage_root():
+        raise ValueError("Invalid storage path")
+    return destination
+
+
+def local_storage_content_type_path(path: str) -> Path:
+    return local_storage_path(path).with_name(f"{local_storage_path(path).name}.content-type")
+
+
 def put_object(path, data, content_type):
+    if get_storage_backend() == "local":
+        destination = local_storage_path(path)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(data)
+        local_storage_content_type_path(path).write_text(content_type or "application/octet-stream", encoding="utf-8")
+        return {"path": path, "storage_backend": "local"}
+
     key = init_storage()
     resp = requests.put(
         f"{STORAGE_URL}/objects/{path}",
@@ -411,6 +460,15 @@ def put_object(path, data, content_type):
 
 
 def get_object(path):
+    if get_storage_backend() == "local":
+        source = local_storage_path(path)
+        if not source.exists():
+            raise FileNotFoundError(path)
+        content_type_path = local_storage_content_type_path(path)
+        guessed_type = mimetypes.guess_type(source.name)[0] or "application/octet-stream"
+        content_type = content_type_path.read_text(encoding="utf-8").strip() if content_type_path.exists() else guessed_type
+        return source.read_bytes(), content_type
+
     key = init_storage()
     resp = requests.get(
         f"{STORAGE_URL}/objects/{path}",
@@ -425,6 +483,20 @@ def delete_object(path, missing_ok: bool = True) -> str:
     normalized_path = (path or "").strip()
     if not normalized_path:
         return "skipped"
+
+    if get_storage_backend() == "local":
+        source = local_storage_path(normalized_path)
+        content_type_path = local_storage_content_type_path(normalized_path)
+        existed = source.exists()
+        if source.exists():
+            source.unlink()
+        if content_type_path.exists():
+            content_type_path.unlink()
+        if existed:
+            return "deleted"
+        if missing_ok:
+            return "missing"
+        raise FileNotFoundError(normalized_path)
 
     key = init_storage()
     resp = requests.delete(
@@ -640,6 +712,121 @@ def normalize_string_list(value: Any, limit: int = 10) -> List[str]:
         if len(cleaned) >= limit:
             break
     return cleaned
+
+
+def get_ai_text_local_base_url() -> str:
+    return (
+        os.environ.get("AI_TEXT_LOCAL_BASE_URL")
+        or os.environ.get("OLLAMA_BASE_URL")
+        or "http://localhost:11434"
+    ).strip().rstrip("/")
+
+
+def get_ai_text_provider_order() -> List[str]:
+    requested = os.environ.get("AI_TEXT_PROVIDER", "auto").strip().lower() or "auto"
+    allow_remote = parse_bool_env("AI_TEXT_ALLOW_REMOTE", True)
+    aliases = {
+        "fallback": AI_TEXT_PROVIDER_DETERMINISTIC,
+        "local": AI_TEXT_PROVIDER_OLLAMA,
+        "local_ollama": AI_TEXT_PROVIDER_OLLAMA,
+        "none": AI_TEXT_PROVIDER_DETERMINISTIC,
+    }
+
+    if requested == "auto":
+        order = []
+        local_requested = parse_bool_env("AI_TEXT_LOCAL_ENABLED", False)
+        if local_requested:
+            order.append(AI_TEXT_PROVIDER_OLLAMA)
+        if allow_remote and EMERGENT_KEY:
+            order.append(AI_TEXT_PROVIDER_EMERGENT)
+        order.append(AI_TEXT_PROVIDER_DETERMINISTIC)
+    else:
+        order = [aliases.get(item.strip(), item.strip()) for item in requested.split(",") if item.strip()]
+
+    normalized = []
+    for provider in order:
+        if provider not in AI_TEXT_PROVIDERS:
+            continue
+        if provider == AI_TEXT_PROVIDER_EMERGENT and (not allow_remote or not EMERGENT_KEY):
+            continue
+        if provider not in normalized:
+            normalized.append(provider)
+
+    return normalized or [AI_TEXT_PROVIDER_DETERMINISTIC]
+
+
+def call_ollama_chat_json_sync(system_message: str, prompt: str, task_name: str) -> str:
+    base_url = get_ai_text_local_base_url()
+    if not base_url:
+        raise RuntimeError("AI_TEXT_LOCAL_BASE_URL or OLLAMA_BASE_URL is required for local text generation")
+
+    payload = {
+        "model": os.environ.get("AI_TEXT_LOCAL_MODEL", "llama3.2:3b").strip() or "llama3.2:3b",
+        "stream": False,
+        "format": "json",
+        "messages": [
+            {"role": "system", "content": system_message},
+            {"role": "user", "content": prompt},
+        ],
+        "options": {
+            "temperature": parse_float_env("AI_TEXT_TEMPERATURE", 0.7),
+            "num_ctx": parse_int_env("AI_TEXT_CONTEXT_TOKENS", 8192),
+        },
+    }
+    response = requests.post(
+        f"{base_url}/api/chat",
+        json=payload,
+        timeout=parse_int_env("AI_TEXT_TIMEOUT_SECONDS", 240),
+    )
+    response.raise_for_status()
+    body = response.json()
+    content = (body.get("message") or {}).get("content") or body.get("response") or ""
+    if not content:
+        raise RuntimeError(f"Ollama returned an empty response for {task_name}")
+    return content
+
+
+async def call_emergent_chat_json(system_message: str, prompt: str, task_name: str) -> str:
+    if not EMERGENT_KEY:
+        raise RuntimeError("EMERGENT_LLM_KEY is not configured")
+
+    from emergentintegrations.llm.chat import LlmChat, UserMessage
+
+    chat = LlmChat(
+        api_key=EMERGENT_KEY,
+        session_id=f"{task_name}-{uuid.uuid4()}",
+        system_message=system_message,
+    ).with_model(os.environ.get("AI_TEXT_REMOTE_PROVIDER", "openai"), os.environ.get("AI_TEXT_REMOTE_MODEL", "gpt-5.2"))
+    return await chat.send_message(UserMessage(text=prompt))
+
+
+async def run_ai_json_chat(
+    task_name: str,
+    system_message: str,
+    prompt: str,
+    expected_type: Any = dict,
+) -> Dict[str, Any]:
+    errors = []
+    for provider in get_ai_text_provider_order():
+        if provider == AI_TEXT_PROVIDER_DETERMINISTIC:
+            return {"provider": provider, "raw": None, "errors": errors}
+        try:
+            if provider == AI_TEXT_PROVIDER_OLLAMA:
+                response_text = await asyncio.to_thread(call_ollama_chat_json_sync, system_message, prompt, task_name)
+            elif provider == AI_TEXT_PROVIDER_EMERGENT:
+                response_text = await call_emergent_chat_json(system_message, prompt, task_name)
+            else:
+                continue
+
+            raw = parse_json_payload(response_text)
+            if isinstance(raw, expected_type):
+                return {"provider": provider, "raw": raw, "errors": errors}
+            errors.append(f"{provider}: expected {expected_type}, got {type(raw).__name__}")
+        except Exception as exc:
+            logger.warning(f"AI text provider {provider} failed for {task_name}: {exc}")
+            errors.append(f"{provider}: {str(exc)[:240]}")
+
+    return {"provider": AI_TEXT_PROVIDER_DETERMINISTIC, "raw": None, "errors": errors}
 
 
 def normalize_outline_items(items: Any) -> List[Dict[str, Any]]:
@@ -1052,39 +1239,35 @@ async def review_episode_safety(
     if media_analysis and media_analysis.get("transcript_text"):
         heuristic_input = f"{review_text}\n\nFull transcript text:\n{media_analysis.get('transcript_text', '')}"
     fallback = heuristic_episode_safety_review(heuristic_input, selected_rating=selected_rating)
-    if not EMERGENT_KEY:
-        return normalize_episode_safety_result({}, fallback, selected_rating, media_analysis=media_analysis)
 
-    try:
-        from emergentintegrations.llm.chat import LlmChat, UserMessage
-
-        schema = {
-            "status": "clear|review|blocked",
-            "risk_level": "low|medium|high",
-            "summary": "string",
-            "flags": ["string"],
-            "recommended_age_gate": "all_ages|18+",
-        }
-        prompt = (
-            "Review this podcast episode package for hateful, harmful, or unsafe listener-facing content.\n"
-            "Use the metadata, AI-generated copy, and uploaded-media transcript excerpt when available.\n"
-            "Focus on hate speech, self-harm encouragement, violent or illegal instructions, dangerous health advice, "
-            "or explicit sexual content.\n"
-            "Return JSON only.\n\n"
-            f"Episode package:\n{review_text}\n\n"
-            f"Return JSON matching this schema exactly:\n{json.dumps(schema, ensure_ascii=True)}"
-        )
-        chat = LlmChat(
-            api_key=EMERGENT_KEY,
-            session_id=f"episode-safety-{uuid.uuid4()}",
-            system_message="You are a careful podcast safety reviewer. Be conservative, concise, and return JSON only.",
-        ).with_model("openai", "gpt-5.2")
-        response = await chat.send_message(UserMessage(text=prompt))
-        raw = parse_json_payload(response)
+    schema = {
+        "status": "clear|review|blocked",
+        "risk_level": "low|medium|high",
+        "summary": "string",
+        "flags": ["string"],
+        "recommended_age_gate": "all_ages|18+",
+    }
+    prompt = (
+        "Review this podcast episode package for hateful, harmful, or unsafe listener-facing content.\n"
+        "Use the metadata, AI-generated copy, and uploaded-media transcript excerpt when available.\n"
+        "Focus on hate speech, self-harm encouragement, violent or illegal instructions, dangerous health advice, "
+        "or explicit sexual content.\n"
+        "Return JSON only.\n\n"
+        f"Episode package:\n{review_text}\n\n"
+        f"Return JSON matching this schema exactly:\n{json.dumps(schema, ensure_ascii=True)}"
+    )
+    result = await run_ai_json_chat(
+        "episode-safety",
+        "You are a careful podcast safety reviewer. Be conservative, concise, and return JSON only.",
+        prompt,
+        expected_type=dict,
+    )
+    raw = result.get("raw")
+    if isinstance(raw, dict):
         return normalize_episode_safety_result(raw, fallback, selected_rating, media_analysis=media_analysis)
-    except Exception as exc:
-        logger.error(f"Episode safety review error: {exc}")
-        return normalize_episode_safety_result({}, fallback, selected_rating, media_analysis=media_analysis)
+    if result.get("errors"):
+        logger.warning(f"Episode safety review used heuristic fallback after provider errors: {result['errors'][-2:]}")
+    return normalize_episode_safety_result({}, fallback, selected_rating, media_analysis=media_analysis)
 
 
 def agent2_split_sentences(text: str) -> List[str]:
@@ -1372,63 +1555,59 @@ async def revise_ai_generation_with_agent2_feedback(
     generation: Dict[str, Any],
     quality_agent: Dict[str, Any],
 ) -> Optional[Dict[str, Any]]:
-    if not EMERGENT_KEY:
-        return None
     if quality_agent.get("status") == "blocked":
         return None
     if quality_agent.get("quality_score", 0) >= 82 and quality_agent.get("gan_discriminator", {}).get("label") == "low":
         return None
 
-    try:
-        from emergentintegrations.llm.chat import LlmChat, UserMessage
-
-        schema = {
-            "episode_title": "string",
-            "one_line_promise": "string",
-            "hook": "string",
-            "intro_script": "string",
-            "outline": [{"section_title": "string", "purpose": "string", "beats": ["string"]}],
-            "talking_points": ["string"],
-            "guest_questions": ["string"],
-            "production_notes": ["string"],
-            "outro_cta": "string",
-            "show_notes_summary": "string",
-            "suggested_description": "string",
-            "suggested_keywords": ["string"],
-            "why_this_episode_fits": "string",
-            "audio_script_turns": [
-                {
-                    "speaker": "Host | Guest | Narrator",
-                    "voice_role": "host | guest | narrator",
-                    "text": "voice-ready spoken text for this turn",
-                }
-            ],
-            "recommended_category": "string",
-        }
-        prompt = (
-            "Agent 2 reviewed this AI podcast package and produced RLAIF-style self-feedback.\n"
-            "Revise the package once using the feedback. Keep the creator's topic, audience, tone, and goal intact.\n"
-            "Do not add unsafe claims. Do not make it clickbait. Make it more concrete, human-paced, and useful.\n\n"
-            "Also revise audio_script_turns so they are voice-ready spoken text, preserve speaker roles, and never imitate any real person's voice.\n\n"
-            f"Show:\n{json.dumps({'title': show.get('title'), 'description': show.get('description'), 'category': show.get('category')}, ensure_ascii=True)}\n\n"
-            f"Creator brief:\n{json.dumps(brief, ensure_ascii=True)}\n\n"
-            f"Current package:\n{json.dumps(generation, ensure_ascii=True)}\n\n"
-            f"Agent 2 review:\n{json.dumps(quality_agent, ensure_ascii=True)}\n\n"
-            f"Return JSON matching this schema exactly:\n{json.dumps(schema, ensure_ascii=True)}"
-        )
-        chat = LlmChat(
-            api_key=EMERGENT_KEY,
-            session_id=f"agent2-rlaif-revision-{uuid.uuid4()}",
-            system_message="You are Agent 2, Audioraq's quality-improvement reviewer. Return revised JSON only.",
-        ).with_model("openai", "gpt-5.2")
-        response = await chat.send_message(UserMessage(text=prompt))
-        raw = parse_json_payload(response)
-        if not isinstance(raw, dict):
-            return None
-        return normalize_ai_generation_response(raw, brief, show)
-    except Exception as exc:
-        logger.error(f"Agent 2 RLAIF revision error: {exc}")
-        return None
+    schema = {
+        "episode_title": "string",
+        "one_line_promise": "string",
+        "hook": "string",
+        "intro_script": "string",
+        "outline": [{"section_title": "string", "purpose": "string", "beats": ["string"]}],
+        "talking_points": ["string"],
+        "guest_questions": ["string"],
+        "production_notes": ["string"],
+        "outro_cta": "string",
+        "show_notes_summary": "string",
+        "suggested_description": "string",
+        "suggested_keywords": ["string"],
+        "why_this_episode_fits": "string",
+        "audio_script_turns": [
+            {
+                "speaker": "Host | Guest | Narrator",
+                "voice_role": "host | guest | narrator",
+                "text": "voice-ready spoken text for this turn",
+            }
+        ],
+        "recommended_category": "string",
+    }
+    prompt = (
+        "Agent 2 reviewed this AI podcast package and produced RLAIF-style self-feedback.\n"
+        "Revise the package once using the feedback. Keep the creator's topic, audience, tone, and goal intact.\n"
+        "Do not add unsafe claims. Do not make it clickbait. Make it more concrete, human-paced, and useful.\n\n"
+        "Also revise audio_script_turns so they are voice-ready spoken text, preserve speaker roles, and never imitate any real person's voice.\n\n"
+        f"Show:\n{json.dumps({'title': show.get('title'), 'description': show.get('description'), 'category': show.get('category')}, ensure_ascii=True)}\n\n"
+        f"Creator brief:\n{json.dumps(brief, ensure_ascii=True)}\n\n"
+        f"Current package:\n{json.dumps(generation, ensure_ascii=True)}\n\n"
+        f"Agent 2 review:\n{json.dumps(quality_agent, ensure_ascii=True)}\n\n"
+        f"Return JSON matching this schema exactly:\n{json.dumps(schema, ensure_ascii=True)}"
+    )
+    result = await run_ai_json_chat(
+        "agent2-rlaif-revision",
+        "You are Agent 2, Audioraq's quality-improvement reviewer. Return revised JSON only.",
+        prompt,
+        expected_type=dict,
+    )
+    raw = result.get("raw")
+    if isinstance(raw, dict):
+        revised = normalize_ai_generation_response(raw, brief, show)
+        revised["ai_text_revision_provider"] = result.get("provider", AI_TEXT_PROVIDER_DETERMINISTIC)
+        return revised
+    if result.get("errors"):
+        logger.warning(f"Agent 2 RLAIF revision skipped after provider errors: {result['errors'][-2:]}")
+    return None
 
 
 def slugify_filename(value: str, fallback: str = "episode") -> str:
@@ -1656,18 +1835,23 @@ def get_ai_audio_provider_order() -> List[str]:
     requested = os.environ.get("AI_AUDIO_TTS_PROVIDER", "auto").strip().lower() or "auto"
     if requested == "auto":
         order = []
+        if os.environ.get("AI_AUDIO_LOCAL_TTS_URL"):
+            order.append("local_http")
         if os.environ.get("ELEVENLABS_API_KEY"):
             order.append("elevenlabs")
         if os.environ.get("OPENAI_API_KEY"):
             order.append("openai")
-        order.append("local")
-        return order
+        if not parse_bool_env("AI_AUDIO_REQUIRE_NEURAL_WORKER", False):
+            order.append("local")
+        return order or (["local_http"] if parse_bool_env("AI_AUDIO_REQUIRE_NEURAL_WORKER", False) else ["local"])
 
-    aliases = {"espeak": "local", "espeak-ng": "local"}
+    aliases = {"espeak": "local", "espeak-ng": "local", "local-neural": "local_http", "http": "local_http"}
     order = [aliases.get(provider.strip(), provider.strip()) for provider in requested.split(",") if provider.strip()]
-    if parse_bool_env("AI_AUDIO_TTS_LOCAL_FALLBACK", True) and "local" not in order:
+    if parse_bool_env("AI_AUDIO_TTS_LOCAL_FALLBACK", True) and "local" not in order and not parse_bool_env("AI_AUDIO_REQUIRE_NEURAL_WORKER", False):
         order.append("local")
-    return order or ["local"]
+    if parse_bool_env("AI_AUDIO_REQUIRE_NEURAL_WORKER", False):
+        order = [provider for provider in order if provider != "local"]
+    return order or (["local_http"] if parse_bool_env("AI_AUDIO_REQUIRE_NEURAL_WORKER", False) else ["local"])
 
 
 def safe_tts_error(exc: Exception) -> str:
@@ -1742,34 +1926,136 @@ def stitch_audio_segments(segments: List[bytes], extension: str = "mp3") -> byte
         return data
 
 
-def render_local_ai_audio(script_text: str) -> Dict[str, Any]:
+def local_tts_role_config(voice_role: str) -> Dict[str, str]:
+    role = voice_role if voice_role in AI_AUDIO_VOICE_ROLES else "host"
+    role_key = role.upper()
+    voice_defaults = {"host": "en-us+m3", "guest": "en-us+f3", "narrator": "en-us+m1"}
+    speed_defaults = {"host": "158", "guest": "150", "narrator": "142"}
+    pitch_defaults = {"host": "48", "guest": "58", "narrator": "42"}
+    amplitude_defaults = {"host": "145", "guest": "135", "narrator": "140"}
+    return {
+        "voice": os.environ.get(f"AI_AUDIO_TTS_LOCAL_VOICE_{role_key}", voice_defaults[role]).strip() or voice_defaults[role],
+        "speed": os.environ.get(f"AI_AUDIO_TTS_LOCAL_SPEED_{role_key}", speed_defaults[role]).strip() or speed_defaults[role],
+        "pitch": os.environ.get(f"AI_AUDIO_TTS_LOCAL_PITCH_{role_key}", pitch_defaults[role]).strip() or pitch_defaults[role],
+        "amplitude": os.environ.get(f"AI_AUDIO_TTS_LOCAL_AMPLITUDE_{role_key}", amplitude_defaults[role]).strip() or amplitude_defaults[role],
+    }
+
+
+def normalize_local_tts_text(text: str) -> str:
+    text = re.sub(r"\s+", " ", (text or "").strip())
+    text = text.replace(" - ", ", ")
+    if text and text[-1] not in ".!?":
+        text = f"{text}."
+    return text
+
+
+def postprocess_local_wav_audio(data: bytes) -> bytes:
+    if not parse_bool_env("AI_AUDIO_TTS_LOCAL_POSTPROCESS", True):
+        return data
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        return data
+    audio_filter = os.environ.get(
+        "AI_AUDIO_TTS_LOCAL_FILTER",
+        "highpass=f=80,lowpass=f=12000,loudnorm=I=-16:TP=-1.5:LRA=11",
+    ).strip()
+    with tempfile.TemporaryDirectory(prefix="audioraq-local-tts-post-") as temp_dir:
+        temp_path = Path(temp_dir)
+        input_path = temp_path / "input.wav"
+        output_path = temp_path / "output.wav"
+        input_path.write_bytes(data)
+        cmd = [
+            ffmpeg,
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-i",
+            str(input_path),
+            "-af",
+            audio_filter,
+            "-ar",
+            "44100",
+            "-ac",
+            "1",
+            str(output_path),
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=240)
+        if result.returncode != 0:
+            logger.warning(f"Local TTS post-processing failed; using raw local output: {result.stderr or result.stdout}")
+            return data
+        processed = output_path.read_bytes()
+        return processed if len(processed) >= 1024 else data
+
+
+def render_local_ai_audio(script_text: str, turns: Optional[List[Dict[str, str]]] = None) -> Dict[str, Any]:
     renderer = shutil.which("espeak-ng") or shutil.which("espeak")
     if not renderer:
         raise RuntimeError("local AI audio renderer is not installed")
 
-    voice = os.environ.get("AI_AUDIO_TTS_VOICE", "en-us").strip() or "en-us"
-    speed = os.environ.get("AI_AUDIO_TTS_SPEED", "155").strip() or "155"
+    use_multivoice = parse_bool_env("AI_AUDIO_TTS_LOCAL_MULTIVOICE", True)
+    if use_multivoice and turns:
+        rendered_turns = split_audio_turns_for_tts(turns)
+    else:
+        voice = os.environ.get("AI_AUDIO_TTS_VOICE", "en-us").strip() or "en-us"
+        speed = os.environ.get("AI_AUDIO_TTS_SPEED", "155").strip() or "155"
+        rendered_turns = [{"speaker": "Host", "voice_role": "host", "text": script_text, "voice": voice, "speed": speed}]
+
     with tempfile.TemporaryDirectory(prefix="audioraq-ai-audio-") as temp_dir:
         temp_path = Path(temp_dir)
-        script_path = temp_path / "script.txt"
-        output_path = temp_path / "episode.wav"
-        script_path.write_text(script_text, encoding="utf-8")
-        cmd = [renderer, "-v", voice, "-s", speed, "-f", str(script_path), "-w", str(output_path)]
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=240)
-        if result.returncode != 0:
-            logger.error(f"AI audio renderer failed: {result.stderr or result.stdout}")
-            raise RuntimeError("local AI audio rendering failed")
-        data = output_path.read_bytes()
+        segments = []
+        voices = {}
+        for index, turn in enumerate(rendered_turns):
+            role = turn.get("voice_role") if turn.get("voice_role") in AI_AUDIO_VOICE_ROLES else "host"
+            config = local_tts_role_config(role) if use_multivoice and turns else {
+                "voice": turn.get("voice") or "en-us",
+                "speed": turn.get("speed") or "155",
+                "pitch": os.environ.get("AI_AUDIO_TTS_LOCAL_PITCH_HOST", "48"),
+                "amplitude": os.environ.get("AI_AUDIO_TTS_LOCAL_AMPLITUDE_HOST", "145"),
+            }
+            voices[role] = config["voice"]
+            script_path = temp_path / f"script-{index:03d}.txt"
+            output_path = temp_path / f"segment-{index:03d}.wav"
+            script_path.write_text(normalize_local_tts_text(turn.get("text") or ""), encoding="utf-8")
+            cmd = [
+                renderer,
+                "-v",
+                config["voice"],
+                "-s",
+                config["speed"],
+                "-p",
+                config["pitch"],
+                "-a",
+                config["amplitude"],
+                "-f",
+                str(script_path),
+                "-w",
+                str(output_path),
+            ]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=240)
+            if result.returncode != 0:
+                logger.error(f"AI audio renderer failed: {result.stderr or result.stdout}")
+                raise RuntimeError("local AI audio rendering failed")
+            segment = output_path.read_bytes()
+            if len(segment) >= 1024:
+                segments.append(segment)
+        if not segments:
+            raise RuntimeError("local AI audio renderer produced no usable segments")
+        data = stitch_audio_segments(segments, extension="wav")
+        data = postprocess_local_wav_audio(data)
         if len(data) < 1024:
             raise RuntimeError("local AI audio renderer produced an empty file")
         return {
             "data": data,
             "content_type": "audio/wav",
-            "provider": Path(renderer).name,
+            "provider": f"{Path(renderer).name}:enhanced-local",
             "provider_kind": "local",
             "model": Path(renderer).name,
-            "voices": {"host": voice},
-            "turn_count": 1,
+            "voices": voices or {"host": os.environ.get("AI_AUDIO_TTS_VOICE", "en-us").strip() or "en-us"},
+            "turn_count": len(rendered_turns),
+            "chunk_count": len(segments),
+            "enhancement_profile": "role-voice-variants+pacing+ffmpeg-normalization",
+            "benchmark_note": "Local espeak-ng fallback optimized for clarity; not equivalent to neural ElevenLabs production TTS.",
             "extension": "wav",
             "filename": "ai-generated-episode.wav",
         }
@@ -1912,17 +2198,77 @@ def render_openai_ai_audio(turns: List[Dict[str, str]]) -> Dict[str, Any]:
     }
 
 
+def render_local_http_ai_audio(script_text: str, turns: List[Dict[str, str]]) -> Dict[str, Any]:
+    base_url = os.environ.get("AI_AUDIO_LOCAL_TTS_URL", "").strip().rstrip("/")
+    if not base_url:
+        raise RuntimeError("AI_AUDIO_LOCAL_TTS_URL is not configured")
+
+    payload = {
+        "script_text": script_text,
+        "turns": split_audio_turns_for_tts(turns),
+        "target_loudness_lufs": parse_float_env("AI_AUDIO_TARGET_LUFS", -16.0),
+        "format": os.environ.get("AI_AUDIO_LOCAL_TTS_FORMAT", "wav").strip().lower() or "wav",
+        "quality_profile": os.environ.get("AI_AUDIO_LOCAL_TTS_PROFILE", "podcast-dialogue").strip() or "podcast-dialogue",
+    }
+    response = requests.post(
+        f"{base_url}/v1/render",
+        json=payload,
+        timeout=parse_int_env("AI_AUDIO_LOCAL_TTS_TIMEOUT_SECONDS", 900),
+    )
+    if response.status_code >= 400:
+        raise RuntimeError(f"Local TTS worker failed with {response.status_code}: {response.text[:300]}")
+
+    if (response.headers.get("Content-Type") or "").startswith("audio/"):
+        data = response.content
+        content_type = response.headers.get("Content-Type", "audio/wav").split(";")[0]
+        extension = extension_for_content_type(content_type)
+        provider = response.headers.get("X-Audioraq-TTS-Provider", "local-http:audio")
+        provider_kind = response.headers.get("X-Audioraq-TTS-Provider-Kind", "local-neural")
+        model = response.headers.get("X-Audioraq-TTS-Model", "")
+    else:
+        body = response.json()
+        encoded_audio = body.get("audio_base64") or body.get("data_base64") or ""
+        if not encoded_audio:
+            raise RuntimeError("Local TTS worker did not return audio_base64")
+        data = base64.b64decode(encoded_audio)
+        content_type = body.get("content_type") or "audio/wav"
+        extension = body.get("extension") or extension_for_content_type(content_type)
+        provider = body.get("provider") or "local-http:audio"
+        provider_kind = body.get("provider_kind") or "local-neural"
+        model = body.get("model") or ""
+
+    if len(data) < 1024:
+        raise RuntimeError("Local TTS worker produced an empty audio file")
+    if parse_bool_env("AI_AUDIO_REQUIRE_NEURAL_WORKER", False) and provider_kind != "local-neural":
+        raise RuntimeError(f"Local TTS worker returned {provider_kind} audio, but AI_AUDIO_REQUIRE_NEURAL_WORKER=true")
+
+    return {
+        "data": data,
+        "content_type": content_type,
+        "provider": provider,
+        "provider_kind": provider_kind,
+        "model": model,
+        "voices": {"source": "local-http-worker"},
+        "turn_count": len(payload["turns"]),
+        "extension": extension,
+        "filename": f"ai-generated-episode.{extension}",
+        "quality_profile": payload["quality_profile"],
+    }
+
+
 def render_ai_audio_bytes(script_text: str, turns: Optional[List[Dict[str, str]]] = None) -> Dict[str, Any]:
     voice_turns = cap_audio_script_turns(turns or [{"speaker": "Host", "voice_role": "host", "text": script_text}])
     provider_errors = []
     for provider in get_ai_audio_provider_order():
         try:
+            if provider == "local_http":
+                return render_local_http_ai_audio(script_text, voice_turns)
             if provider == "elevenlabs":
                 return render_elevenlabs_ai_audio(voice_turns)
             if provider == "openai":
                 return render_openai_ai_audio(voice_turns)
             if provider == "local":
-                return render_local_ai_audio(script_text)
+                return render_local_ai_audio(script_text, voice_turns)
             raise RuntimeError(f"unknown provider '{provider}'")
         except Exception as exc:
             error = safe_tts_error(exc)
@@ -2165,165 +2511,142 @@ def normalize_ai_generation_response(raw: Dict[str, Any], brief: Dict[str, Any],
 
 async def generate_ai_podcast_package(brief: Dict[str, Any], show: Dict[str, Any]) -> Dict[str, Any]:
     fallback = build_fallback_ai_generation(brief, show)
-    if not EMERGENT_KEY:
+
+    show_context = {
+        "show_title": show.get("title", ""),
+        "show_description": show.get("description", ""),
+        "show_category": show.get("category", DEFAULT_SHOW_CATEGORY),
+        "podcaster_name": show.get("podcaster_name", ""),
+    }
+
+    system_message = (
+        "You are Audioraq's AI podcast creation team. Think like a strategist, story editor, "
+        "and growth producer for high-signal long-form podcasts. Build episodes that feel intentional, "
+        "credible, and aligned to the creator's audience. Avoid generic social-media gimmicks, empty hype, "
+        "and short-form engagement hacks. Return JSON only."
+    )
+    schema = {
+        "episode_title": "string",
+        "one_line_promise": "string",
+        "hook": "string",
+        "intro_script": "string",
+        "outline": [
+            {
+                "section_title": "string",
+                "purpose": "string",
+                "beats": ["string"],
+            }
+        ],
+        "talking_points": ["string"],
+        "guest_questions": ["string"],
+        "production_notes": ["string"],
+        "outro_cta": "string",
+        "show_notes_summary": "string",
+        "suggested_description": "string",
+        "suggested_keywords": ["string"],
+        "why_this_episode_fits": "string",
+        "audio_script_turns": [
+            {
+                "speaker": "Host | Guest | Narrator",
+                "voice_role": "host | guest | narrator",
+                "text": "voice-ready spoken text for this turn",
+            }
+        ],
+        "recommended_category": "string",
+    }
+    prompt = (
+        "Use this show context and creator brief to draft a strong podcast episode package.\n\n"
+        f"Show context:\n{json.dumps(show_context, ensure_ascii=True)}\n\n"
+        f"Creator brief:\n{json.dumps(brief, ensure_ascii=True)}\n\n"
+        "Rules:\n"
+        "- Keep the work podcast-first and long-form.\n"
+        "- The hook should be sharp, but not clickbait.\n"
+        "- Align the outline to the requested tone, format, audience, and desired outcome.\n"
+        "- If the format is not interview, guest_questions can be an empty list.\n"
+        "- audio_script_turns should be ready for text-to-speech and sound like a polished podcast, not outline notes.\n"
+        "- For interview or dialogue formats, alternate Host and Guest turns with distinct voices; for solo formats, use Host only unless a Narrator improves clarity.\n"
+        f"- Do not imitate or claim to be any real person's voice. Add no disclosure text unless it fits naturally; the platform stores this separately: {AI_AUDIO_DISCLOSURE}\n"
+        "- Keep suggested keywords concise and usable for search/discovery.\n"
+        "- recommended_category should be a single lowercase category.\n\n"
+        f"Return JSON matching this schema exactly:\n{json.dumps(schema, ensure_ascii=True)}"
+    )
+
+    result = await run_ai_json_chat("ai-podcast", system_message, prompt, expected_type=dict)
+    raw = result.get("raw")
+    if not isinstance(raw, dict):
+        if result.get("errors"):
+            logger.warning(f"AI podcast generation used deterministic fallback after provider errors: {result['errors'][-2:]}")
+        fallback["ai_text_provider"] = AI_TEXT_PROVIDER_DETERMINISTIC
         return fallback
 
-    try:
-        from emergentintegrations.llm.chat import LlmChat, UserMessage
-
-        show_context = {
-            "show_title": show.get("title", ""),
-            "show_description": show.get("description", ""),
-            "show_category": show.get("category", DEFAULT_SHOW_CATEGORY),
-            "podcaster_name": show.get("podcaster_name", ""),
-        }
-
-        system_message = (
-            "You are Audioraq's AI podcast creation team. Think like a strategist, story editor, "
-            "and growth producer for high-signal long-form podcasts. Build episodes that feel intentional, "
-            "credible, and aligned to the creator's audience. Avoid generic social-media gimmicks, empty hype, "
-            "and short-form engagement hacks. Return JSON only."
-        )
-        schema = {
-            "episode_title": "string",
-            "one_line_promise": "string",
-            "hook": "string",
-            "intro_script": "string",
-            "outline": [
-                {
-                    "section_title": "string",
-                    "purpose": "string",
-                    "beats": ["string"],
-                }
-            ],
-            "talking_points": ["string"],
-            "guest_questions": ["string"],
-            "production_notes": ["string"],
-            "outro_cta": "string",
-            "show_notes_summary": "string",
-            "suggested_description": "string",
-            "suggested_keywords": ["string"],
-            "why_this_episode_fits": "string",
-            "audio_script_turns": [
-                {
-                    "speaker": "Host | Guest | Narrator",
-                    "voice_role": "host | guest | narrator",
-                    "text": "voice-ready spoken text for this turn",
-                }
-            ],
-            "recommended_category": "string",
-        }
-        prompt = (
-            "Use this show context and creator brief to draft a strong podcast episode package.\n\n"
-            f"Show context:\n{json.dumps(show_context, ensure_ascii=True)}\n\n"
-            f"Creator brief:\n{json.dumps(brief, ensure_ascii=True)}\n\n"
-            "Rules:\n"
-            "- Keep the work podcast-first and long-form.\n"
-            "- The hook should be sharp, but not clickbait.\n"
-            "- Align the outline to the requested tone, format, audience, and desired outcome.\n"
-            "- If the format is not interview, guest_questions can be an empty list.\n"
-            "- audio_script_turns should be ready for text-to-speech and sound like a polished podcast, not outline notes.\n"
-            "- For interview or dialogue formats, alternate Host and Guest turns with distinct voices; for solo formats, use Host only unless a Narrator improves clarity.\n"
-            f"- Do not imitate or claim to be any real person's voice. Add no disclosure text unless it fits naturally; the platform stores this separately: {AI_AUDIO_DISCLOSURE}\n"
-            "- Keep suggested keywords concise and usable for search/discovery.\n"
-            "- recommended_category should be a single lowercase category.\n\n"
-            f"Return JSON matching this schema exactly:\n{json.dumps(schema, ensure_ascii=True)}"
-        )
-
-        chat = LlmChat(
-            api_key=EMERGENT_KEY,
-            session_id=f"ai-podcast-{uuid.uuid4()}",
-            system_message=system_message,
-        ).with_model("openai", "gpt-5.2")
-        response = await chat.send_message(UserMessage(text=prompt))
-        raw = parse_json_payload(response)
-        if not isinstance(raw, dict):
-            return fallback
-        return normalize_ai_generation_response(raw, brief, show)
-    except Exception as exc:
-        logger.error(f"AI podcast generation error: {exc}")
-        return fallback
+    generation = normalize_ai_generation_response(raw, brief, show)
+    generation["ai_text_provider"] = result.get("provider", AI_TEXT_PROVIDER_DETERMINISTIC)
+    return generation
 
 
 async def extract_keywords(text):
-    try:
-        from emergentintegrations.llm.chat import LlmChat, UserMessage
-        import json
+    result = await run_ai_json_chat(
+        "keywords",
+        'You are a keyword extraction expert. Extract 5-10 relevant keywords/topics from the given text. Return ONLY a JSON array of lowercase strings, no other text. Example: ["technology", "science", "ai"]',
+        f"Extract keywords from this text: {text}",
+        expected_type=list,
+    )
+    keywords = result.get("raw")
+    if isinstance(keywords, list):
+        cleaned_keywords = [k.lower().strip() for k in keywords if isinstance(k, str) and k.strip()]
+        if cleaned_keywords:
+            return cleaned_keywords[:10]
 
-        chat = LlmChat(
-            api_key=EMERGENT_KEY,
-            session_id=f"keywords-{uuid.uuid4()}",
-            system_message='You are a keyword extraction expert. Extract 5-10 relevant keywords/topics from the given text. Return ONLY a JSON array of lowercase strings, no other text. Example: ["technology", "science", "ai"]',
-        ).with_model("openai", "gpt-5.2")
-        msg = UserMessage(text=f"Extract keywords from this text: {text}")
-        response = await chat.send_message(msg)
-        cleaned = response.strip()
-        if cleaned.startswith("```"):
-            cleaned = cleaned.split("\n", 1)[1] if "\n" in cleaned else cleaned[3:]
-            cleaned = cleaned.rsplit("```", 1)[0]
-        keywords = json.loads(cleaned.strip())
-        if isinstance(keywords, list):
-            return [k.lower().strip() for k in keywords if isinstance(k, str)]
-        return []
-    except Exception as e:
-        logger.error(f"Keyword extraction error: {e}")
-        words = text.lower().split()
-        stop_words = {
-            "the", "a", "an", "is", "are", "was", "were", "be", "been", "being", "have", "has", "had",
-            "do", "does", "did", "will", "would", "could", "should", "may", "might", "shall", "can",
-            "need", "dare", "ought", "used", "to", "of", "in", "for", "on", "with", "at", "by", "from",
-            "as", "into", "through", "during", "before", "after", "above", "below", "between", "out",
-            "off", "over", "under", "again", "further", "then", "once", "here", "there", "when", "where",
-            "why", "how", "all", "both", "each", "few", "more", "most", "other", "some", "such", "no",
-            "nor", "not", "only", "own", "same", "so", "than", "too", "very", "just", "because", "but",
-            "and", "or", "if", "while", "about", "up", "it", "its", "i", "my", "we", "our", "you", "your",
-            "he", "she", "they", "them", "this", "that", "these", "those", "what", "which", "who", "whom",
-        }
-        keywords = list(
-            set([w.strip(".,!?;:\"'()[]{}") for w in words if len(w) > 3 and w not in stop_words])
-        )
-        return keywords[:10]
+    if result.get("errors"):
+        logger.warning(f"Keyword extraction used deterministic fallback after provider errors: {result['errors'][-2:]}")
+    words = text.lower().split()
+    stop_words = {
+        "the", "a", "an", "is", "are", "was", "were", "be", "been", "being", "have", "has", "had",
+        "do", "does", "did", "will", "would", "could", "should", "may", "might", "shall", "can",
+        "need", "dare", "ought", "used", "to", "of", "in", "for", "on", "with", "at", "by", "from",
+        "as", "into", "through", "during", "before", "after", "above", "below", "between", "out",
+        "off", "over", "under", "again", "further", "then", "once", "here", "there", "when", "where",
+        "why", "how", "all", "both", "each", "few", "more", "most", "other", "some", "such", "no",
+        "nor", "not", "only", "own", "same", "so", "than", "too", "very", "just", "because", "but",
+        "and", "or", "if", "while", "about", "up", "it", "its", "i", "my", "we", "our", "you", "your",
+        "he", "she", "they", "them", "this", "that", "these", "those", "what", "which", "who", "whom",
+    }
+    keywords = list(
+        set([w.strip(".,!?;:\"'()[]{}") for w in words if len(w) > 3 and w not in stop_words])
+    )
+    return keywords[:10]
 
 
 async def get_ai_recommendations(user_interests, viewed_keywords, all_podcasts):
-    try:
-        from emergentintegrations.llm.chat import LlmChat, UserMessage
-        import json
+    podcast_summaries = []
+    for p in all_podcasts[:50]:
+        podcast_summaries.append(
+            {
+                "id": p["id"],
+                "title": p["title"],
+                "show_title": p.get("show_title", ""),
+                "keywords": p.get("keywords", []),
+                "category": p.get("category", ""),
+            }
+        )
 
-        podcast_summaries = []
-        for p in all_podcasts[:50]:
-            podcast_summaries.append(
-                {
-                    "id": p["id"],
-                    "title": p["title"],
-                    "show_title": p.get("show_title", ""),
-                    "keywords": p.get("keywords", []),
-                    "category": p.get("category", ""),
-                }
-            )
-        chat = LlmChat(
-            api_key=EMERGENT_KEY,
-            session_id=f"recommend-{uuid.uuid4()}",
-            system_message="You are a podcast recommendation engine. Given user interests and available podcasts, rank and return the most relevant podcast IDs. Return ONLY a JSON array of podcast ID strings, ordered by relevance. Max 20 IDs.",
-        ).with_model("openai", "gpt-5.2")
-        prompt = f"""User interests: {json.dumps(user_interests)}
+    prompt = f"""User interests: {json.dumps(user_interests)}
 Previously viewed podcast keywords: {json.dumps(viewed_keywords)}
 Available podcasts: {json.dumps(podcast_summaries)}
 
 Return the most relevant podcast IDs as a JSON array."""
-        msg = UserMessage(text=prompt)
-        response = await chat.send_message(msg)
-        cleaned = response.strip()
-        if cleaned.startswith("```"):
-            cleaned = cleaned.split("\n", 1)[1] if "\n" in cleaned else cleaned[3:]
-            cleaned = cleaned.rsplit("```", 1)[0]
-        ids = json.loads(cleaned.strip())
-        if isinstance(ids, list):
-            return [str(i) for i in ids]
-        return []
-    except Exception as e:
-        logger.error(f"AI recommendation error: {e}")
-        return []
+    result = await run_ai_json_chat(
+        "recommend",
+        "You are a podcast recommendation engine. Given user interests and available podcasts, rank and return the most relevant podcast IDs. Return ONLY a JSON array of podcast ID strings, ordered by relevance. Max 20 IDs.",
+        prompt,
+        expected_type=list,
+    )
+    ids = result.get("raw")
+    if isinstance(ids, list):
+        return [str(i) for i in ids]
+    if result.get("errors"):
+        logger.warning(f"AI recommendation skipped after provider errors: {result['errors'][-2:]}")
+    return []
 
 
 def build_recommendation_reason(episode, user_interests, viewed_keywords, method):
@@ -3687,6 +4010,51 @@ async def get_creator_analytics(request: Request, show_id: Optional[str] = None)
     if user["role"] != "podcaster":
         raise HTTPException(status_code=403, detail="Only podcasters can view analytics")
     return await fetch_creator_analytics(user, show_id=show_id)
+
+
+@api_router.get("/ai-studio/status")
+async def get_ai_studio_status(request: Request):
+    user = await get_current_user(request)
+    if user["role"] != "podcaster":
+        raise HTTPException(status_code=403, detail="Only podcasters can view AI Studio status")
+
+    text_order = get_ai_text_provider_order()
+    audio_order = get_ai_audio_provider_order()
+    warnings = []
+    if AI_TEXT_PROVIDER_EMERGENT in text_order:
+        warnings.append("Text generation can still use the remote Emergent provider. Set AI_TEXT_PROVIDER=ollama,deterministic and AI_TEXT_ALLOW_REMOTE=false for local-first mode.")
+    if any(provider in audio_order for provider in ["elevenlabs", "openai"]):
+        warnings.append("Audio rendering can still use production TTS APIs. Set AI_AUDIO_TTS_PROVIDER=local_http,local for local-first mode.")
+    if get_storage_backend() == "emergent":
+        warnings.append("Media storage is still using the Emergent object store. Set STORAGE_BACKEND=local after migrating existing media.")
+
+    return {
+        "mode": os.environ.get("AI_STUDIO_MODE", "sync").strip().lower() or "sync",
+        "text_generation": {
+            "provider_order": text_order,
+            "local_provider": AI_TEXT_PROVIDER_OLLAMA,
+            "local_model": os.environ.get("AI_TEXT_LOCAL_MODEL", "llama3.2:3b"),
+            "local_endpoint_configured": bool(os.environ.get("AI_TEXT_LOCAL_BASE_URL") or os.environ.get("OLLAMA_BASE_URL")),
+            "remote_allowed": parse_bool_env("AI_TEXT_ALLOW_REMOTE", True),
+        },
+        "audio_rendering": {
+            "provider_order": audio_order,
+            "local_neural_worker_configured": bool(os.environ.get("AI_AUDIO_LOCAL_TTS_URL")),
+            "require_neural_worker": parse_bool_env("AI_AUDIO_REQUIRE_NEURAL_WORKER", False),
+            "local_fallback": "local" in audio_order,
+            "local_fallback_quality": "espeak-ng enhanced fallback; not production neural TTS",
+        },
+        "storage": {
+            "backend": get_storage_backend(),
+            "local_storage_configured": get_storage_backend() == "local",
+        },
+        "quality_gate": {
+            "agent2_version": AGENT2_VERSION,
+            "publishes_after_agent2_review": True,
+            "ai_creation_media_policy": "audio_only",
+        },
+        "warnings": warnings,
+    }
 
 
 @api_router.get("/ai-podcast-drafts/my")

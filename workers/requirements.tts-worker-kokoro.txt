@@ -1,0 +1,6 @@
+# Optional neural TTS engine for workers/ai_studio_tts_worker.py.
+# Install only on the machine that will render AI Studio audio.
+# Docker installs CPU-only torch first; do not add plain torch here or pip may
+# resolve the CUDA build on Linux.
+kokoro>=0.9.4
+soundfile>=0.12.1
