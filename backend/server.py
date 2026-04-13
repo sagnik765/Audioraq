@@ -6,7 +6,7 @@ PROJECT_DIR = ROOT_DIR.parent
 load_dotenv(ROOT_DIR / ".env")
 
 from fastapi import APIRouter, FastAPI, File, Form, HTTPException, Request, Response, UploadFile
-from fastapi.responses import FileResponse, RedirectResponse
+from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel
@@ -37,7 +37,7 @@ import zipfile
 
 from bson import ObjectId
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Literal, Optional, Set
+from typing import Any, Dict, Iterator, List, Literal, Optional, Set, Tuple
 from urllib.parse import urlencode, urlparse
 
 
@@ -465,6 +465,54 @@ def local_storage_content_type_path(path: str) -> Path:
     return local_storage_path(path).with_name(f"{local_storage_path(path).name}.content-type")
 
 
+def object_cache_key(path: str) -> str:
+    normalized = (path or "").strip().lstrip("/")
+    if not normalized:
+        raise ValueError("Storage path is required")
+    return f"__object_cache/{normalized}"
+
+
+def cache_object_locally(path: str, data: bytes, content_type: str) -> None:
+    cache_path = object_cache_key(path)
+    destination = local_storage_path(cache_path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temp_destination = destination.with_name(f".{destination.name}.{uuid.uuid4().hex}.tmp")
+    temp_destination.write_bytes(data)
+    temp_destination.replace(destination)
+    local_storage_content_type_path(cache_path).write_text(content_type or "application/octet-stream", encoding="utf-8")
+
+
+def cached_object_exists(path: str) -> bool:
+    try:
+        source = local_storage_path(object_cache_key(path))
+        return source.exists() and source.stat().st_size > 0
+    except Exception:
+        return False
+
+
+def cached_object_content_type(path: str, fallback: str) -> str:
+    try:
+        content_type_path = local_storage_content_type_path(object_cache_key(path))
+        if content_type_path.exists():
+            return content_type_path.read_text(encoding="utf-8").strip() or fallback
+    except Exception:
+        pass
+    return fallback
+
+
+def delete_cached_object(path: str) -> None:
+    try:
+        cache_path = object_cache_key(path)
+        source = local_storage_path(cache_path)
+        content_type_path = local_storage_content_type_path(cache_path)
+        if source.exists():
+            source.unlink()
+        if content_type_path.exists():
+            content_type_path.unlink()
+    except Exception as exc:
+        logger.warning(f"Could not remove cached media object for {path}: {exc}")
+
+
 def put_object(path, data, content_type):
     if get_storage_backend() == "local":
         destination = local_storage_path(path)
@@ -481,6 +529,10 @@ def put_object(path, data, content_type):
         timeout=300,
     )
     resp.raise_for_status()
+    try:
+        cache_object_locally(path, data, content_type)
+    except Exception as exc:
+        logger.warning(f"Could not cache uploaded media object {path}: {exc}")
     return resp.json()
 
 
@@ -504,6 +556,161 @@ def get_object(path):
     return resp.content, resp.headers.get("Content-Type", "application/octet-stream")
 
 
+STREAM_CHUNK_SIZE = 1024 * 1024
+
+
+def safe_inline_filename(filename: str) -> str:
+    safe_name = re.sub(r'[\r\n"\\]+', "", (filename or "podcast").strip()) or "podcast"
+    return safe_name[:180]
+
+
+def media_stream_headers(
+    filename: str,
+    *,
+    content_length: Optional[int] = None,
+    content_range: Optional[str] = None,
+) -> Dict[str, str]:
+    headers = {
+        "Accept-Ranges": "bytes",
+        "Content-Disposition": f'inline; filename="{safe_inline_filename(filename)}"',
+        "Cache-Control": "private, max-age=3600, no-transform",
+    }
+    if content_length is not None:
+        headers["Content-Length"] = str(max(0, content_length))
+    if content_range:
+        headers["Content-Range"] = content_range
+    return headers
+
+
+def parse_range_header(range_header: Optional[str], size: int) -> Optional[Tuple[int, int]]:
+    if not range_header:
+        return None
+
+    header = range_header.strip().lower()
+    if not header.startswith("bytes=") or "," in header:
+        raise HTTPException(
+            status_code=416,
+            detail="Requested range not satisfiable",
+            headers={"Content-Range": f"bytes */{size}", "Accept-Ranges": "bytes"},
+        )
+
+    start_text, separator, end_text = header[6:].partition("-")
+    if separator != "-":
+        raise HTTPException(
+            status_code=416,
+            detail="Requested range not satisfiable",
+            headers={"Content-Range": f"bytes */{size}", "Accept-Ranges": "bytes"},
+        )
+
+    try:
+        if start_text == "":
+            suffix_length = int(end_text)
+            if suffix_length <= 0:
+                raise ValueError("suffix range must be positive")
+            start = max(size - suffix_length, 0)
+            end = size - 1
+        else:
+            start = int(start_text)
+            end = int(end_text) if end_text else size - 1
+            end = min(end, size - 1)
+    except ValueError:
+        raise HTTPException(
+            status_code=416,
+            detail="Requested range not satisfiable",
+            headers={"Content-Range": f"bytes */{size}", "Accept-Ranges": "bytes"},
+        )
+
+    if size <= 0 or start < 0 or start >= size or end < start:
+        raise HTTPException(
+            status_code=416,
+            detail="Requested range not satisfiable",
+            headers={"Content-Range": f"bytes */{size}", "Accept-Ranges": "bytes"},
+        )
+
+    return start, end
+
+
+def iter_file_range(source: Path, start: int, end: int) -> Iterator[bytes]:
+    with source.open("rb") as file_handle:
+        file_handle.seek(start)
+        remaining = end - start + 1
+        while remaining > 0:
+            chunk = file_handle.read(min(STREAM_CHUNK_SIZE, remaining))
+            if not chunk:
+                break
+            remaining -= len(chunk)
+            yield chunk
+
+
+def should_count_stream_play(range_header: Optional[str]) -> bool:
+    if not range_header:
+        return True
+    match = re.match(r"^\s*bytes=(\d*)-", range_header, flags=re.IGNORECASE)
+    return bool(match and match.group(1) in {"", "0"})
+
+
+def stream_local_object(path: str, content_type: str, request: Request, filename: str):
+    source = local_storage_path(path)
+    if not source.exists():
+        raise FileNotFoundError(path)
+
+    size = source.stat().st_size
+    range_tuple = parse_range_header(request.headers.get("range"), size)
+    if not range_tuple:
+        return FileResponse(
+            source,
+            media_type=content_type,
+            headers=media_stream_headers(filename, content_length=size),
+        )
+
+    start, end = range_tuple
+    content_length = end - start + 1
+    return StreamingResponse(
+        iter_file_range(source, start, end),
+        status_code=206,
+        media_type=content_type,
+        headers=media_stream_headers(
+            filename,
+            content_length=content_length,
+            content_range=f"bytes {start}-{end}/{size}",
+        ),
+    )
+
+
+def stream_bytes_object(data: bytes, content_type: str, request: Request, filename: str):
+    size = len(data)
+    range_tuple = parse_range_header(request.headers.get("range"), size)
+    if not range_tuple:
+        return Response(content=data, media_type=content_type, headers=media_stream_headers(filename, content_length=size))
+
+    start, end = range_tuple
+    partial_data = data[start : end + 1]
+    return Response(
+        content=partial_data,
+        status_code=206,
+        media_type=content_type,
+        headers=media_stream_headers(
+            filename,
+            content_length=len(partial_data),
+            content_range=f"bytes {start}-{end}/{size}",
+        ),
+    )
+
+
+def stream_cached_or_remote_object(path: str, content_type: str, request: Request, filename: str):
+    if cached_object_exists(path):
+        return stream_local_object(object_cache_key(path), cached_object_content_type(path, content_type), request, filename)
+
+    data, storage_content_type = get_object(path)
+    resolved_content_type = content_type or storage_content_type
+    try:
+        cache_object_locally(path, data, resolved_content_type)
+        return stream_local_object(object_cache_key(path), resolved_content_type, request, filename)
+    except Exception as exc:
+        logger.warning(f"Could not cache streamed media object {path}; serving from memory: {exc}")
+        return stream_bytes_object(data, resolved_content_type, request, filename)
+
+
 def delete_object(path, missing_ok: bool = True) -> str:
     normalized_path = (path or "").strip()
     if not normalized_path:
@@ -523,6 +730,7 @@ def delete_object(path, missing_ok: bool = True) -> str:
             return "missing"
         raise FileNotFoundError(normalized_path)
 
+    delete_cached_object(normalized_path)
     key = init_storage()
     resp = requests.delete(
         f"{STORAGE_URL}/objects/{normalized_path}",
@@ -2268,6 +2476,55 @@ def postprocess_local_wav_audio(data: bytes) -> bytes:
         return processed if len(processed) >= 1024 else data
 
 
+def transcode_local_tts_output(data: bytes) -> Tuple[bytes, str, str]:
+    output_format = os.environ.get("AI_AUDIO_TTS_LOCAL_OUTPUT_FORMAT", "mp3").strip().lower() or "mp3"
+    if output_format in {"wav", "wave"}:
+        return data, "audio/wav", "wav"
+    if output_format not in {"mp3", "mpeg"}:
+        logger.warning(f"Unsupported AI_AUDIO_TTS_LOCAL_OUTPUT_FORMAT={output_format}; using WAV output")
+        return data, "audio/wav", "wav"
+
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        logger.warning("ffmpeg is not installed; using WAV local TTS output")
+        return data, "audio/wav", "wav"
+
+    bitrate = os.environ.get("AI_AUDIO_TTS_LOCAL_MP3_BITRATE", "160k").strip() or "160k"
+    with tempfile.TemporaryDirectory(prefix="audioraq-local-tts-transcode-") as temp_dir:
+        temp_path = Path(temp_dir)
+        input_path = temp_path / "input.wav"
+        output_path = temp_path / "output.mp3"
+        input_path.write_bytes(data)
+        cmd = [
+            ffmpeg,
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-i",
+            str(input_path),
+            "-vn",
+            "-acodec",
+            "libmp3lame",
+            "-b:a",
+            bitrate,
+            "-ar",
+            "44100",
+            "-ac",
+            "1",
+            str(output_path),
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=240)
+        if result.returncode != 0:
+            logger.warning(f"Local TTS MP3 transcode failed; using WAV output: {result.stderr or result.stdout}")
+            return data, "audio/wav", "wav"
+        transcoded = output_path.read_bytes()
+        if len(transcoded) < 1024:
+            logger.warning("Local TTS MP3 transcode produced an empty file; using WAV output")
+            return data, "audio/wav", "wav"
+        return transcoded, "audio/mpeg", "mp3"
+
+
 def render_local_ai_audio(script_text: str, turns: Optional[List[Dict[str, str]]] = None) -> Dict[str, Any]:
     renderer = shutil.which("espeak-ng") or shutil.which("espeak")
     if not renderer:
@@ -2323,21 +2580,22 @@ def render_local_ai_audio(script_text: str, turns: Optional[List[Dict[str, str]]
             raise RuntimeError("local AI audio renderer produced no usable segments")
         data = stitch_audio_segments(segments, extension="wav")
         data = postprocess_local_wav_audio(data)
+        data, content_type, extension = transcode_local_tts_output(data)
         if len(data) < 1024:
             raise RuntimeError("local AI audio renderer produced an empty file")
         return {
             "data": data,
-            "content_type": "audio/wav",
+            "content_type": content_type,
             "provider": f"{Path(renderer).name}:enhanced-local",
             "provider_kind": "local",
             "model": Path(renderer).name,
             "voices": voices or {"host": os.environ.get("AI_AUDIO_TTS_VOICE", "en-us").strip() or "en-us"},
             "turn_count": len(rendered_turns),
             "chunk_count": len(segments),
-            "enhancement_profile": "role-voice-variants+pacing+ffmpeg-normalization",
+            "enhancement_profile": f"role-voice-variants+pacing+ffmpeg-normalization+{extension}-delivery",
             "benchmark_note": "Local espeak-ng fallback optimized for clarity; not equivalent to neural ElevenLabs production TTS.",
-            "extension": "wav",
-            "filename": "ai-generated-episode.wav",
+            "extension": extension,
+            "filename": f"ai-generated-episode.{extension}",
         }
 
 
@@ -5921,20 +6179,31 @@ async def stream_podcast(podcast_id: str, request: Request):
     if not podcast.get("is_playable", bool(podcast.get("media_path") or podcast.get("external_media_url"))):
         raise HTTPException(status_code=400, detail="This AI-created draft does not have playable media yet")
 
-    await db.podcasts.update_one({"id": podcast_id}, {"$inc": {"play_count": 1}})
-    if podcast.get("show_id"):
-        await db.shows.update_one({"id": podcast["show_id"]}, {"$set": {"updated_at": now_iso()}})
+    range_header = request.headers.get("range")
+    should_count_play = should_count_stream_play(range_header)
 
     if podcast.get("external_media_url"):
+        if should_count_play:
+            await db.podcasts.update_one({"id": podcast_id}, {"$inc": {"play_count": 1}})
+            if podcast.get("show_id"):
+                await db.shows.update_one({"id": podcast["show_id"]}, {"$set": {"updated_at": now_iso()}})
         return RedirectResponse(podcast["external_media_url"])
 
     try:
-        data, ct = get_object(podcast["media_path"])
-        return Response(
-            content=data,
-            media_type=podcast.get("content_type", ct),
-            headers={"Accept-Ranges": "bytes", "Content-Disposition": f'inline; filename="{podcast.get("original_filename", "podcast")}"'},
-        )
+        content_type = podcast.get("content_type") or mimetypes.guess_type(podcast.get("original_filename", ""))[0] or "application/octet-stream"
+        filename = podcast.get("original_filename", "podcast")
+        if get_storage_backend() == "local":
+            response = stream_local_object(podcast["media_path"], content_type, request, filename)
+        else:
+            response = stream_cached_or_remote_object(podcast["media_path"], content_type, request, filename)
+
+        if should_count_play:
+            await db.podcasts.update_one({"id": podcast_id}, {"$inc": {"play_count": 1}})
+            if podcast.get("show_id"):
+                await db.shows.update_one({"id": podcast["show_id"]}, {"$set": {"updated_at": now_iso()}})
+        return response
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Stream error: {e}")
         raise HTTPException(status_code=500, detail="Failed to stream episode")
