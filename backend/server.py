@@ -2414,13 +2414,29 @@ def stitch_audio_segments(segments: List[bytes], extension: str = "mp3") -> byte
         return data
 
 
+def local_tts_voice_profile() -> str:
+    raw_profile = os.environ.get("AI_AUDIO_TTS_LOCAL_VOICE_PROFILE", "proof_studio").strip().lower()
+    normalized = raw_profile.replace("-", "_")
+    if normalized in {"proof_studio", "proof", "audioraq_proof"}:
+        return "proof_studio"
+    if normalized in {"dialogue", "multi_voice", "multivoice"}:
+        return "dialogue"
+    return "proof_studio"
+
+
 def local_tts_role_config(voice_role: str) -> Dict[str, str]:
     role = voice_role if voice_role in AI_AUDIO_VOICE_ROLES else "host"
     role_key = role.upper()
-    voice_defaults = {"host": "en-us+m3", "guest": "en-us+f3", "narrator": "en-us+m1"}
-    speed_defaults = {"host": "158", "guest": "150", "narrator": "142"}
-    pitch_defaults = {"host": "48", "guest": "58", "narrator": "42"}
-    amplitude_defaults = {"host": "145", "guest": "135", "narrator": "140"}
+    if local_tts_voice_profile() == "proof_studio":
+        voice_defaults = {"host": "en-us+m3", "guest": "en-us+m3", "narrator": "en-us+m3"}
+        speed_defaults = {"host": "158", "guest": "158", "narrator": "158"}
+        pitch_defaults = {"host": "48", "guest": "48", "narrator": "48"}
+        amplitude_defaults = {"host": "145", "guest": "145", "narrator": "145"}
+    else:
+        voice_defaults = {"host": "en-us+m3", "guest": "en-us+f3", "narrator": "en-us+m1"}
+        speed_defaults = {"host": "158", "guest": "150", "narrator": "142"}
+        pitch_defaults = {"host": "48", "guest": "58", "narrator": "42"}
+        amplitude_defaults = {"host": "145", "guest": "135", "narrator": "140"}
     return {
         "voice": os.environ.get(f"AI_AUDIO_TTS_LOCAL_VOICE_{role_key}", voice_defaults[role]).strip() or voice_defaults[role],
         "speed": os.environ.get(f"AI_AUDIO_TTS_LOCAL_SPEED_{role_key}", speed_defaults[role]).strip() or speed_defaults[role],
@@ -2477,7 +2493,7 @@ def postprocess_local_wav_audio(data: bytes) -> bytes:
 
 
 def transcode_local_tts_output(data: bytes) -> Tuple[bytes, str, str]:
-    output_format = os.environ.get("AI_AUDIO_TTS_LOCAL_OUTPUT_FORMAT", "mp3").strip().lower() or "mp3"
+    output_format = os.environ.get("AI_AUDIO_TTS_LOCAL_OUTPUT_FORMAT", "wav").strip().lower() or "wav"
     if output_format in {"wav", "wave"}:
         return data, "audio/wav", "wav"
     if output_format not in {"mp3", "mpeg"}:
@@ -2534,9 +2550,8 @@ def render_local_ai_audio(script_text: str, turns: Optional[List[Dict[str, str]]
     if use_multivoice and turns:
         rendered_turns = split_audio_turns_for_tts(turns)
     else:
-        voice = os.environ.get("AI_AUDIO_TTS_VOICE", "en-us").strip() or "en-us"
-        speed = os.environ.get("AI_AUDIO_TTS_SPEED", "155").strip() or "155"
-        rendered_turns = [{"speaker": "Host", "voice_role": "host", "text": script_text, "voice": voice, "speed": speed}]
+        host_config = local_tts_role_config("host")
+        rendered_turns = [{"speaker": "Host", "voice_role": "host", "text": script_text, **host_config}]
 
     with tempfile.TemporaryDirectory(prefix="audioraq-ai-audio-") as temp_dir:
         temp_path = Path(temp_dir)
@@ -2544,11 +2559,12 @@ def render_local_ai_audio(script_text: str, turns: Optional[List[Dict[str, str]]
         voices = {}
         for index, turn in enumerate(rendered_turns):
             role = turn.get("voice_role") if turn.get("voice_role") in AI_AUDIO_VOICE_ROLES else "host"
+            host_config = local_tts_role_config("host")
             config = local_tts_role_config(role) if use_multivoice and turns else {
-                "voice": turn.get("voice") or "en-us",
-                "speed": turn.get("speed") or "155",
-                "pitch": os.environ.get("AI_AUDIO_TTS_LOCAL_PITCH_HOST", "48"),
-                "amplitude": os.environ.get("AI_AUDIO_TTS_LOCAL_AMPLITUDE_HOST", "145"),
+                "voice": turn.get("voice") or host_config["voice"],
+                "speed": turn.get("speed") or host_config["speed"],
+                "pitch": turn.get("pitch") or host_config["pitch"],
+                "amplitude": turn.get("amplitude") or host_config["amplitude"],
             }
             voices[role] = config["voice"]
             script_path = temp_path / f"script-{index:03d}.txt"
@@ -2594,6 +2610,7 @@ def render_local_ai_audio(script_text: str, turns: Optional[List[Dict[str, str]]
             "chunk_count": len(segments),
             "enhancement_profile": f"role-voice-variants+pacing+ffmpeg-normalization+{extension}-delivery",
             "benchmark_note": "Local espeak-ng fallback optimized for clarity; not equivalent to neural ElevenLabs production TTS.",
+            "voice_profile": local_tts_voice_profile(),
             "extension": extension,
             "filename": f"ai-generated-episode.{extension}",
         }
@@ -5827,6 +5844,7 @@ async def create_ai_podcast_episode(
         "ai_audio_provider_kind": rendered_audio.get("provider_kind", ""),
         "ai_audio_model": rendered_audio.get("model", ""),
         "ai_audio_voices": rendered_audio.get("voices", {}),
+        "ai_audio_voice_profile": rendered_audio.get("voice_profile", ""),
         "ai_audio_turn_count": rendered_audio.get("turn_count", len(audio_turns)),
         "ai_audio_script": audio_script,
         "ai_audio_turns": audio_turns,
