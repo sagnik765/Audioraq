@@ -40,6 +40,11 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Iterator, List, Literal, Optional, Set, Tuple
 from urllib.parse import urlencode, urlparse
 
+from backend.voice_quality import (
+    build_voice_context_from_intake,
+    score_podcast_voice_listenability,
+)
+
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -1330,6 +1335,9 @@ def voice_clarity_unavailable(status: str, error: str = "") -> Dict[str, Any]:
         "rms_dbfs": None,
         "peak_dbfs": None,
         "silence_ratio": None,
+        "pause_ratio": None,
+        "dynamic_range_db": None,
+        "crest_factor_db": None,
         "clipping_ratio": None,
         "zero_crossing_rate": None,
         "error": error[:240],
@@ -1372,11 +1380,29 @@ def analyze_voice_clarity(data: bytes, filename: str, content_type: str, provide
         sample_rate = 16000
         silence_threshold = int(32768 * 0.012)
         clipping_threshold = int(32768 * 0.98)
+        window_rms_values: List[float] = []
+        quiet_windows = 0
+        window_sum_squares = 0.0
+        window_count = 0
 
         with wave.open(extracted_path, "rb") as wav_file:
             sample_rate = wav_file.getframerate() or sample_rate
             if wav_file.getsampwidth() != 2:
                 raise RuntimeError("Voice clarity analyzer expected 16-bit PCM audio")
+            window_size = max(1, sample_rate // 10)
+
+            def finalize_window():
+                nonlocal quiet_windows, window_count, window_sum_squares
+                if window_count <= 0:
+                    return
+                window_rms = math.sqrt(window_sum_squares / window_count)
+                window_rms_dbfs = 20 * math.log10(max(window_rms, 1) / 32768)
+                window_rms_values.append(window_rms_dbfs)
+                if window_rms_dbfs <= -35:
+                    quiet_windows += 1
+                window_sum_squares = 0.0
+                window_count = 0
+
             while True:
                 frames = wav_file.readframes(sample_rate)
                 if not frames:
@@ -1390,6 +1416,8 @@ def analyze_voice_clarity(data: bytes, filename: str, content_type: str, provide
                     abs_value = abs(value)
                     total_samples += 1
                     sum_squares += value * value
+                    window_sum_squares += value * value
+                    window_count += 1
                     peak_abs = max(peak_abs, abs_value)
                     if abs_value <= silence_threshold:
                         quiet_samples += 1
@@ -1400,6 +1428,9 @@ def analyze_voice_clarity(data: bytes, filename: str, content_type: str, provide
                         zero_crossings += 1
                     if sign:
                         previous_sign = sign
+                    if window_count >= window_size:
+                        finalize_window()
+            finalize_window()
 
         if total_samples <= 0:
             return voice_clarity_unavailable("empty_audio", "No decodable audio samples were found.")
@@ -1409,8 +1440,26 @@ def analyze_voice_clarity(data: bytes, filename: str, content_type: str, provide
         rms_dbfs = 20 * math.log10(max(rms, 1) / 32768)
         peak_dbfs = 20 * math.log10(max(peak_abs, 1) / 32768)
         silence_ratio = quiet_samples / total_samples
+        pause_ratio = quiet_windows / max(1, len(window_rms_values))
         clipping_ratio = clipped_samples / total_samples
         zero_crossing_rate = zero_crossings / total_samples
+        crest_factor_db = peak_dbfs - rms_dbfs
+
+        def percentile(values: List[float], pct: float) -> Optional[float]:
+            if not values:
+                return None
+            ordered = sorted(values)
+            position = (len(ordered) - 1) * pct
+            lower = math.floor(position)
+            upper = math.ceil(position)
+            if lower == upper:
+                return ordered[int(position)]
+            return ordered[lower] * (upper - position) + ordered[upper] * (position - lower)
+
+        voiced_windows = [value for value in window_rms_values if value > -60]
+        low_dynamic = percentile(voiced_windows, 0.10)
+        high_dynamic = percentile(voiced_windows, 0.90)
+        dynamic_range_db = (high_dynamic - low_dynamic) if low_dynamic is not None and high_dynamic is not None else None
 
         score = 100.0
         if duration_seconds < 5:
@@ -1450,6 +1499,9 @@ def analyze_voice_clarity(data: bytes, filename: str, content_type: str, provide
             "rms_dbfs": round(rms_dbfs, 2),
             "peak_dbfs": round(peak_dbfs, 2),
             "silence_ratio": round(silence_ratio, 4),
+            "pause_ratio": round(pause_ratio, 4),
+            "dynamic_range_db": round(dynamic_range_db, 2) if dynamic_range_db is not None else None,
+            "crest_factor_db": round(crest_factor_db, 2),
             "clipping_ratio": round(clipping_ratio, 6),
             "zero_crossing_rate": round(zero_crossing_rate, 6),
             "error": "",
@@ -1910,6 +1962,7 @@ def build_agent2_scorecard(
     rlaif_feedback: Dict[str, Any],
     generation: Optional[Dict[str, Any]] = None,
     media_analysis: Optional[Dict[str, Any]] = None,
+    voice_review: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     generation = generation or {}
     features = gan_review.get("features", {})
@@ -1945,6 +1998,9 @@ def build_agent2_scorecard(
     ]
     if voice_clarity_score is not None:
         readiness_inputs.append(voice_clarity_score)
+    voice_listenability_score = (voice_review or {}).get("listenability_score")
+    if voice_listenability_score is not None:
+        readiness_inputs.append(float(voice_listenability_score))
     readiness_score = min(100, sum(readiness_inputs) / max(1, len(readiness_inputs)))
 
     scorecard = {
@@ -1957,6 +2013,11 @@ def build_agent2_scorecard(
     }
     if voice_clarity_score is not None:
         scorecard["voice_clarity"] = agent2_scorecard_item(voice_clarity_score, voice_clarity.get("summary") or "Measured signal clarity from rendered or uploaded audio.")
+    if voice_review and voice_review.get("listenability_score") is not None:
+        scorecard["podcast_voice_listenability"] = agent2_scorecard_item(
+            float(voice_review.get("listenability_score") or 0),
+            voice_review.get("summary") or "Long-form podcast voice listenability.",
+        )
     scorecard["publish_readiness"] = agent2_scorecard_item(readiness_score, "Combined Agent 2 signal for whether this can move toward publishing.")
     return scorecard
 
@@ -1967,12 +2028,32 @@ def evaluate_agent2_quality(
     generation: Optional[Dict[str, Any]] = None,
     media_analysis: Optional[Dict[str, Any]] = None,
     source_kind: str = "episode",
+    voice_context: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     review_text = agent2_build_review_text(title, description, generation=generation, media_analysis=media_analysis)
     gan_review = agent2_gan_inspired_discriminator(review_text, generation=generation)
     rag_review = agent2_rag_safety_review(review_text)
     rlaif_feedback = agent2_rlaif_self_feedback(gan_review, rag_review, generation=generation)
-    scorecard = build_agent2_scorecard(gan_review, rag_review, rlaif_feedback, generation=generation, media_analysis=media_analysis)
+    voice_review = score_podcast_voice_listenability(
+        media_analysis,
+        generation=generation,
+        voice_context=voice_context,
+        title=title,
+        description=description,
+    )
+    scorecard = build_agent2_scorecard(
+        gan_review,
+        rag_review,
+        rlaif_feedback,
+        generation=generation,
+        media_analysis=media_analysis,
+        voice_review=voice_review,
+    )
+    voice_score = voice_review.get("listenability_score")
+    if voice_score is not None:
+        quality_score = round((rlaif_feedback["reward_score"] * 0.65) + (float(voice_score) * 0.35), 1)
+    else:
+        quality_score = rlaif_feedback["reward_score"]
 
     status = "pass"
     if rag_review["status"] == "blocked":
@@ -1980,27 +2061,34 @@ def evaluate_agent2_quality(
     voice_clarity = (media_analysis or {}).get("voice_clarity") or {}
     if voice_clarity.get("status") == "poor":
         status = "revise"
-    elif rag_review["status"] == "review" or gan_review["label"] == "high" or rlaif_feedback["reward_score"] < 72:
+    elif voice_review.get("status") == "revise":
+        status = "revise"
+    elif rag_review["status"] == "review" or gan_review["label"] == "high" or quality_score < 72:
         status = "revise"
 
     clarity_summary = ""
     if voice_clarity:
         clarity_summary = f"; voice clarity {voice_clarity.get('score', 0)}/100 {voice_clarity.get('status', '')}"
+    voice_summary = ""
+    if voice_score is not None:
+        voice_summary = f"; voice listenability {voice_score}/100 {voice_review.get('status', '')}"
 
     return {
         "agent": "Agent 2 - Podcast Quality Reviewer",
         "version": AGENT2_VERSION,
         "source_kind": source_kind,
         "status": status,
-        "quality_score": rlaif_feedback["reward_score"],
+        "quality_score": quality_score,
         "gan_discriminator": gan_review,
         "rag_safety": rag_review,
         "rlaif": rlaif_feedback,
         "scorecard": scorecard,
         "voice_clarity": voice_clarity,
+        "podcast_voice": voice_review,
         "summary": (
-            f"Agent 2 quality score {rlaif_feedback['reward_score']}/100; "
-            f"AI-risk {gan_review['label']} {gan_review['score']}; RAG safety {rag_review['status']}{clarity_summary}."
+            f"Agent 2 quality score {quality_score}/100; "
+            f"AI-risk {gan_review['label']} {gan_review['score']}; RAG safety {rag_review['status']}"
+            f"{clarity_summary}{voice_summary}."
         ),
         "created_at": now_iso(),
     }
@@ -2461,7 +2549,7 @@ def postprocess_local_wav_audio(data: bytes) -> bytes:
         return data
     audio_filter = os.environ.get(
         "AI_AUDIO_TTS_LOCAL_FILTER",
-        "highpass=f=80,lowpass=f=12000,loudnorm=I=-16:TP=-1.5:LRA=11",
+        "highpass=f=70,lowpass=f=12000,loudnorm=I=-18.5:TP=-3.5:LRA=7",
     ).strip()
     with tempfile.TemporaryDirectory(prefix="audioraq-local-tts-post-") as temp_dir:
         temp_path = Path(temp_dir)
@@ -2761,9 +2849,9 @@ def render_local_http_ai_audio(script_text: str, turns: List[Dict[str, str]]) ->
     payload = {
         "script_text": script_text,
         "turns": split_audio_turns_for_tts(turns),
-        "target_loudness_lufs": parse_float_env("AI_AUDIO_TARGET_LUFS", -16.0),
+        "target_loudness_lufs": parse_float_env("AI_AUDIO_TARGET_LUFS", -18.5),
         "format": os.environ.get("AI_AUDIO_LOCAL_TTS_FORMAT", "wav").strip().lower() or "wav",
-        "quality_profile": os.environ.get("AI_AUDIO_LOCAL_TTS_PROFILE", "podcast-dialogue").strip() or "podcast-dialogue",
+        "quality_profile": os.environ.get("AI_AUDIO_LOCAL_TTS_PROFILE", "podcast-education-calm").strip() or "podcast-education-calm",
     }
     response = requests.post(
         f"{base_url}/v1/render",
@@ -2834,6 +2922,35 @@ def render_ai_audio_bytes(script_text: str, turns: Optional[List[Dict[str, str]]
         status_code=502,
         detail=f"AI audio rendering failed across configured providers. Last errors: {'; '.join(provider_errors[-3:])}",
     )
+
+
+def enforce_ai_audio_listenability_gate(quality_agent: Dict[str, Any]) -> None:
+    if not parse_bool_env("AI_AUDIO_ENFORCE_LISTENABILITY_GATE", True):
+        return
+    voice_review = (quality_agent or {}).get("podcast_voice") or {}
+    min_score = parse_float_env("AI_AUDIO_MIN_LISTENABILITY_SCORE", 68.0)
+    score = voice_review.get("listenability_score")
+    status = voice_review.get("status")
+    require_metrics = parse_bool_env("AI_AUDIO_REQUIRE_VOICE_METRICS", False)
+
+    if score is None:
+        if require_metrics:
+            raise HTTPException(
+                status_code=422,
+                detail="Agent 2 could not measure voice listenability. Install ffmpeg or disable AI_AUDIO_REQUIRE_VOICE_METRICS for development.",
+            )
+        return
+
+    if status == "revise" or float(score) < min_score:
+        actions = normalize_string_list(voice_review.get("improvement_actions"), limit=3)
+        guidance = " ".join(actions) if actions else "Use a local neural TTS worker and re-render with a calmer podcast profile."
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"Agent 2 blocked publishing because podcast voice listenability scored {score}/100 "
+                f"below the required {min_score}/100. {guidance}"
+            ),
+        )
 
 
 def build_fallback_ai_generation(brief: Dict[str, Any], show: Dict[str, Any]) -> Dict[str, Any]:
@@ -5129,15 +5246,24 @@ async def generate_ai_podcast_draft(req: GenerateAIPodcastDraftRequest, request:
         generation.get("suggested_description") or build_ai_publish_description(generation),
         generation=generation,
         source_kind="ai_draft",
+        voice_context=build_voice_context_from_intake(intake, generation.get("recommended_category") or show.get("category", ""), show),
     )
     agent2_iterations = [{"iteration": 1, "event": "initial_review", "review": agent2_review}]
     revised_generation = await revise_ai_generation_with_agent2_feedback(intake, show, generation, agent2_review)
     if revised_generation:
         revised_agent2_review = evaluate_agent2_quality(
-            revised_generation.get("episode_title") or generation.get("episode_title") or intake["contentInput"].get("topic") or "Untitled AI Episode",
+            revised_generation.get("episode_title")
+            or generation.get("episode_title")
+            or intake["contentInput"].get("topic")
+            or "Untitled AI Episode",
             revised_generation.get("suggested_description") or build_ai_publish_description(revised_generation),
             generation=revised_generation,
             source_kind="ai_draft_revision",
+            voice_context=build_voice_context_from_intake(
+                intake,
+                revised_generation.get("recommended_category") or show.get("category", ""),
+                show,
+            ),
         )
         revision_improved = revised_agent2_review.get("quality_score", 0) >= agent2_review.get("quality_score", 0)
         revision_safe = revised_agent2_review.get("rag_safety", {}).get("status") != "blocked"
@@ -5647,12 +5773,14 @@ async def upload_podcast(
         generation=ai_draft.get("generation") if ai_draft else None,
         media_analysis=media_analysis,
     )
+    voice_context = build_voice_context_from_intake(ai_draft.get("intake") if ai_draft else {}, normalized_category, show)
     quality_agent = evaluate_agent2_quality(
         title,
         description,
         generation=ai_draft.get("generation") if ai_draft else None,
         media_analysis=media_analysis,
         source_kind="ai_audio_upload" if ai_draft else "recorded_upload",
+        voice_context=voice_context,
     )
     moderation = merge_agent2_quality_into_moderation(moderation, quality_agent)
     resolved_rating = MATURE_RATING if moderation.get("recommended_age_gate") == MATURE_RATING else selected_rating
@@ -5788,13 +5916,16 @@ async def create_ai_podcast_episode(
         generation=ai_draft.get("generation"),
         media_analysis=media_analysis,
     )
+    voice_context = build_voice_context_from_intake(ai_draft.get("intake") or {}, normalized_category, show)
     quality_agent = evaluate_agent2_quality(
         final_title,
         final_description,
         generation=ai_draft.get("generation"),
         media_analysis=media_analysis,
         source_kind="ai_audio_render",
+        voice_context=voice_context,
     )
+    enforce_ai_audio_listenability_gate(quality_agent)
     moderation = merge_agent2_quality_into_moderation(moderation, quality_agent)
     resolved_rating = MATURE_RATING if moderation.get("recommended_age_gate") == MATURE_RATING else selected_rating
     episode_id = str(uuid.uuid4())

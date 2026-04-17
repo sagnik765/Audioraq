@@ -32,6 +32,44 @@ logger = logging.getLogger("audioraq.ai_studio_tts_worker")
 
 VOICE_ROLES = {"host", "guest", "narrator"}
 DEFAULT_ENGINE_ORDER = ["kokoro", "chatterbox", "espeak"]
+QUALITY_PROFILES: Dict[str, Dict[str, Any]] = {
+    "podcast-dialogue": {
+        "target_loudness_lufs": -18.0,
+        "true_peak_db": -3.0,
+        "lra": 7,
+        "max_chars_per_chunk": 520,
+        "max_sentences_per_chunk": 2,
+        "pause_between_chunks_ms": 260,
+        "kokoro_speed": 0.90,
+        "chatterbox_temperature": 0.78,
+        "chatterbox_exaggeration": 0.45,
+        "chatterbox_cfg_weight": 0.42,
+    },
+    "podcast-education-calm": {
+        "target_loudness_lufs": -18.5,
+        "true_peak_db": -3.5,
+        "lra": 6,
+        "max_chars_per_chunk": 440,
+        "max_sentences_per_chunk": 2,
+        "pause_between_chunks_ms": 320,
+        "kokoro_speed": 0.86,
+        "chatterbox_temperature": 0.72,
+        "chatterbox_exaggeration": 0.38,
+        "chatterbox_cfg_weight": 0.45,
+    },
+    "podcast-storytelling": {
+        "target_loudness_lufs": -19.0,
+        "true_peak_db": -3.5,
+        "lra": 8,
+        "max_chars_per_chunk": 380,
+        "max_sentences_per_chunk": 1,
+        "pause_between_chunks_ms": 380,
+        "kokoro_speed": 0.84,
+        "chatterbox_temperature": 0.82,
+        "chatterbox_exaggeration": 0.58,
+        "chatterbox_cfg_weight": 0.38,
+    },
+}
 _kokoro_pipelines: Dict[str, Any] = {}
 _chatterbox_models: Dict[str, Any] = {}
 
@@ -57,6 +95,26 @@ def env_int(name: str, default: int) -> int:
         return default
 
 
+def quality_profile_settings(profile: str) -> Dict[str, Any]:
+    normalized = (profile or "podcast-education-calm").strip().lower().replace("_", "-")
+    aliases = {
+        "dialogue": "podcast-dialogue",
+        "education": "podcast-education-calm",
+        "educational": "podcast-education-calm",
+        "explainer": "podcast-education-calm",
+        "story": "podcast-storytelling",
+        "narrative": "podcast-storytelling",
+        "storytelling": "podcast-storytelling",
+    }
+    key = aliases.get(normalized, normalized)
+    selected = QUALITY_PROFILES.get(key, QUALITY_PROFILES["podcast-education-calm"])
+    return {**QUALITY_PROFILES["podcast-dialogue"], **selected}
+
+
+def profile_float(settings: Dict[str, Any], env_name: str, key: str) -> float:
+    return env_float(env_name, float(settings.get(key, QUALITY_PROFILES["podcast-dialogue"][key])))
+
+
 def normalize_role(role: str) -> str:
     role = (role or "host").strip().lower()
     return role if role in VOICE_ROLES else "host"
@@ -72,23 +130,49 @@ def normalize_text(text: str, keep_stage_tags: bool = True) -> str:
     return text
 
 
-def split_text(text: str, max_chars: int) -> List[str]:
+def split_text(text: str, max_chars: int, max_sentences: int = 2) -> List[str]:
     text = normalize_text(text)
     if not text:
         return []
-    if len(text) <= max_chars:
+    sentences = [sentence.strip() for sentence in re.split(r"(?<=[.!?])\s+", text) if sentence.strip()]
+    if len(text) <= max_chars and len(sentences) <= max_sentences:
         return [text]
 
     parts = []
     buffer = ""
-    for sentence in re.split(r"(?<=[.!?])\s+", text):
+    sentence_count = 0
+
+    def append_long_sentence(sentence: str) -> None:
+        words = sentence.split()
+        buffer_words: List[str] = []
+        for word in words:
+            candidate = " ".join([*buffer_words, word]).strip()
+            if len(candidate) <= max_chars:
+                buffer_words.append(word)
+                continue
+            if buffer_words:
+                parts.append(" ".join(buffer_words))
+            buffer_words = [word]
+        if buffer_words:
+            parts.append(" ".join(buffer_words))
+
+    for sentence in sentences or [text]:
+        if len(sentence) > max_chars:
+            if buffer:
+                parts.append(buffer)
+                buffer = ""
+                sentence_count = 0
+            append_long_sentence(sentence)
+            continue
         candidate = f"{buffer} {sentence}".strip()
-        if len(candidate) <= max_chars:
+        if len(candidate) <= max_chars and sentence_count < max_sentences:
             buffer = candidate
+            sentence_count += 1
             continue
         if buffer:
             parts.append(buffer)
-        buffer = sentence[:max_chars].rsplit(" ", 1)[0].strip()
+        buffer = sentence
+        sentence_count = 1
     if buffer:
         parts.append(buffer)
     return parts
@@ -172,9 +256,48 @@ def write_temp_wav(data: bytes, directory: Path, index: int) -> Path:
     return path
 
 
-def stitch_wav_segments(segments: List[bytes]) -> bytes:
+def silence_wav_bytes(duration_ms: int, reference_segment: bytes) -> bytes:
+    if duration_ms <= 0:
+        return b""
+    sample_rate = 24000
+    channels = 1
+    sample_width = 2
+    try:
+        with wave.open(io.BytesIO(reference_segment), "rb") as wav_file:
+            sample_rate = wav_file.getframerate() or sample_rate
+            channels = wav_file.getnchannels() or channels
+            sample_width = wav_file.getsampwidth() or sample_width
+    except Exception:
+        pass
+
+    frame_count = max(1, int(sample_rate * (duration_ms / 1000.0)))
+    output = io.BytesIO()
+    with wave.open(output, "wb") as wav_file:
+        wav_file.setnchannels(channels)
+        wav_file.setsampwidth(sample_width)
+        wav_file.setframerate(sample_rate)
+        wav_file.writeframes(b"\x00" * frame_count * channels * sample_width)
+    return output.getvalue()
+
+
+def interleave_silence(segments: List[bytes], silence_ms: int) -> List[bytes]:
+    if silence_ms <= 0 or len(segments) <= 1:
+        return segments
+    silence = silence_wav_bytes(silence_ms, segments[0])
+    if not silence:
+        return segments
+    interleaved = []
+    for index, segment in enumerate(segments):
+        if index:
+            interleaved.append(silence)
+        interleaved.append(segment)
+    return interleaved
+
+
+def stitch_wav_segments(segments: List[bytes], silence_ms: int = 0) -> bytes:
     if not segments:
         raise RuntimeError("No audio segments were generated")
+    segments = interleave_silence(segments, silence_ms)
     if len(segments) == 1:
         return segments[0]
 
@@ -213,7 +336,13 @@ def stitch_wav_segments(segments: List[bytes]) -> bytes:
         return output_path.read_bytes()
 
 
-def postprocess_audio(data: bytes, target_loudness_lufs: float, output_format: str) -> bytes:
+def postprocess_audio(
+    data: bytes,
+    target_loudness_lufs: float,
+    output_format: str,
+    true_peak_db: float = -3.0,
+    loudness_range: float = 7.0,
+) -> bytes:
     ffmpeg = shutil.which("ffmpeg")
     if not ffmpeg:
         return data
@@ -225,7 +354,7 @@ def postprocess_audio(data: bytes, target_loudness_lufs: float, output_format: s
         output_path = temp_path / f"output.{normalized_format}"
         input_path.write_bytes(data)
         codec_args = ["-acodec", "libmp3lame", "-b:a", "160k"] if normalized_format == "mp3" else ["-acodec", "pcm_s16le"]
-        default_filter = f"highpass=f=70,lowpass=f=14000,loudnorm=I={target_loudness_lufs}:TP=-1.5:LRA=11"
+        default_filter = f"highpass=f=70,lowpass=f=14000,loudnorm=I={target_loudness_lufs}:TP={true_peak_db}:LRA={loudness_range}"
         audio_filter = os.environ.get("AUDIORAQ_TTS_MASTERING_FILTER", default_filter).strip() or default_filter
         cmd = [
             ffmpeg,
@@ -261,9 +390,9 @@ class VoiceTurn(BaseModel):
 class RenderRequest(BaseModel):
     script_text: str = ""
     turns: List[VoiceTurn] = Field(default_factory=list)
-    target_loudness_lufs: float = -16.0
+    target_loudness_lufs: float = -18.5
     format: Literal["wav", "mp3"] = "wav"
-    quality_profile: str = "podcast-dialogue"
+    quality_profile: str = "podcast-education-calm"
     engine: Optional[str] = ""
 
 
@@ -288,10 +417,15 @@ def request_turns(req: RenderRequest) -> List[VoiceTurn]:
 
 
 def expand_turns(req: RenderRequest) -> List[VoiceTurn]:
-    max_chars = env_int("AUDIORAQ_TTS_MAX_CHARS_PER_TURN", 900)
+    settings = quality_profile_settings(req.quality_profile)
+    max_chars = min(
+        env_int("AUDIORAQ_TTS_MAX_CHARS_PER_TURN", 900),
+        int(settings.get("max_chars_per_chunk", 520)),
+    )
+    max_sentences = int(settings.get("max_sentences_per_chunk", 2))
     expanded = []
     for turn in request_turns(req):
-        for part in split_text(turn.text, max_chars):
+        for part in split_text(turn.text, max_chars, max_sentences=max_sentences):
             expanded.append(VoiceTurn(speaker=turn.speaker, voice_role=turn.voice_role, text=part))
     return expanded
 
@@ -322,8 +456,9 @@ def get_kokoro_pipeline(lang_code: str):
 
 
 def render_kokoro(req: RenderRequest) -> RenderedAudio:
+    settings = quality_profile_settings(req.quality_profile)
     lang_code = os.environ.get("AUDIORAQ_TTS_KOKORO_LANG", "a").strip() or "a"
-    speed = env_float("AUDIORAQ_TTS_KOKORO_SPEED", 0.94)
+    speed = profile_float(settings, "AUDIORAQ_TTS_KOKORO_SPEED", "kokoro_speed")
     pipeline = get_kokoro_pipeline(lang_code)
     segments = []
 
@@ -338,9 +473,16 @@ def render_kokoro(req: RenderRequest) -> RenderedAudio:
         for item in generator:
             segments.append(samples_to_wav_bytes(extract_generated_audio(item), 24000))
 
-    stitched = stitch_wav_segments(segments)
+    stitched = stitch_wav_segments(segments, silence_ms=int(settings.get("pause_between_chunks_ms", 260)))
     output_format = req.format or "wav"
-    mastered = postprocess_audio(stitched, req.target_loudness_lufs, output_format)
+    target_loudness = req.target_loudness_lufs or float(settings["target_loudness_lufs"])
+    mastered = postprocess_audio(
+        stitched,
+        target_loudness,
+        output_format,
+        true_peak_db=float(settings.get("true_peak_db", -3.0)),
+        loudness_range=float(settings.get("lra", 7)),
+    )
     return RenderedAudio(
         data=mastered,
         provider="ai-studio:kokoro",
@@ -393,11 +535,12 @@ def chatterbox_prompt_for_role(role: str) -> str:
 
 
 def render_chatterbox(req: RenderRequest) -> RenderedAudio:
+    settings = quality_profile_settings(req.quality_profile)
     model = get_chatterbox_model()
     segments = []
-    exaggeration = env_float("AUDIORAQ_TTS_CHATTERBOX_EXAGGERATION", 0.55)
-    cfg_weight = env_float("AUDIORAQ_TTS_CHATTERBOX_CFG_WEIGHT", 0.4)
-    temperature = env_float("AUDIORAQ_TTS_CHATTERBOX_TEMPERATURE", 0.8)
+    exaggeration = profile_float(settings, "AUDIORAQ_TTS_CHATTERBOX_EXAGGERATION", "chatterbox_exaggeration")
+    cfg_weight = profile_float(settings, "AUDIORAQ_TTS_CHATTERBOX_CFG_WEIGHT", "chatterbox_cfg_weight")
+    temperature = profile_float(settings, "AUDIORAQ_TTS_CHATTERBOX_TEMPERATURE", "chatterbox_temperature")
 
     for turn in expand_turns(req):
         role = normalize_role(turn.voice_role)
@@ -417,9 +560,16 @@ def render_chatterbox(req: RenderRequest) -> RenderedAudio:
             audio = model.generate(text, **minimal_kwargs)
         segments.append(samples_to_wav_bytes(audio, int(getattr(model, "sr", 24000))))
 
-    stitched = stitch_wav_segments(segments)
+    stitched = stitch_wav_segments(segments, silence_ms=int(settings.get("pause_between_chunks_ms", 260)))
     output_format = req.format or "wav"
-    mastered = postprocess_audio(stitched, req.target_loudness_lufs, output_format)
+    target_loudness = req.target_loudness_lufs or float(settings["target_loudness_lufs"])
+    mastered = postprocess_audio(
+        stitched,
+        target_loudness,
+        output_format,
+        true_peak_db=float(settings.get("true_peak_db", -3.0)),
+        loudness_range=float(settings.get("lra", 7)),
+    )
     return RenderedAudio(
         data=mastered,
         provider="ai-studio:chatterbox",
@@ -446,6 +596,7 @@ def espeak_config(role: str) -> Dict[str, str]:
 
 
 def render_espeak(req: RenderRequest) -> RenderedAudio:
+    settings = quality_profile_settings(req.quality_profile)
     renderer = shutil.which("espeak-ng") or shutil.which("espeak")
     if not renderer:
         raise RuntimeError("espeak-ng is not installed")
@@ -479,9 +630,16 @@ def render_espeak(req: RenderRequest) -> RenderedAudio:
                 raise RuntimeError(result.stderr or result.stdout or "espeak rendering failed")
             segments.append(output_path.read_bytes())
 
-    stitched = stitch_wav_segments(segments)
+    stitched = stitch_wav_segments(segments, silence_ms=int(settings.get("pause_between_chunks_ms", 260)))
     output_format = req.format or "wav"
-    mastered = postprocess_audio(stitched, req.target_loudness_lufs, output_format)
+    target_loudness = req.target_loudness_lufs or float(settings["target_loudness_lufs"])
+    mastered = postprocess_audio(
+        stitched,
+        target_loudness,
+        output_format,
+        true_peak_db=float(settings.get("true_peak_db", -3.0)),
+        loudness_range=float(settings.get("lra", 7)),
+    )
     return RenderedAudio(
         data=mastered,
         provider="ai-studio:espeak-ng",
@@ -524,6 +682,7 @@ async def status():
         "status": "ok",
         "engine_order": engine_order(RenderRequest(script_text="status")),
         "allow_espeak_fallback": env_bool("AUDIORAQ_TTS_ALLOW_ESPEAK_FALLBACK", True),
+        "quality_profiles": sorted(QUALITY_PROFILES.keys()),
         "tools": available_tools(),
         "kokoro_loaded": bool(_kokoro_pipelines),
         "chatterbox_loaded": bool(_chatterbox_models),

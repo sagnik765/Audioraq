@@ -159,16 +159,18 @@ AI_TEXT_LOCAL_BASE_URL=http://host.docker.internal:11434
 AI_TEXT_LOCAL_MODEL=llama3.2:3b
 AI_AUDIO_TTS_PROVIDER=local_http,local
 AI_AUDIO_LOCAL_TTS_URL=http://host.docker.internal:8015
-AI_AUDIO_LOCAL_TTS_PROFILE=podcast-dialogue
+AI_AUDIO_LOCAL_TTS_PROFILE=podcast-education-calm
 AI_AUDIO_LOCAL_TTS_FORMAT=wav
-AI_AUDIO_TARGET_LUFS=-16
+AI_AUDIO_TARGET_LUFS=-18.5
+AI_AUDIO_ENFORCE_LISTENABILITY_GATE=true
+AI_AUDIO_MIN_LISTENABILITY_SCORE=68
 ```
 
 `AI_TEXT_PROVIDER=ollama,deterministic` routes draft writing, Agent 2 revision, safety review, keyword extraction, and AI recommendations to a local Ollama-compatible endpoint first, then falls back to deterministic logic instead of a paid LLM API. The current code does not bundle an Ollama model; install/run the local model outside the web container and point `AI_TEXT_LOCAL_BASE_URL` at it.
 
 `AI_AUDIO_TTS_PROVIDER=local_http,local` routes audio rendering to a local neural TTS worker first. The worker contract is `POST /v1/render` with JSON `{script_text, turns, target_loudness_lufs, format, quality_profile}` and either an audio response or JSON containing `audio_base64`, `content_type`, `extension`, `provider`, and `model`. This is the seam we will use for Chatterbox/Dia/Kokoro without tying Audioraq to a paid TTS server.
 
-The worker implementation lives in [workers/ai_studio_tts_worker.py](/Users/sagnikroy/Documents/New%20project/Podlyzer-Centralized-Podcast-Hub/workers/ai_studio_tts_worker.py). It supports a local engine order such as `kokoro,chatterbox,espeak`, exposes `/health` and `/v1/status`, masters audio toward `AI_AUDIO_TARGET_LUFS`, and marks fallback audio with `X-Audioraq-TTS-Provider-Kind: local`. For proof-of-work publishing, set `AI_AUDIO_REQUIRE_NEURAL_WORKER=true` and `AUDIORAQ_TTS_ALLOW_ESPEAK_FALLBACK=false` so low-quality fallback audio blocks publishing instead of going live.
+The worker implementation lives in [workers/ai_studio_tts_worker.py](/Users/sagnikroy/Documents/New%20project/Podlyzer-Centralized-Podcast-Hub/workers/ai_studio_tts_worker.py). It supports a local engine order such as `kokoro,chatterbox,espeak`, exposes `/health` and `/v1/status`, masters audio toward `AI_AUDIO_TARGET_LUFS`, and includes listenability profiles such as `podcast-education-calm`, `podcast-dialogue`, and `podcast-storytelling`. For proof-of-work publishing, set `AI_AUDIO_REQUIRE_NEURAL_WORKER=true`, `AUDIORAQ_TTS_ALLOW_ESPEAK_FALLBACK=false`, and keep `AI_AUDIO_ENFORCE_LISTENABILITY_GATE=true` so low-quality fallback or fatiguing audio blocks publishing instead of going live.
 
 `STORAGE_BACKEND=local` removes the hidden dependency on `EMERGENT_LLM_KEY` for media storage. Do not switch an existing live catalog from `emergent` to `local` until existing media has been migrated, otherwise old episode media paths will stop resolving.
 
