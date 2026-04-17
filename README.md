@@ -157,13 +157,18 @@ AI_TEXT_ALLOW_REMOTE=false
 AI_TEXT_LOCAL_ENABLED=true
 AI_TEXT_LOCAL_BASE_URL=http://host.docker.internal:11434
 AI_TEXT_LOCAL_MODEL=llama3.2:3b
-AI_AUDIO_TTS_PROVIDER=local_http,local
-AI_AUDIO_LOCAL_TTS_URL=http://host.docker.internal:8015
+AI_AUDIO_TTS_PROVIDER=local_http
+AI_AUDIO_LOCAL_TTS_URL=http://ai-studio-worker:8015
 AI_AUDIO_LOCAL_TTS_PROFILE=podcast-education-calm
 AI_AUDIO_LOCAL_TTS_FORMAT=wav
 AI_AUDIO_TARGET_LUFS=-18.5
+AI_AUDIO_REQUIRE_NEURAL_WORKER=true
 AI_AUDIO_ENFORCE_LISTENABILITY_GATE=true
 AI_AUDIO_MIN_LISTENABILITY_SCORE=68
+AI_AUDIO_TTS_LOCAL_FALLBACK=false
+AI_STUDIO_INSTALL_KOKORO=true
+AUDIORAQ_TTS_ENGINE=kokoro
+AUDIORAQ_TTS_ALLOW_ESPEAK_FALLBACK=false
 ```
 
 `AI_TEXT_PROVIDER=ollama,deterministic` routes draft writing, Agent 2 revision, safety review, keyword extraction, and AI recommendations to a local Ollama-compatible endpoint first, then falls back to deterministic logic instead of a paid LLM API. The current code does not bundle an Ollama model; install/run the local model outside the web container and point `AI_TEXT_LOCAL_BASE_URL` at it.
@@ -187,6 +192,8 @@ The Oracle Compose file also includes an optional `ai-studio-worker` profile. It
 ```bash
 docker compose --env-file deploy/oracle/oracle.env -f deploy/oracle/docker-compose.oracle.yml --profile ai-studio up -d --build ai-studio-worker
 ```
+
+If `AI_AUDIO_REQUIRE_NEURAL_WORKER=true`, `deploy/oracle/deploy.sh` automatically includes the `ai-studio` profile so future deploys keep the Kokoro worker running.
 
 ### 3b. Enable production AI voices
 

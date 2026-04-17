@@ -14,8 +14,13 @@ fi
 
 cd "${ROOT_DIR}"
 
-docker compose --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" up -d --build
-docker compose --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" ps
+COMPOSE_PROFILE_ARGS=()
+if grep -Eq "^(AI_AUDIO_REQUIRE_NEURAL_WORKER|AI_STUDIO_INSTALL_KOKORO|AI_STUDIO_INSTALL_CHATTERBOX)=true$" "${ENV_FILE}"; then
+  COMPOSE_PROFILE_ARGS=(--profile ai-studio)
+fi
+
+docker compose --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" "${COMPOSE_PROFILE_ARGS[@]}" up -d --build
+docker compose --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" "${COMPOSE_PROFILE_ARGS[@]}" ps
 
 echo
 echo "Audioraq is deploying on Oracle Cloud."

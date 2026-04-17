@@ -116,7 +116,7 @@ services:
         TORCHAUDIO_CPU_VERSION: ${AI_STUDIO_TORCHAUDIO_CPU_VERSION:-2.8.0}
     restart: unless-stopped
     ports:
-      - "8015:8015"
+      - "127.0.0.1:8015:8015"
     environment:
       AUDIORAQ_TTS_ENGINE: ${AUDIORAQ_TTS_ENGINE:-auto}
       AUDIORAQ_TTS_ALLOW_ESPEAK_FALLBACK: ${AUDIORAQ_TTS_ALLOW_ESPEAK_FALLBACK:-true}
