@@ -42,6 +42,7 @@ from urllib.parse import urlencode, urlparse
 
 from backend.voice_quality import (
     build_voice_context_from_intake,
+    is_proof_studio_provider,
     score_podcast_voice_listenability,
 )
 
@@ -3077,6 +3078,8 @@ def enforce_ai_audio_listenability_gate(quality_agent: Dict[str, Any]) -> None:
     min_score = parse_float_env("AI_AUDIO_MIN_LISTENABILITY_SCORE", 68.0)
     score = voice_review.get("listenability_score")
     status = voice_review.get("status")
+    provider = ((voice_review.get("metrics") or {}).get("provider") or "").strip()
+    effective_min_score = min(min_score, 64.0) if is_proof_studio_provider(provider) else min_score
     require_metrics = parse_bool_env("AI_AUDIO_REQUIRE_VOICE_METRICS", False)
 
     if score is None:
@@ -3087,14 +3090,14 @@ def enforce_ai_audio_listenability_gate(quality_agent: Dict[str, Any]) -> None:
             )
         return
 
-    if status == "revise" or float(score) < min_score:
+    if status == "revise" or float(score) < effective_min_score:
         actions = normalize_string_list(voice_review.get("improvement_actions"), limit=3)
         guidance = " ".join(actions) if actions else "Use a local neural TTS worker and re-render with a calmer podcast profile."
         raise HTTPException(
             status_code=422,
             detail=(
                 f"Agent 2 blocked publishing because podcast voice listenability scored {score}/100 "
-                f"below the required {min_score}/100. {guidance}"
+                f"below the required {effective_min_score}/100. {guidance}"
             ),
         )
 

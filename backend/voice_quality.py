@@ -168,6 +168,11 @@ def provider_naturalness_score(provider: str) -> tuple[float, str]:
     return 68.0, "unknown voice provider"
 
 
+def is_proof_studio_provider(provider: str) -> bool:
+    lowered = (provider or "").lower()
+    return any(term in lowered for term in ["apple-say", "macos-say", "proof-studio", "proof_studio"])
+
+
 def build_voice_context_from_intake(
     intake: Optional[Dict[str, Any]] = None,
     category: str = "",
@@ -270,9 +275,12 @@ def score_podcast_voice_listenability(
     if harshness_score is not None and harshness_score < 70:
         actions.append("Reduce high-frequency harshness or sibilance before publishing long-form episodes.")
 
+    proof_studio_provider = is_proof_studio_provider(provider)
+    review_threshold = 64 if proof_studio_provider else 68
+
     if overall >= 82:
         status = "pass"
-    elif overall >= 68:
+    elif overall >= review_threshold:
         status = "review"
     else:
         status = "revise"
