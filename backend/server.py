@@ -134,9 +134,9 @@ PROOF_STUDIO_LOCAL_FILTER = "highpass=f=80,lowpass=f=12000,loudnorm=I=-16:TP=-1.
 PROOF_STUDIO_APPLE_GAP_SECONDS = 0.22
 PROOF_STUDIO_APPLE_TARGET_PEAK_DBFS = -4.5
 PROOF_STUDIO_APPLE_RATES = {
-    "host": 150,
-    "guest": 148,
-    "narrator": 144,
+    "host": 142,
+    "guest": 140,
+    "narrator": 136,
 }
 PROOF_STUDIO_APPLE_VOICES = {
     "host": ["Aman", "Daniel", "Alex"],

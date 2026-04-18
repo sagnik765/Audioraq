@@ -52,9 +52,9 @@ SHOW_EPISODE_COUNTS_65 = [10, 10, 9, 9, 9, 9, 9]
 PROOF_STUDIO_APPLE_GAP_SECONDS = 0.22
 PROOF_STUDIO_APPLE_TARGET_PEAK_DBFS = -4.5
 PROOF_STUDIO_APPLE_RATES = {
-    "host": 150,
-    "guest": 148,
-    "narrator": 144,
+    "host": 142,
+    "guest": 140,
+    "narrator": 136,
 }
 PROOF_STUDIO_APPLE_VOICES = {
     "host": ["Aman", "Daniel", "Alex"],
@@ -182,11 +182,11 @@ def timestamp() -> str:
     return time.strftime("%Y%m%d-%H%M%S", time.gmtime())
 
 
-def api_post(session: requests.Session, url: str, token: str = "", **kwargs: Any) -> requests.Response:
+def api_post(session: requests.Session, url: str, token: str = "", timeout_seconds: int = 360, **kwargs: Any) -> requests.Response:
     headers = kwargs.pop("headers", {})
     if token:
         headers["Authorization"] = f"Bearer {token}"
-    response = session.post(url, headers=headers, timeout=360, **kwargs)
+    response = session.post(url, headers=headers, timeout=timeout_seconds, **kwargs)
     if response.status_code >= 400:
         raise RuntimeError(f"{response.status_code} from {url}: {response.text[:1000]}")
     return response
@@ -664,6 +664,7 @@ def create_ai_episode(
                 f"{base_url}/api/podcasts/upload",
                 token=token,
                 files={"file": (audio_path.name, media_file, "audio/wav")},
+                timeout_seconds=900,
                 data={
                     "show_id": show_id,
                     "ai_draft_id": draft["id"],
