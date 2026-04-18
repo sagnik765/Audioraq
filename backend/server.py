@@ -129,6 +129,13 @@ AGENT2_RLAIF_POLICY = [
 
 AI_AUDIO_VOICE_ROLES = {"host", "guest", "narrator"}
 AI_AUDIO_DISCLOSURE = "This episode includes AI-generated voice audio."
+PROOF_STUDIO_LOCAL_FILTER = "highpass=f=80,lowpass=f=12000,loudnorm=I=-16:TP=-1.5:LRA=11"
+PROOF_STUDIO_APPLE_GAP_SECONDS = 0.22
+PROOF_STUDIO_APPLE_VOICES = {
+    "host": ["Aman", "Daniel", "Alex"],
+    "guest": ["Samantha", "Ava", "Victoria"],
+    "narrator": ["Daniel", "Oliver", "Fred"],
+}
 AI_STUDIO_STAGES = [
     "brief",
     "research",
@@ -2417,16 +2424,33 @@ def get_ai_audio_provider_order() -> List[str]:
             order.append("elevenlabs")
         if os.environ.get("OPENAI_API_KEY"):
             order.append("openai")
+        if (
+            apple_say_tts_available()
+            and parse_bool_env("AI_AUDIO_TTS_APPLE_SAY_ENABLED", True)
+            and not parse_bool_env("AI_AUDIO_REQUIRE_NEURAL_WORKER", False)
+        ):
+            order.append("apple_say")
         if not parse_bool_env("AI_AUDIO_REQUIRE_NEURAL_WORKER", False):
             order.append("local")
         return order or (["local_http"] if parse_bool_env("AI_AUDIO_REQUIRE_NEURAL_WORKER", False) else ["local"])
 
-    aliases = {"espeak": "local", "espeak-ng": "local", "local-neural": "local_http", "http": "local_http"}
+    aliases = {
+        "apple": "apple_say",
+        "apple-say": "apple_say",
+        "macos": "apple_say",
+        "macos_say": "apple_say",
+        "macos-say": "apple_say",
+        "say": "apple_say",
+        "espeak": "local",
+        "espeak-ng": "local",
+        "local-neural": "local_http",
+        "http": "local_http",
+    }
     order = [aliases.get(provider.strip(), provider.strip()) for provider in requested.split(",") if provider.strip()]
     if parse_bool_env("AI_AUDIO_TTS_LOCAL_FALLBACK", True) and "local" not in order and not parse_bool_env("AI_AUDIO_REQUIRE_NEURAL_WORKER", False):
         order.append("local")
     if parse_bool_env("AI_AUDIO_REQUIRE_NEURAL_WORKER", False):
-        order = [provider for provider in order if provider != "local"]
+        order = [provider for provider in order if provider not in {"local", "apple_say"}]
     return order or (["local_http"] if parse_bool_env("AI_AUDIO_REQUIRE_NEURAL_WORKER", False) else ["local"])
 
 
@@ -2549,7 +2573,7 @@ def postprocess_local_wav_audio(data: bytes) -> bytes:
         return data
     audio_filter = os.environ.get(
         "AI_AUDIO_TTS_LOCAL_FILTER",
-        "highpass=f=70,lowpass=f=12000,loudnorm=I=-18.5:TP=-3.5:LRA=7",
+        PROOF_STUDIO_LOCAL_FILTER,
     ).strip()
     with tempfile.TemporaryDirectory(prefix="audioraq-local-tts-post-") as temp_dir:
         temp_path = Path(temp_dir)
@@ -2629,6 +2653,126 @@ def transcode_local_tts_output(data: bytes) -> Tuple[bytes, str, str]:
         return transcoded, "audio/mpeg", "mp3"
 
 
+def apple_say_tts_available() -> bool:
+    return bool(shutil.which("say") and shutil.which("afconvert"))
+
+
+def proof_studio_apple_role(voice_role: str, speaker: str = "") -> str:
+    normalized_speaker = (speaker or "").strip().lower()
+    if normalized_speaker in {"co-host", "cohost", "guest"}:
+        return "guest"
+    if normalized_speaker == "narrator":
+        return "narrator"
+    return voice_role if voice_role in AI_AUDIO_VOICE_ROLES else "host"
+
+
+def synthesize_apple_say_turn(text: str, output_wav: Path, voices: List[str]) -> Tuple[str, float]:
+    say = shutil.which("say")
+    afconvert = shutil.which("afconvert")
+    if not say or not afconvert:
+        raise RuntimeError("Apple proof-studio voices require macOS say and afconvert")
+
+    text_path = output_wav.with_suffix(".txt")
+    text_path.write_text(normalize_local_tts_text(text), encoding="utf-8")
+    last_error: Optional[Exception] = None
+    for attempt, selected_voice in enumerate(dict.fromkeys(voices), start=1):
+        tmp_aiff = output_wav.with_suffix(f".{attempt}.aiff")
+        try:
+            say_result = subprocess.run([say, "-v", selected_voice, "-o", str(tmp_aiff), "-f", str(text_path)], capture_output=True, text=True, timeout=240)
+            if say_result.returncode != 0:
+                raise RuntimeError(say_result.stderr or say_result.stdout or "Apple say rendering failed")
+            convert_result = subprocess.run([afconvert, "-f", "WAVE", "-d", "LEI16", str(tmp_aiff), str(output_wav)], capture_output=True, text=True, timeout=240)
+            if convert_result.returncode != 0:
+                raise RuntimeError(convert_result.stderr or convert_result.stdout or "Apple say WAV conversion failed")
+            with wave.open(str(output_wav), "rb") as wav_file:
+                duration_seconds = wav_file.getnframes() / max(1, wav_file.getframerate())
+            min_duration = 0.16 if len((text or "").split()) <= 3 else 0.35
+            if duration_seconds >= min_duration:
+                return selected_voice, duration_seconds
+            last_error = RuntimeError(f"Apple say voice {selected_voice} produced a short turn: {duration_seconds:.2f}s")
+        except Exception as exc:
+            last_error = exc
+        finally:
+            tmp_aiff.unlink(missing_ok=True)
+    raise RuntimeError(f"Could not synthesize Apple proof-studio dialogue turn: {last_error}")
+
+
+def concat_wav_files_with_silence(segment_paths: List[Path], output_wav: Path, gap_seconds: float = PROOF_STUDIO_APPLE_GAP_SECONDS) -> None:
+    if not segment_paths:
+        raise RuntimeError("No Apple proof-studio audio segments were generated")
+    with wave.open(str(segment_paths[0]), "rb") as first:
+        params = first.getparams()
+        framerate = first.getframerate()
+        sample_width = first.getsampwidth()
+        channels = first.getnchannels()
+    silence_frames = int(framerate * max(0.0, gap_seconds))
+    silence = b"\x00" * silence_frames * sample_width * channels
+    with wave.open(str(output_wav), "wb") as out:
+        out.setparams(params)
+        for segment_path in segment_paths:
+            with wave.open(str(segment_path), "rb") as segment:
+                if segment.getframerate() != framerate or segment.getsampwidth() != sample_width or segment.getnchannels() != channels:
+                    raise RuntimeError(f"Apple proof-studio segment format mismatch: {segment_path}")
+                out.writeframes(segment.readframes(segment.getnframes()))
+                out.writeframes(silence)
+
+
+def render_apple_say_proof_audio(script_text: str, turns: Optional[List[Dict[str, str]]] = None) -> Dict[str, Any]:
+    if not apple_say_tts_available():
+        raise RuntimeError("Apple proof-studio TTS is only available on macOS with say and afconvert")
+
+    rendered_turns = split_audio_turns_for_tts(turns or [{"speaker": "Host", "voice_role": "host", "text": script_text}])
+    if not rendered_turns:
+        raise RuntimeError("no voice turns were available for Apple proof-studio TTS")
+
+    with tempfile.TemporaryDirectory(prefix="audioraq-apple-proof-") as temp_dir:
+        temp_path = Path(temp_dir)
+        segments = []
+        voices = {}
+        timings = []
+        cursor = 0.0
+        for index, turn in enumerate(rendered_turns, start=1):
+            role = proof_studio_apple_role(str(turn.get("voice_role") or "host"), str(turn.get("speaker") or ""))
+            voice_candidates = PROOF_STUDIO_APPLE_VOICES.get(role, PROOF_STUDIO_APPLE_VOICES["host"])
+            segment_path = temp_path / f"segment-{index:03d}-{role}.wav"
+            selected_voice, duration_seconds = synthesize_apple_say_turn(turn.get("text") or "", segment_path, voice_candidates)
+            voices[role] = selected_voice
+            timings.append(
+                {
+                    "speaker": turn.get("speaker") or role.title(),
+                    "voice_role": role,
+                    "voice": selected_voice,
+                    "start": round(cursor, 3),
+                    "end": round(cursor + duration_seconds, 3),
+                    "duration": round(duration_seconds, 3),
+                }
+            )
+            cursor += duration_seconds + PROOF_STUDIO_APPLE_GAP_SECONDS
+            segments.append(segment_path)
+
+        output_path = temp_path / "episode.wav"
+        concat_wav_files_with_silence(segments, output_path)
+        data = output_path.read_bytes()
+        if len(data) < 1024:
+            raise RuntimeError("Apple proof-studio TTS produced an empty audio file")
+        return {
+            "data": data,
+            "content_type": "audio/wav",
+            "provider": "apple-say:proof-studio",
+            "provider_kind": "local-proof",
+            "model": "macOS say",
+            "voices": voices,
+            "turn_count": len(rendered_turns),
+            "chunk_count": len(segments),
+            "timings": timings,
+            "enhancement_profile": "audioraq-qa-proof-dialogue+apple-system-voices+0.22s-turn-gaps",
+            "benchmark_note": "Replicates the April 11 QA proof-studio recipe using generic macOS system voices; does not clone a real person's voice.",
+            "voice_profile": "apple_proof_studio",
+            "extension": "wav",
+            "filename": "ai-generated-episode.wav",
+        }
+
+
 def render_local_ai_audio(script_text: str, turns: Optional[List[Dict[str, str]]] = None) -> Dict[str, Any]:
     renderer = shutil.which("espeak-ng") or shutil.which("espeak")
     if not renderer:
@@ -2690,7 +2834,7 @@ def render_local_ai_audio(script_text: str, turns: Optional[List[Dict[str, str]]
         return {
             "data": data,
             "content_type": content_type,
-            "provider": f"{Path(renderer).name}:enhanced-local",
+            "provider": f"{Path(renderer).name}:{local_tts_voice_profile()}-enhanced-local",
             "provider_kind": "local",
             "model": Path(renderer).name,
             "voices": voices or {"host": os.environ.get("AI_AUDIO_TTS_VOICE", "en-us").strip() or "en-us"},
@@ -2849,9 +2993,9 @@ def render_local_http_ai_audio(script_text: str, turns: List[Dict[str, str]]) ->
     payload = {
         "script_text": script_text,
         "turns": split_audio_turns_for_tts(turns),
-        "target_loudness_lufs": parse_float_env("AI_AUDIO_TARGET_LUFS", -18.5),
+        "target_loudness_lufs": parse_float_env("AI_AUDIO_TARGET_LUFS", -16.0),
         "format": os.environ.get("AI_AUDIO_LOCAL_TTS_FORMAT", "wav").strip().lower() or "wav",
-        "quality_profile": os.environ.get("AI_AUDIO_LOCAL_TTS_PROFILE", "podcast-education-calm").strip() or "podcast-education-calm",
+        "quality_profile": os.environ.get("AI_AUDIO_LOCAL_TTS_PROFILE", "podcast-dialogue").strip() or "podcast-dialogue",
     }
     response = requests.post(
         f"{base_url}/v1/render",
@@ -2906,6 +3050,8 @@ def render_ai_audio_bytes(script_text: str, turns: Optional[List[Dict[str, str]]
         try:
             if provider == "local_http":
                 return render_local_http_ai_audio(script_text, voice_turns)
+            if provider == "apple_say":
+                return render_apple_say_proof_audio(script_text, voice_turns)
             if provider == "elevenlabs":
                 return render_elevenlabs_ai_audio(voice_turns)
             if provider == "openai":

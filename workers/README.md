@@ -48,7 +48,7 @@ Point the web app at it:
 ```dotenv
 AI_AUDIO_TTS_PROVIDER=local_http,local
 AI_AUDIO_LOCAL_TTS_URL=http://127.0.0.1:8015
-AI_AUDIO_LOCAL_TTS_PROFILE=podcast-education-calm
+AI_AUDIO_LOCAL_TTS_PROFILE=podcast-dialogue
 AI_AUDIO_REQUIRE_NEURAL_WORKER=false
 ```
 
@@ -121,7 +121,7 @@ podcast-dialogue        Two-speaker conversation with moderate pauses and natura
 podcast-storytelling    Narrative delivery with wider pauses and more vocal movement.
 ```
 
-Use `podcast-education-calm` as the default for `Create with AI`, then choose a more specific profile when the episode format demands it.
+Use `podcast-dialogue` when trying to stay close to the restored proof-studio episodes, then choose a more specific profile when the episode format demands it.
 
 ## Voice Benchmarking
 

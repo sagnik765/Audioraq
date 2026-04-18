@@ -147,7 +147,7 @@ The default domains in that file are already:
 
 ### 3a. Run Create with AI locally first
 
-Audioraq now has local-first provider seams for the Create with AI USP:
+Audioraq now defaults to the proof-studio voice path used for the April 11 QA episodes:
 
 ```dotenv
 STORAGE_BACKEND=local
@@ -157,25 +157,27 @@ AI_TEXT_ALLOW_REMOTE=false
 AI_TEXT_LOCAL_ENABLED=true
 AI_TEXT_LOCAL_BASE_URL=http://host.docker.internal:11434
 AI_TEXT_LOCAL_MODEL=llama3.2:3b
-AI_AUDIO_TTS_PROVIDER=local_http
-AI_AUDIO_LOCAL_TTS_URL=http://ai-studio-worker:8015
-AI_AUDIO_LOCAL_TTS_PROFILE=podcast-education-calm
+AI_AUDIO_TTS_PROVIDER=apple_say,local
+AI_AUDIO_LOCAL_TTS_URL=
+AI_AUDIO_LOCAL_TTS_PROFILE=podcast-dialogue
 AI_AUDIO_LOCAL_TTS_FORMAT=wav
-AI_AUDIO_TARGET_LUFS=-18.5
-AI_AUDIO_REQUIRE_NEURAL_WORKER=true
+AI_AUDIO_TARGET_LUFS=-16
+AI_AUDIO_REQUIRE_NEURAL_WORKER=false
 AI_AUDIO_ENFORCE_LISTENABILITY_GATE=true
 AI_AUDIO_MIN_LISTENABILITY_SCORE=68
-AI_AUDIO_TTS_LOCAL_FALLBACK=false
-AI_STUDIO_INSTALL_KOKORO=true
-AUDIORAQ_TTS_ENGINE=kokoro
-AUDIORAQ_TTS_ALLOW_ESPEAK_FALLBACK=false
+AI_AUDIO_TTS_LOCAL_FALLBACK=true
+AI_AUDIO_TTS_APPLE_SAY_ENABLED=true
+AI_AUDIO_TTS_LOCAL_VOICE_PROFILE=proof_studio
+AI_AUDIO_TTS_LOCAL_FILTER=highpass=f=80,lowpass=f=12000,loudnorm=I=-16:TP=-1.5:LRA=11
 ```
 
 `AI_TEXT_PROVIDER=ollama,deterministic` routes draft writing, Agent 2 revision, safety review, keyword extraction, and AI recommendations to a local Ollama-compatible endpoint first, then falls back to deterministic logic instead of a paid LLM API. The current code does not bundle an Ollama model; install/run the local model outside the web container and point `AI_TEXT_LOCAL_BASE_URL` at it.
 
-`AI_AUDIO_TTS_PROVIDER=local_http,local` routes audio rendering to a local neural TTS worker first. The worker contract is `POST /v1/render` with JSON `{script_text, turns, target_loudness_lufs, format, quality_profile}` and either an audio response or JSON containing `audio_base64`, `content_type`, `extension`, `provider`, and `model`. This is the seam we will use for Chatterbox/Dia/Kokoro without tying Audioraq to a paid TTS server.
+`AI_AUDIO_TTS_PROVIDER=apple_say,local` uses the restored proof-studio path. On macOS it can reproduce the April 11 QA recipe with the generic system voices `Aman` for the host and `Samantha` for the co-host/guest, plus the same 0.22s dialogue gaps. OCI/Linux cannot run Apple system voices, so the live site uses `AI_AUDIO_TTS_PROVIDER=local` with the matching proof-studio local voice profile instead of forcing Kokoro.
 
-The worker implementation lives in [workers/ai_studio_tts_worker.py](/Users/sagnikroy/Documents/New%20project/Podlyzer-Centralized-Podcast-Hub/workers/ai_studio_tts_worker.py). It supports a local engine order such as `kokoro,chatterbox,espeak`, exposes `/health` and `/v1/status`, masters audio toward `AI_AUDIO_TARGET_LUFS`, and includes listenability profiles such as `podcast-education-calm`, `podcast-dialogue`, and `podcast-storytelling`. For proof-of-work publishing, set `AI_AUDIO_REQUIRE_NEURAL_WORKER=true`, `AUDIORAQ_TTS_ALLOW_ESPEAK_FALLBACK=false`, and keep `AI_AUDIO_ENFORCE_LISTENABILITY_GATE=true` so low-quality fallback or fatiguing audio blocks publishing instead of going live.
+`AI_AUDIO_TTS_PROVIDER=local_http,local` is still available when you want to route audio rendering to a local neural TTS worker first. The worker contract is `POST /v1/render` with JSON `{script_text, turns, target_loudness_lufs, format, quality_profile}` and either an audio response or JSON containing `audio_base64`, `content_type`, `extension`, `provider`, and `model`. This seam remains optional so the Create with AI USP is not dependent on a paid or quota-bound TTS server.
+
+The worker implementation lives in [workers/ai_studio_tts_worker.py](/Users/sagnikroy/Documents/New%20project/Podlyzer-Centralized-Podcast-Hub/workers/ai_studio_tts_worker.py). It supports a local engine order such as `kokoro,chatterbox,espeak`, exposes `/health` and `/v1/status`, masters audio toward `AI_AUDIO_TARGET_LUFS`, and includes listenability profiles such as `podcast-education-calm`, `podcast-dialogue`, and `podcast-storytelling`. Only set `AI_AUDIO_REQUIRE_NEURAL_WORKER=true` after that worker is already installed and you intentionally want neural-only publishing.
 
 `STORAGE_BACKEND=local` removes the hidden dependency on `EMERGENT_LLM_KEY` for media storage. Do not switch an existing live catalog from `emergent` to `local` until existing media has been migrated, otherwise old episode media paths will stop resolving.
 
@@ -200,9 +202,11 @@ If `AI_AUDIO_REQUIRE_NEURAL_WORKER=true`, `deploy/oracle/deploy.sh` automaticall
 `Create with AI` renders playable audio with a provider chain. By default, `AI_AUDIO_TTS_PROVIDER=auto` tries:
 
 ```text
+local_http worker when AI_AUDIO_LOCAL_TTS_URL is set
 ElevenLabs when ELEVENLABS_API_KEY is set
 OpenAI TTS when OPENAI_API_KEY is set
-local espeak-ng fallback
+Apple proof-studio voices on macOS when available
+local proof-studio fallback
 ```
 
 For the most natural podcast-style voices, set ElevenLabs:

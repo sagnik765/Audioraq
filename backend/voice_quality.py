@@ -151,6 +151,10 @@ def infer_podcast_voice_profile(
 
 def provider_naturalness_score(provider: str) -> tuple[float, str]:
     lowered = (provider or "").lower()
+    if "apple-say" in lowered or "macos-say" in lowered:
+        return 82.0, "Audioraq proof-studio Apple system voice profile"
+    if "proof-studio" in lowered or "proof_studio" in lowered:
+        return 76.0, "Audioraq proof-studio local voice profile"
     if any(term in lowered for term in ["espeak", "festival", "flite"]):
         return 38.0, "development fallback voice; clear but not long-form natural"
     if "kokoro" in lowered:
