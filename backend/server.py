@@ -80,7 +80,7 @@ MODERATION_STATUS_BLOCKED = "blocked"
 SOCIAL_PROVIDER_GOOGLE = "google"
 SOCIAL_PROVIDER_APPLE = "apple"
 SUPPORTED_SOCIAL_PROVIDERS = {SOCIAL_PROVIDER_GOOGLE, SOCIAL_PROVIDER_APPLE}
-AGENT2_VERSION = "2026-04-12.1"
+AGENT2_VERSION = "2026-04-18.1"
 AI_TEXT_PROVIDER_DETERMINISTIC = "deterministic"
 AI_TEXT_PROVIDER_EMERGENT = "emergent"
 AI_TEXT_PROVIDER_OLLAMA = "ollama"
@@ -123,6 +123,7 @@ AGENT2_RLAIF_POLICY = [
     "Reward a clear listener promise and concrete outcome.",
     "Reward specific examples over generic motivational language.",
     "Reward human pacing: tension, questions, and useful transitions.",
+    "Reward warm resonance and crisp articulation that reduce long-form listening fatigue.",
     "Penalize unsafe, hateful, or harmful claims found by RAG safety retrieval.",
     "Penalize AI-sounding repetition, vague buzzwords, and overlong sentences.",
     "Preserve the creator's chosen audience, tone, and episode goal.",
@@ -1398,12 +1399,18 @@ def analyze_voice_clarity(data: bytes, filename: str, content_type: str, provide
         quiet_windows = 0
         window_sum_squares = 0.0
         window_count = 0
+        low_mid_energy = 0.0
+        high_freq_energy = 0.0
+        low_mid_state = 0.0
+        high_cut_state = 0.0
 
         with wave.open(extracted_path, "rb") as wav_file:
             sample_rate = wav_file.getframerate() or sample_rate
             if wav_file.getsampwidth() != 2:
                 raise RuntimeError("Voice clarity analyzer expected 16-bit PCM audio")
             window_size = max(1, sample_rate // 10)
+            low_mid_alpha = 1 - math.exp(-2 * math.pi * 280 / sample_rate)
+            high_cut_alpha = 1 - math.exp(-2 * math.pi * 3200 / sample_rate)
 
             def finalize_window():
                 nonlocal quiet_windows, window_count, window_sum_squares
@@ -1427,11 +1434,17 @@ def analyze_voice_clarity(data: bytes, filename: str, content_type: str, provide
                     samples.byteswap()
                 for sample in samples:
                     value = int(sample)
+                    float_value = float(value)
                     abs_value = abs(value)
                     total_samples += 1
                     sum_squares += value * value
                     window_sum_squares += value * value
                     window_count += 1
+                    low_mid_state += low_mid_alpha * (float_value - low_mid_state)
+                    high_cut_state += high_cut_alpha * (float_value - high_cut_state)
+                    high_value = float_value - high_cut_state
+                    low_mid_energy += low_mid_state * low_mid_state
+                    high_freq_energy += high_value * high_value
                     peak_abs = max(peak_abs, abs_value)
                     if abs_value <= silence_threshold:
                         quiet_samples += 1
@@ -1458,6 +1471,9 @@ def analyze_voice_clarity(data: bytes, filename: str, content_type: str, provide
         clipping_ratio = clipped_samples / total_samples
         zero_crossing_rate = zero_crossings / total_samples
         crest_factor_db = peak_dbfs - rms_dbfs
+        energy_denominator = max(sum_squares, 1.0)
+        resonance_low_mid_ratio = max(0.0, min(1.0, low_mid_energy / energy_denominator))
+        articulation_high_freq_ratio = max(0.0, min(1.0, high_freq_energy / energy_denominator))
 
         def percentile(values: List[float], pct: float) -> Optional[float]:
             if not values:
@@ -1474,6 +1490,53 @@ def analyze_voice_clarity(data: bytes, filename: str, content_type: str, provide
         low_dynamic = percentile(voiced_windows, 0.10)
         high_dynamic = percentile(voiced_windows, 0.90)
         dynamic_range_db = (high_dynamic - low_dynamic) if low_dynamic is not None and high_dynamic is not None else None
+
+        def score_target_range(value: Optional[float], hard_low: float, ideal_low: float, ideal_high: float, hard_high: float) -> Optional[float]:
+            if value is None:
+                return None
+            if ideal_low <= value <= ideal_high:
+                return 100.0
+            if value < hard_low or value > hard_high:
+                return 0.0
+            if value < ideal_low:
+                span = max(ideal_low - hard_low, 0.0001)
+                return max(0.0, min(100.0, ((value - hard_low) / span) * 100.0))
+            span = max(hard_high - ideal_high, 0.0001)
+            return max(0.0, min(100.0, ((hard_high - value) / span) * 100.0))
+
+        def weighted_score(items: List[tuple[Optional[float], float]]) -> float:
+            total = 0.0
+            weight_total = 0.0
+            for value, weight in items:
+                if value is None:
+                    continue
+                total += value * weight
+                weight_total += weight
+            return round(total / weight_total, 1) if weight_total else 0.0
+
+        loudness_comfort = score_target_range(rms_dbfs, -30.0, -23.0, -15.0, -9.0)
+        dynamic_comfort = score_target_range(dynamic_range_db, 2.5, 4.0, 19.0, 28.0)
+        zcr_comfort = score_target_range(zero_crossing_rate, 0.012, 0.03, 0.125, 0.19)
+        pause_comfort = score_target_range(pause_ratio, 0.06, 0.11, 0.26, 0.38)
+        resonance_band = score_target_range(resonance_low_mid_ratio, 0.02, 0.10, 0.60, 0.82)
+        articulation_band = score_target_range(articulation_high_freq_ratio, 0.003, 0.006, 0.22, 0.38)
+        resonance_score = weighted_score(
+            [
+                (resonance_band, 0.42),
+                (dynamic_comfort, 0.20),
+                (loudness_comfort, 0.20),
+                (zcr_comfort, 0.18),
+            ]
+        )
+        articulation_score = weighted_score(
+            [
+                (articulation_band, 0.30),
+                (zcr_comfort, 0.24),
+                (pause_comfort, 0.18),
+                (loudness_comfort, 0.14),
+                (100.0 if clipping_ratio <= 0.0005 else max(0.0, 100.0 - clipping_ratio * 2400), 0.14),
+            ]
+        )
 
         score = 100.0
         if duration_seconds < 5:
@@ -1518,8 +1581,12 @@ def analyze_voice_clarity(data: bytes, filename: str, content_type: str, provide
             "crest_factor_db": round(crest_factor_db, 2),
             "clipping_ratio": round(clipping_ratio, 6),
             "zero_crossing_rate": round(zero_crossing_rate, 6),
+            "resonance_score": resonance_score,
+            "resonance_low_mid_ratio": round(resonance_low_mid_ratio, 6),
+            "articulation_score": articulation_score,
+            "articulation_high_freq_ratio": round(articulation_high_freq_ratio, 6),
             "error": "",
-            "method_note": "Signal-level clarity heuristic over extracted mono PCM audio; not a human listening review.",
+            "method_note": "Signal-level clarity plus resonance/articulation proxy heuristics over extracted mono PCM audio; not a human listening review.",
         }
     except Exception as exc:
         logger.error(f"Voice clarity analysis failed for {filename or content_type}: {exc}")
@@ -1757,6 +1824,12 @@ def agent2_build_review_text(
         for section in generation.get("outline", [])[:6]:
             beats = ", ".join(normalize_string_list(section.get("beats"), limit=5))
             outline_lines.append(f"{section.get('section_title', '')}: {beats}".strip(": "))
+        dialogue_turns = normalize_audio_script_turns(generation.get("audio_script_turns"), limit=24)
+        dialogue_lines = [
+            f"{turn.get('speaker') or turn.get('voice_role') or 'Speaker'}: {turn.get('text', '')[:360]}"
+            for turn in dialogue_turns[:18]
+            if turn.get("text")
+        ]
         parts.extend(
             [
                 f"Promise: {generation.get('one_line_promise', '')}",
@@ -1764,6 +1837,7 @@ def agent2_build_review_text(
                 f"Intro: {generation.get('intro_script', '')}",
                 f"Talking points: {', '.join(normalize_string_list(generation.get('talking_points'), limit=10))}",
                 f"Outline: {' | '.join(outline_lines)}",
+                "Audio dialogue turns:\n" + "\n".join(dialogue_lines),
                 f"Notes: {generation.get('show_notes_summary', '')}",
             ]
         )
@@ -1776,6 +1850,8 @@ def agent2_build_review_text(
         parts.append(
             "Voice clarity: "
             f"{clarity.get('score', 0)}/100 {clarity.get('status', '')}; "
+            f"resonance {clarity.get('resonance_score', 'n/a')}/100; "
+            f"articulation {clarity.get('articulation_score', 'n/a')}/100; "
             f"rms {clarity.get('rms_dbfs')}; peak {clarity.get('peak_dbfs')}; "
             f"silence {clarity.get('silence_ratio')}; clipping {clarity.get('clipping_ratio')}. "
             f"{clarity.get('summary', '')}"
@@ -1836,12 +1912,16 @@ def agent2_gan_inspired_discriminator(text: str, generation: Optional[Dict[str, 
     if features["sentence_length_stdev"] < 5 and features["sentence_count"] >= 4:
         score += 8
     if features["question_rate"] < 0.05:
-        score += 9
+        score += 3 if features["speaker_turn_count"] >= 12 and features["concrete_marker_count"] >= 12 else 9
     score += min(18, features["generic_marker_count"] * 6)
     score += min(16, features["repetition_rate"] * 42)
-    if features["concrete_marker_count"] >= 5:
+    if features["concrete_marker_count"] >= 12:
+        score -= 12
+    elif features["concrete_marker_count"] >= 5:
         score -= 8
-    if features["speaker_turn_count"] >= 8:
+    if features["speaker_turn_count"] >= 16:
+        score -= 12
+    elif features["speaker_turn_count"] >= 8:
         score -= 8
     if features["outline_section_count"] >= 4:
         score -= 4
@@ -1938,12 +2018,22 @@ def agent2_rlaif_self_feedback(gan_review: Dict[str, Any], rag_review: Dict[str,
         reward -= min(12, features["generic_marker_count"] * 4)
         critique.append("The draft uses generic AI-sounding phrases.")
         actions.append("Replace vague phrases with specific listener-facing claims.")
-    if features.get("question_rate", 0) < 0.05:
+    if features.get("question_rate", 0) < 0.05 and not (
+        features.get("speaker_turn_count", 0) >= 12 and features.get("concrete_marker_count", 0) >= 12
+    ):
         reward -= 5
         actions.append("Add at least one curiosity-led question.")
+    elif features.get("speaker_turn_count", 0) >= 12 and features.get("concrete_marker_count", 0) >= 12:
+        reward += 1
     if features.get("concrete_marker_count", 0) < 5:
         reward -= 8
         actions.append("Add a concrete example, story, or practical step.")
+    elif features.get("concrete_marker_count", 0) >= 12:
+        reward += 3
+    if features.get("speaker_turn_count", 0) >= 8:
+        reward += 4
+    if 0.07 <= features.get("question_rate", 0) <= 0.22:
+        reward += 2
     if generation and len(normalize_string_list(generation.get("production_notes"), limit=10)) < 2:
         reward -= 4
         actions.append("Add production notes that help the creator perform the episode.")
@@ -1993,6 +2083,8 @@ def build_agent2_scorecard(
     question_rate = float(features.get("question_rate", 0) or 0)
     media_words = int((media_analysis or {}).get("word_count") or 0)
     voice_clarity_score = float(voice_clarity.get("score", 0) or 0) if voice_clarity else None
+    resonance_score = float(voice_clarity.get("resonance_score", 0) or 0) if voice_clarity.get("resonance_score") is not None else None
+    articulation_score = float(voice_clarity.get("articulation_score", 0) or 0) if voice_clarity.get("articulation_score") is not None else None
 
     hook_score = 72 + min(len(hook.split()), 28) * 0.6 - generic_count * 3
     dialogue_score = 68 + min(speaker_count, 3) * 8 + min(len(turns), 16) * 0.7 + min(question_rate * 100, 12)
@@ -2000,7 +2092,14 @@ def build_agent2_scorecard(
     structure_score = 64 + min(len(outline), 5) * 5 + min(sum(len(section.get("beats") or []) for section in outline), 16) * 1.2
     factual_score = 90 if rag_review.get("status") == "clear" else 66 if rag_review.get("status") == "review" else 20
     script_audio_score = 70 + min(len(turns), 18) * 0.8 + min(len(production_notes), 6) * 2 + min(media_words / 50, 8)
-    audio_score = (script_audio_score * 0.55 + voice_clarity_score * 0.45) if voice_clarity_score is not None else script_audio_score
+    audio_metric_inputs = [script_audio_score]
+    if voice_clarity_score is not None:
+        audio_metric_inputs.append(voice_clarity_score)
+    if resonance_score is not None:
+        audio_metric_inputs.append(resonance_score)
+    if articulation_score is not None:
+        audio_metric_inputs.append(articulation_score)
+    audio_score = sum(audio_metric_inputs) / max(1, len(audio_metric_inputs))
     readiness_inputs = [
         hook_score,
         dialogue_score,
@@ -2012,6 +2111,10 @@ def build_agent2_scorecard(
     ]
     if voice_clarity_score is not None:
         readiness_inputs.append(voice_clarity_score)
+    if resonance_score is not None:
+        readiness_inputs.append(resonance_score)
+    if articulation_score is not None:
+        readiness_inputs.append(articulation_score)
     voice_listenability_score = (voice_review or {}).get("listenability_score")
     if voice_listenability_score is not None:
         readiness_inputs.append(float(voice_listenability_score))
@@ -2027,6 +2130,16 @@ def build_agent2_scorecard(
     }
     if voice_clarity_score is not None:
         scorecard["voice_clarity"] = agent2_scorecard_item(voice_clarity_score, voice_clarity.get("summary") or "Measured signal clarity from rendered or uploaded audio.")
+    if resonance_score is not None:
+        scorecard["voice_resonance"] = agent2_scorecard_item(
+            resonance_score,
+            "Warm low-mid presence, stable timbre, and non-fatiguing brightness proxy.",
+        )
+    if articulation_score is not None:
+        scorecard["voice_articulation"] = agent2_scorecard_item(
+            articulation_score,
+            "Word-formation clarity proxy: consonant definition, pacing room, and controlled sibilance.",
+        )
     if voice_review and voice_review.get("listenability_score") is not None:
         scorecard["podcast_voice_listenability"] = agent2_scorecard_item(
             float(voice_review.get("listenability_score") or 0),
@@ -2575,9 +2688,30 @@ def local_tts_role_config(voice_role: str) -> Dict[str, str]:
     }
 
 
+def shape_tts_pronunciation(text: str) -> str:
+    """Make synthetic speech easier to articulate without changing meaning."""
+    text = text.replace("&", " and ")
+    text = re.sub(r"\bQ\s*&\s*A\b", "Q and A", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bvs\.?\b", "versus", text, flags=re.IGNORECASE)
+    text = re.sub(r"\be\.g\.", "for example", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bi\.e\.", "that is", text, flags=re.IGNORECASE)
+    text = re.sub(r"(?<=\w)/(?=\w)", " and ", text)
+    text = re.sub(r"(?<=\d)%", " percent", text)
+
+    def spell_acronym(match: re.Match) -> str:
+        acronym = match.group(0)
+        if "." in acronym:
+            return acronym
+        return ".".join(acronym) + "."
+
+    return re.sub(r"\b[A-Z]{2,6}\b", spell_acronym, text)
+
+
 def normalize_local_tts_text(text: str) -> str:
     text = re.sub(r"\s+", " ", (text or "").strip())
     text = text.replace(" - ", ", ")
+    text = shape_tts_pronunciation(text)
+    text = re.sub(r"\s+", " ", text).strip()
     if text and text[-1] not in ".!?":
         text = f"{text}."
     return text
@@ -3393,7 +3527,114 @@ def normalize_ai_generation_response(raw: Dict[str, Any], brief: Dict[str, Any],
     if not generation.get("suggested_description"):
         generation["suggested_description"] = build_ai_publish_description(generation)
 
-    return generation
+    return enforce_voice_ready_generation_depth(generation, brief, show)
+
+
+def enforce_voice_ready_generation_depth(generation: Dict[str, Any], brief: Dict[str, Any], show: Dict[str, Any]) -> Dict[str, Any]:
+    """Ensure AI drafts contain enough spoken evidence for high-quality audio review."""
+    enriched = dict(generation or {})
+    identity = brief.get("identity", {}) if isinstance(brief, dict) else {}
+    content = brief.get("contentInput", {}) if isinstance(brief, dict) else {}
+    tone_style = brief.get("toneStyle", {}) if isinstance(brief, dict) else {}
+    topic = content.get("topic") or enriched.get("episode_title") or "today's topic"
+    audience = identity.get("targetAudience") or "the listener"
+    desired_outcome = (brief.get("episodeIntent", {}) if isinstance(brief, dict) else {}).get("desiredOutcome") or "leave with a useful next step"
+    format_name = (tone_style.get("format") or "solo").strip().lower()
+    turns = normalize_audio_script_turns(enriched.get("audio_script_turns"), limit=64)
+    talking_points = normalize_string_list(enriched.get("talking_points"), limit=12)
+    key_points = normalize_string_list(content.get("keyPoints"), limit=12)
+    point_pool = talking_points + [point for point in key_points if point not in talking_points]
+    if not point_pool:
+        point_pool = [f"why {topic} matters", f"a practical framework for {topic}", desired_outcome]
+
+    target_turns = 12 if format_name == "interview" else 10
+    if format_name == "narrative":
+        target_turns = 11
+
+    def turn_text_exists(text: str) -> bool:
+        normalized = re.sub(r"\s+", " ", text or "").strip().lower()
+        return any(re.sub(r"\s+", " ", turn.get("text", "")).strip().lower() == normalized for turn in turns)
+
+    attempts = 0
+    while len(turns) < target_turns and attempts < target_turns * 3:
+        attempts += 1
+        point = point_pool[attempts % len(point_pool)]
+        if format_name == "interview":
+            host_text = (
+                f"Let's make that specific. What is one concrete example of {topic} that {audience} can recognize this week?"
+            )
+            guest_text = (
+                f"A useful case is this: {point}. The reason it matters is that it turns a broad idea into a decision, "
+                f"a tradeoff, and one practical step instead of a slogan."
+            )
+            for candidate in [
+                {"speaker": "Host", "voice_role": "host", "text": host_text},
+                {"speaker": "Guest", "voice_role": "guest", "text": guest_text},
+            ]:
+                if len(turns) < target_turns and not turn_text_exists(candidate["text"]):
+                    turns.append(candidate)
+        elif format_name == "narrative":
+            candidate = {
+                "speaker": "Narrator" if len(turns) % 2 else "Host",
+                "voice_role": "narrator" if len(turns) % 2 else "host",
+                "text": (
+                    f"Here is the specific scene to hold onto: {point}. Because the listener can picture the decision, "
+                    f"the idea becomes easier to trust and easier to act on."
+                ),
+            }
+            if not turn_text_exists(candidate["text"]):
+                turns.append(candidate)
+        else:
+            candidate = {
+                "speaker": "Host",
+                "voice_role": "host",
+                "text": (
+                    f"Here is a concrete example: {point}. The framework is simple, name the situation, name the tradeoff, "
+                    f"then choose one step that moves {audience} toward {desired_outcome}."
+                ),
+            }
+            if not turn_text_exists(candidate["text"]):
+                turns.append(candidate)
+        if len(point_pool) == 1 and len(turns) >= target_turns:
+            break
+
+    question_turns = sum(1 for turn in turns if "?" in (turn.get("text") or ""))
+    target_questions = 4 if format_name == "interview" else 2
+    if format_name == "interview" and question_turns < target_questions:
+        enriched_turns = []
+        question_templates = [
+            "What is the decision hiding inside that example?",
+            "Where do smart teams usually get this wrong?",
+            "What is the smallest useful step a listener can take after hearing this?",
+            "What tradeoff should they name before they act?",
+        ]
+        inserted = 0
+        for index, turn in enumerate(turns):
+            enriched_turns.append(turn)
+            role = turn.get("voice_role") or "host"
+            if role == "guest" and question_turns + inserted < target_questions:
+                point = point_pool[(index + inserted) % len(point_pool)]
+                enriched_turns.append(
+                    {
+                        "speaker": "Host",
+                        "voice_role": "host",
+                        "text": f"{question_templates[inserted % len(question_templates)]} In this case, how should they think about {point}?",
+                    }
+                )
+                inserted += 1
+        turns = enriched_turns[:64]
+
+    enriched["audio_script_turns"] = normalize_audio_script_turns(turns, limit=64)
+    production_notes = normalize_string_list(enriched.get("production_notes"), limit=12)
+    production_notes.extend(
+        [
+            "Voice direction: prioritize warm chest-and-mouth resonance, not thin nasal brightness.",
+            "Articulation direction: expand acronyms, leave micro-pauses around key terms, and keep consonants crisp without sounding theatrical.",
+            "Performance direction: vary energy by meaning so the voice feels trustworthy over a long listen.",
+        ]
+    )
+    enriched["production_notes"] = normalize_string_list(production_notes, limit=12)
+    return enriched
 
 
 async def generate_ai_podcast_package(brief: Dict[str, Any], show: Dict[str, Any]) -> Dict[str, Any]:
@@ -3463,6 +3704,7 @@ async def generate_ai_podcast_package(brief: Dict[str, Any], show: Dict[str, Any
     if not isinstance(raw, dict):
         if result.get("errors"):
             logger.warning(f"AI podcast generation used deterministic fallback after provider errors: {result['errors'][-2:]}")
+        fallback = enforce_voice_ready_generation_depth(fallback, brief, show)
         fallback["ai_text_provider"] = AI_TEXT_PROVIDER_DETERMINISTIC
         return fallback
 

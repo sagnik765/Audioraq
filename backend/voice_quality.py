@@ -16,7 +16,7 @@ PODCAST_VOICE_TARGETS: Dict[str, Dict[str, Any]] = {
         "label": "Educational / explainer",
         "wpm": (105, 122, 145, 165),
         "pause_ratio": (0.08, 0.14, 0.25, 0.34),
-        "dynamic_range_db": (2.4, 4.0, 7.5, 12.0),
+        "dynamic_range_db": (2.4, 4.0, 16.0, 24.0),
         "rms_dbfs": (-30.0, -23.0, -16.0, -10.0),
         "peak_dbfs": (-18.0, -8.0, -3.0, -0.8),
         "zero_crossing_rate": (0.015, 0.035, 0.105, 0.16),
@@ -25,7 +25,7 @@ PODCAST_VOICE_TARGETS: Dict[str, Dict[str, Any]] = {
         "label": "Interview / conversational",
         "wpm": (112, 130, 158, 178),
         "pause_ratio": (0.07, 0.12, 0.24, 0.33),
-        "dynamic_range_db": (2.8, 4.5, 8.5, 13.0),
+        "dynamic_range_db": (2.8, 4.5, 18.0, 26.0),
         "rms_dbfs": (-30.0, -23.0, -15.5, -9.5),
         "peak_dbfs": (-18.0, -8.0, -3.0, -0.8),
         "zero_crossing_rate": (0.015, 0.035, 0.11, 0.17),
@@ -34,7 +34,7 @@ PODCAST_VOICE_TARGETS: Dict[str, Dict[str, Any]] = {
         "label": "Storytelling / narrative",
         "wpm": (95, 112, 138, 158),
         "pause_ratio": (0.10, 0.17, 0.30, 0.42),
-        "dynamic_range_db": (3.2, 5.0, 10.0, 15.0),
+        "dynamic_range_db": (3.2, 5.0, 20.0, 30.0),
         "rms_dbfs": (-31.0, -24.0, -16.5, -10.5),
         "peak_dbfs": (-18.0, -9.0, -3.5, -0.8),
         "zero_crossing_rate": (0.012, 0.03, 0.10, 0.16),
@@ -43,7 +43,7 @@ PODCAST_VOICE_TARGETS: Dict[str, Dict[str, Any]] = {
         "label": "News / analysis",
         "wpm": (112, 128, 152, 172),
         "pause_ratio": (0.07, 0.12, 0.22, 0.30),
-        "dynamic_range_db": (2.5, 4.0, 7.0, 11.5),
+        "dynamic_range_db": (2.5, 4.0, 16.0, 24.0),
         "rms_dbfs": (-29.0, -22.0, -15.5, -9.5),
         "peak_dbfs": (-18.0, -8.0, -3.0, -0.8),
         "zero_crossing_rate": (0.015, 0.035, 0.105, 0.16),
@@ -52,7 +52,7 @@ PODCAST_VOICE_TARGETS: Dict[str, Dict[str, Any]] = {
         "label": "Comedy / energetic conversation",
         "wpm": (118, 138, 172, 198),
         "pause_ratio": (0.06, 0.11, 0.24, 0.34),
-        "dynamic_range_db": (3.0, 5.0, 10.5, 15.0),
+        "dynamic_range_db": (3.0, 5.0, 20.0, 30.0),
         "rms_dbfs": (-29.0, -22.0, -15.0, -9.0),
         "peak_dbfs": (-18.0, -8.0, -3.0, -0.8),
         "zero_crossing_rate": (0.015, 0.035, 0.12, 0.18),
@@ -61,7 +61,7 @@ PODCAST_VOICE_TARGETS: Dict[str, Dict[str, Any]] = {
         "label": "General podcast",
         "wpm": (105, 122, 155, 178),
         "pause_ratio": (0.08, 0.13, 0.25, 0.36),
-        "dynamic_range_db": (2.5, 4.0, 8.0, 13.0),
+        "dynamic_range_db": (2.5, 4.0, 18.0, 26.0),
         "rms_dbfs": (-30.0, -23.0, -16.0, -10.0),
         "peak_dbfs": (-18.0, -8.0, -3.0, -0.8),
         "zero_crossing_rate": (0.015, 0.035, 0.11, 0.17),
@@ -99,6 +99,13 @@ def score_target_range(value: Optional[float], hard_low: float, ideal_low: float
         return max(0.0, min(100.0, ((value - hard_low) / span) * 100.0))
     span = max(hard_high - ideal_high, 0.0001)
     return max(0.0, min(100.0, ((hard_high - value) / span) * 100.0))
+
+
+def average_available(values: list[Optional[float]]) -> Optional[float]:
+    measured = [value for value in values if value is not None]
+    if not measured:
+        return None
+    return round(sum(measured) / len(measured), 1)
 
 
 def weighted_average(items: Dict[str, tuple[Optional[float], float]]) -> Optional[float]:
@@ -221,6 +228,10 @@ def score_podcast_voice_listenability(
     rms_dbfs = safe_float(voice_clarity.get("rms_dbfs"))
     peak_dbfs = safe_float(voice_clarity.get("peak_dbfs"))
     zero_crossing_rate = safe_float(voice_clarity.get("zero_crossing_rate"))
+    resonance_score = safe_float(voice_clarity.get("resonance_score"))
+    articulation_score = safe_float(voice_clarity.get("articulation_score"))
+    resonance_low_mid_ratio = safe_float(voice_clarity.get("resonance_low_mid_ratio"))
+    articulation_high_freq_ratio = safe_float(voice_clarity.get("articulation_high_freq_ratio"))
     clarity_score = safe_float(voice_clarity.get("score"), 0.0)
     provider = str(
         voice_clarity.get("source_provider")
@@ -236,6 +247,22 @@ def score_podcast_voice_listenability(
     loudness_score = score_target_range(rms_dbfs, *targets["rms_dbfs"])
     peak_score = score_target_range(peak_dbfs, *targets["peak_dbfs"])
     harshness_score = score_target_range(zero_crossing_rate, *targets["zero_crossing_rate"])
+    resonance_component = average_available(
+        [
+            resonance_score,
+            score_target_range(resonance_low_mid_ratio, 0.02, 0.10, 0.60, 0.82),
+            dynamics_score,
+            loudness_score,
+        ]
+    )
+    articulation_component = average_available(
+        [
+            articulation_score,
+            score_target_range(articulation_high_freq_ratio, 0.003, 0.006, 0.22, 0.38),
+            harshness_score,
+            clarity_score,
+        ]
+    )
 
     fatigue_score = weighted_average(
         {
@@ -250,13 +277,15 @@ def score_podcast_voice_listenability(
 
     overall = weighted_average(
         {
-            "clarity": (clarity_score, 0.18),
-            "naturalness": (naturalness_score, 0.22),
-            "pacing": (pace_score, 0.16),
-            "breathing_room": (pause_score, 0.14),
-            "vocal_movement": (dynamics_score, 0.12),
-            "fatigue_resistance": (fatigue_score, 0.14),
-            "headroom": (peak_score, 0.04),
+            "clarity": (clarity_score, 0.12),
+            "naturalness": (naturalness_score, 0.16),
+            "resonance": (resonance_component, 0.14),
+            "articulation": (articulation_component, 0.16),
+            "pacing": (pace_score, 0.13),
+            "breathing_room": (pause_score, 0.11),
+            "vocal_movement": (dynamics_score, 0.08),
+            "fatigue_resistance": (fatigue_score, 0.08),
+            "headroom": (peak_score, 0.02),
         }
     )
     overall = overall if overall is not None else 0.0
@@ -270,6 +299,10 @@ def score_podcast_voice_listenability(
         actions.append(f"Add phrase and paragraph pauses toward {int(targets['pause_ratio'][1] * 100)}-{int(targets['pause_ratio'][2] * 100)}% pause ratio.")
     if dynamics_score is not None and dynamics_score < 70:
         actions.append("Increase natural vocal movement; avoid overly flat, constant-energy delivery.")
+    if resonance_component is not None and resonance_component < 75:
+        actions.append("Add warmer low-mid resonance and reduce thin or nasal timbre before long-form publishing.")
+    if articulation_component is not None and articulation_component < 75:
+        actions.append("Improve articulation with cleaner acronym expansion, consonant definition, and less rushed phrasing.")
     if peak_score is not None and peak_score < 70:
         actions.append("Leave more true-peak headroom so the voice feels less sharp over long sessions.")
     if harshness_score is not None and harshness_score < 70:
@@ -298,12 +331,16 @@ def score_podcast_voice_listenability(
         "rms_dbfs": rms_dbfs,
         "peak_dbfs": peak_dbfs,
         "zero_crossing_rate": zero_crossing_rate,
+        "resonance_low_mid_ratio": resonance_low_mid_ratio,
+        "articulation_high_freq_ratio": articulation_high_freq_ratio,
         "provider": provider,
         "provider_note": provider_note,
     }
     subscores = {
         "clarity": clarity_score,
         "naturalness": naturalness_score,
+        "resonance": resonance_component,
+        "articulation": articulation_component,
         "pacing": pace_score,
         "breathing_room": pause_score,
         "vocal_movement": dynamics_score,
@@ -329,7 +366,9 @@ def score_podcast_voice_listenability(
         "improvement_actions": actions[:6] or ["Preserve this voice profile and keep checking long-form fatigue on future renders."],
         "summary": (
             f"Podcast voice listenability {round(overall, 1)}/100 for {targets['label']}; "
-            f"{provider_note}; WPM {wpm or 'unknown'}, pause ratio "
+            f"{provider_note}; resonance {round(resonance_component, 1) if resonance_component is not None else 'unknown'}, "
+            f"articulation {round(articulation_component, 1) if articulation_component is not None else 'unknown'}, "
+            f"WPM {wpm or 'unknown'}, pause ratio "
             f"{round(pause_ratio * 100, 1) if pause_ratio is not None else 'unknown'}%."
         ),
         "method_note": "Endurance-focused heuristic using audio metrics plus provider naturalness; not biometric voice identification.",

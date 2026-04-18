@@ -257,9 +257,29 @@ def normalize_voice_role(speaker: str, voice_role: str = "") -> str:
     return "host"
 
 
+def shape_tts_pronunciation(text: str) -> str:
+    text = text.replace("&", " and ")
+    text = re.sub(r"\bQ\s*&\s*A\b", "Q and A", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bvs\.?\b", "versus", text, flags=re.IGNORECASE)
+    text = re.sub(r"\be\.g\.", "for example", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bi\.e\.", "that is", text, flags=re.IGNORECASE)
+    text = re.sub(r"(?<=\w)/(?=\w)", " and ", text)
+    text = re.sub(r"(?<=\d)%", " percent", text)
+
+    def spell_acronym(match: re.Match) -> str:
+        acronym = match.group(0)
+        if "." in acronym:
+            return acronym
+        return ".".join(acronym) + "."
+
+    return re.sub(r"\b[A-Z]{2,6}\b", spell_acronym, text)
+
+
 def normalize_tts_text(text: str) -> str:
     text = " ".join(str(text or "").split())
     text = text.replace(" - ", ", ")
+    text = shape_tts_pronunciation(text)
+    text = " ".join(text.split())
     if text and text[-1] not in ".!?":
         text = f"{text}."
     return text
@@ -642,6 +662,7 @@ def create_ai_episode(
         f"{base_url}/api/ai-podcast-drafts/generate",
         token=token,
         json={"show_id": show_id, "intake": build_intake(plan)},
+        timeout_seconds=900,
     ).json()
 
     title = draft.get("publish_prefill", {}).get("title") or draft.get("generation", {}).get("episode_title") or plan.topic
@@ -865,6 +886,7 @@ def main() -> None:
     parser.add_argument("--min-quality-score", type=float, default=60.0, help="Delete the episode if Agent 2 returns a lower quality score.")
     parser.add_argument("--require-moderation", default="clear", help="Delete the episode if moderation_status does not match. Set empty to disable.")
     parser.add_argument("--require-quality-status", default="pass,review", help="Comma-separated accepted quality statuses. Set empty to disable.")
+    parser.add_argument("--replace-existing-below-score", action="store_true", help="Publish a replacement before deleting an existing Audioraq Originals episode that scores below --min-quality-score.")
     args = parser.parse_args()
 
     base_url = args.base_url.rstrip("/")
@@ -916,7 +938,7 @@ def main() -> None:
 
     for plan in selected:
         previous = previous_by_index.get(plan.global_index)
-        if previous:
+        if previous and not args.replace_existing_below_score:
             previous = {**previous, "status": "skipped_manifest"}
             print(json.dumps(previous, ensure_ascii=True), flush=True)
             run_results.append(previous)
@@ -947,14 +969,22 @@ def main() -> None:
                 account_cache[cache_key] = get_token_and_show_id(session, base_url, email, password, plan)
             auth = account_cache[cache_key]
             existing_episode = find_existing_episode(session, base_url, public_origin, auth["token"], auth["show_id"], plan)
+            existing_to_replace = None
             if existing_episode:
-                result.update(existing_episode)
-                result["status"] = "skipped_existing"
-                print(json.dumps(result, ensure_ascii=True), flush=True)
-                run_results.append(result)
-                manifest_by_index[plan.global_index] = result
-                persist_outputs()
-                continue
+                existing_score = float(existing_episode.get("quality_score") or 0)
+                if args.replace_existing_below_score and args.min_quality_score and existing_score < args.min_quality_score:
+                    existing_to_replace = existing_episode
+                    result["replacement_reason"] = f"existing quality_score={existing_score} below {args.min_quality_score}"
+                    result["replaces_episode_id"] = existing_to_replace.get("episode_id", "")
+                    result["replaces_episode_url"] = existing_to_replace.get("episode_url", "")
+                else:
+                    result.update(existing_episode)
+                    result["status"] = "skipped_existing"
+                    print(json.dumps(result, ensure_ascii=True), flush=True)
+                    run_results.append(result)
+                    manifest_by_index[plan.global_index] = result
+                    persist_outputs()
+                    continue
             episode_result = create_ai_episode(
                 session,
                 base_url,
@@ -989,6 +1019,9 @@ def main() -> None:
                 result["status"] = "deleted_provider_mismatch"
                 result["provider_requirement"] = required_provider
                 provider_mismatch = True
+            elif existing_to_replace:
+                result["replacement_delete_result"] = delete_episode(session, base_url, auth["token"], existing_to_replace["episode_id"])
+                result["status"] = "published_replacement"
             print(json.dumps(result, ensure_ascii=True), flush=True)
         else:
             print(json.dumps(result, ensure_ascii=True), flush=True)

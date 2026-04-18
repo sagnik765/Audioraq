@@ -101,6 +101,9 @@ const preferredScorecardOrder = [
   'hook_strength',
   'dialogue_realism',
   'voice_clarity',
+  'voice_resonance',
+  'voice_articulation',
+  'podcast_voice_listenability',
   'specificity',
   'structure',
   'factual_safety',
@@ -114,7 +117,7 @@ function firstScorecardEntries(scorecard) {
     .filter((key) => available[key])
     .map((key) => [key, available[key]]);
   const leftovers = Object.entries(available).filter(([key]) => !preferredScorecardOrder.includes(key));
-  return [...prioritized, ...leftovers].slice(0, 6);
+  return [...prioritized, ...leftovers].slice(0, 8);
 }
 
 function isStepComplete(step, value) {
