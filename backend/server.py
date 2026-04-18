@@ -2130,6 +2130,17 @@ def merge_agent2_quality_into_moderation(moderation: Dict[str, Any], quality_age
     return merged
 
 
+def enforce_episode_moderation_gate(moderation: Dict[str, Any], stored_paths: Optional[List[str]] = None) -> None:
+    if (moderation or {}).get("status") != MODERATION_STATUS_BLOCKED:
+        return
+    if stored_paths:
+        cleanup_storage_paths(stored_paths, strict=False)
+    raise HTTPException(
+        status_code=422,
+        detail=(moderation or {}).get("summary") or "Episode safety review blocked publishing.",
+    )
+
+
 async def revise_ai_generation_with_agent2_feedback(
     brief: Dict[str, Any],
     show: Dict[str, Any],
@@ -5932,6 +5943,7 @@ async def upload_podcast(
         voice_context=voice_context,
     )
     moderation = merge_agent2_quality_into_moderation(moderation, quality_agent)
+    enforce_episode_moderation_gate(moderation, [media_path, thumbnail_path])
     resolved_rating = MATURE_RATING if moderation.get("recommended_age_gate") == MATURE_RATING else selected_rating
     podcast_doc = {
         "id": str(uuid.uuid4()),
@@ -6076,6 +6088,7 @@ async def create_ai_podcast_episode(
     )
     enforce_ai_audio_listenability_gate(quality_agent)
     moderation = merge_agent2_quality_into_moderation(moderation, quality_agent)
+    enforce_episode_moderation_gate(moderation)
     resolved_rating = MATURE_RATING if moderation.get("recommended_age_gate") == MATURE_RATING else selected_rating
     episode_id = str(uuid.uuid4())
     audio_extension = rendered_audio.get("extension") or extension_for_content_type(rendered_audio["content_type"])

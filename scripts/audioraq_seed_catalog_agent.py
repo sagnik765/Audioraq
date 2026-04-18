@@ -15,21 +15,27 @@ Important constraints:
 - The default plan creates 300 episodes total: 275 across 25 shows plus 25
   single-episode capsule shows. The user's requested 280 show episodes plus
   25 singles would equal 305, so 275 is the default to honor "stop at 300".
-- A smaller 125-episode campaign is available as 125 episodes across 10
+- A smaller 125-episode campaign is available as 125 episodes across 12
   shows, with no singles, for lower-risk proof-of-work seeding.
-- Use --require-provider-kind elevenlabs for production proof-of-work runs so
-  provider fallbacks are deleted instead of quietly seeding lower-quality audio.
+- The default 125-episode publishing mode uses the Create-with-AI draft flow,
+  then uploads locally rendered Apple proof-studio audio for the restored
+  Aman/Samantha reference voice family.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import re
+import shutil
+import subprocess
 import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
+import tempfile
+import wave
 
 import requests
 
@@ -40,8 +46,13 @@ DEFAULT_BASE_URL = "https://www.audioraq.com"
 DEFAULT_PUBLIC_ORIGIN = "https://www.audioraq.com"
 DEFAULT_PASSWORD_PREFIX = "AudioraqSeed"
 SHOW_EPISODE_COUNTS_275 = [17, 15, 14, 14, 13, 13, 12, 12, 12, 11, 11, 11, 11, 10, 10, 10, 10, 9, 9, 9, 9, 9, 8, 8, 8]
-SHOW_EPISODE_COUNTS_125 = [16, 16, 15, 14, 12, 12, 10, 10, 10, 10]
-SHOW_INDEXES_125 = [4, 0, 5, 3, 1, 2, 6, 7, 8, 10]
+SHOW_EPISODE_COUNTS_125 = [12, 11, 11, 11, 10, 10, 10, 10, 10, 10, 10, 10]
+PROOF_STUDIO_APPLE_GAP_SECONDS = 0.22
+PROOF_STUDIO_APPLE_VOICES = {
+    "host": ["Aman", "Daniel", "Alex"],
+    "guest": ["Samantha", "Ava", "Victoria"],
+    "narrator": ["Daniel", "Oliver", "Fred"],
+}
 
 
 @dataclass(frozen=True)
@@ -113,6 +124,22 @@ SHOWS: List[ShowBlueprint] = [
 ]
 
 
+SHOWS_125_TRENDING: List[ShowBlueprint] = [
+    ShowBlueprint("Tariff Desk", "finance", "trade, tariffs, and market risk", "founders, CFOs, operators, and investors watching global trade", "professional", "interview", "short", "educate", "clarity", ["tariff playbooks", "FX hedging", "supply chains", "friendshoring", "commodity shocks", "inflation pass-through"]),
+    ShowBlueprint("The Reg Stack", "law", "AI regulation, privacy, consumer protection, and creator rights", "in-house counsel, founders, compliance teams, and policy-curious listeners", "professional", "interview", "moderate", "educate", "clarity", ["AI liability", "deepfake privacy", "workplace AI", "creator rights", "consumer fraud", "antitrust"]),
+    ShowBlueprint("Adaptation Ledger", "environment", "climate adaptation as finance and infrastructure", "investors, planners, builders, and public-sector operators", "storytelling", "narrative", "moderate", "storytelling", "retention", ["heat insurance", "water scarcity", "flood finance", "grid hardening", "climate migration", "resilient housing"]),
+    ShowBlueprint("Frontier Markets Now", "emerging markets", "where growth is compounding outside the US and Europe", "operators, VCs, exporters, and policy watchers", "professional", "interview", "long", "educate", "clarity", ["India manufacturing", "Nigeria fintech", "Vietnam supply chains", "Brazil agri-tech", "Gulf capital", "Africa mobile money"]),
+    ShowBlueprint("Agentic Era", "technology", "AI agents, robotics, spatial computing, and workflow automation", "builders, operators, and early adopters", "energetic", "interview", "short", "educate", "virality", ["AI agents at work", "robotics reality checks", "on-device AI", "workflow orchestration", "spatial computing", "model governance"]),
+    ShowBlueprint("The Briefing Room", "current affairs", "calm explainers on the week's biggest events", "busy listeners who want context without panic", "professional", "interview", "moderate", "educate", "clarity", ["tariff diplomacy", "misinformation", "sanctions", "election aftershocks", "migration", "cyber incidents"]),
+    ShowBlueprint("Cosmos Next", "astrophysics", "near-term space missions and big cosmic questions", "curious generalists, STEM fans, and educators", "storytelling", "narrative", "short", "storytelling", "retention", ["Roman telescope", "exoplanet atmospheres", "cosmic dawn", "dark matter", "astrobiology", "citizen science"]),
+    ShowBlueprint("The Movement Dividend", "physical health", "evidence-based health habits for real life", "desk workers, founders, and fitness-curious listeners", "professional", "interview", "moderate", "educate", "clarity", ["sedentary work", "strength after 40", "sleep and recovery", "zone 2 myths", "mobility", "habit design"]),
+    ShowBlueprint("Nervous System Nation", "mental health", "stress, burnout, attention, and practical self-regulation", "professionals, caregivers, parents, and managers", "casual", "interview", "short", "educate", "retention", ["burnout", "teen anxiety", "digital overload", "grief", "men's mental health", "stress resets"]),
+    ShowBlueprint("Scam School", "finance", "fraud, impersonation, and digital trust", "consumers, small businesses, and compliance teams", "energetic", "interview", "short", "educate", "virality", ["invoice fraud", "romance scams", "crypto fraud", "AI impersonation", "payroll theft", "consumer recovery"]),
+    ShowBlueprint("The Audience Shift", "creator economy", "how podcasts grow across video, clips, and community", "creators, media teams, and brands", "casual", "interview", "moderate", "educate", "retention", ["clips to full episodes", "titles that convert", "transcript SEO", "newsletter loops", "sponsor packaging", "chapter strategy"]),
+    ShowBlueprint("Binge Nation", "culture", "why sports, true crime, comedy, and fandom shows become habits", "mainstream listeners and fandom-heavy audiences", "energetic", "interview", "short", "entertain", "virality", ["sports second screens", "true-crime ethics", "comedy room dynamics", "fandom wars", "recap formats", "meme cycles"]),
+]
+
+
 SINGLE_TOPICS = [
     ("finance", "Why emergency funds feel boring until they become freedom"),
     ("law", "The one contract clause creators skip too often"),
@@ -156,6 +183,32 @@ def api_post(session: requests.Session, url: str, token: str = "", **kwargs: Any
     return response
 
 
+def api_get(session: requests.Session, url: str, token: str = "", **kwargs: Any) -> requests.Response:
+    headers = kwargs.pop("headers", {})
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    response = session.get(url, headers=headers, timeout=120, **kwargs)
+    if response.status_code >= 400:
+        raise RuntimeError(f"{response.status_code} from {url}: {response.text[:1000]}")
+    return response
+
+
+def run(cmd: List[str], **kwargs: Any) -> subprocess.CompletedProcess:
+    return subprocess.run(cmd, check=True, text=True, **kwargs)
+
+
+def require_tool(name: str) -> str:
+    path = shutil.which(name)
+    if not path:
+        raise RuntimeError(f"Required tool not found: {name}")
+    return path
+
+
+def slugify(value: str) -> str:
+    value = re.sub(r"[^a-zA-Z0-9]+", "-", value.strip().lower())
+    return value.strip("-")[:90] or "episode"
+
+
 def normalize_length_preference(length_band: str) -> str:
     if length_band == "short":
         return "short"
@@ -183,6 +236,136 @@ def build_episode_topic(show: ShowBlueprint, episode_number: int) -> str:
         "The one question to ask before acting on {theme}",
     ][(episode_number - 1) % 7]
     return pattern.format(theme=theme)
+
+
+def normalize_voice_role(speaker: str, voice_role: str = "") -> str:
+    speaker_key = (speaker or "").strip().lower()
+    role_key = (voice_role or "").strip().lower()
+    if speaker_key in {"co-host", "cohost", "guest", "expert guest"} or role_key == "guest":
+        return "guest"
+    if speaker_key == "narrator" or role_key == "narrator":
+        return "narrator"
+    return "host"
+
+
+def normalize_tts_text(text: str) -> str:
+    text = " ".join(str(text or "").split())
+    text = text.replace(" - ", ", ")
+    if text and text[-1] not in ".!?":
+        text = f"{text}."
+    return text
+
+
+def normalize_audio_turns(items: Any) -> List[Dict[str, str]]:
+    turns = []
+    if isinstance(items, list):
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            text = normalize_tts_text(str(item.get("text") or ""))
+            if not text:
+                continue
+            speaker = str(item.get("speaker") or item.get("name") or "Host").strip() or "Host"
+            voice_role = normalize_voice_role(speaker, str(item.get("voice_role") or item.get("voiceRole") or ""))
+            turns.append({"speaker": speaker, "voice_role": voice_role, "text": text})
+    return turns
+
+
+def fallback_audio_turns(plan: EpisodeBlueprint, title: str, generation: Dict[str, Any]) -> List[Dict[str, str]]:
+    hook = generation.get("hook") or f"Today on {plan.show_title}, we are unpacking {title}."
+    promise = generation.get("one_line_promise") or plan.desired_outcome
+    turns = [
+        {"speaker": "Host", "voice_role": "host", "text": hook},
+        {
+            "speaker": "Co-host" if plan.format == "interview" else "Narrator",
+            "voice_role": "guest" if plan.format == "interview" else "narrator",
+            "text": f"The useful promise is simple: {promise}",
+        },
+    ]
+    for index, point in enumerate(plan.key_points[:6], start=1):
+        if plan.format == "solo":
+            turns.append({"speaker": "Host", "voice_role": "host", "text": point})
+        else:
+            speaker = "Host" if index % 2 else "Co-host"
+            turns.append({"speaker": speaker, "voice_role": normalize_voice_role(speaker), "text": point})
+    turns.append(
+        {
+            "speaker": "Host",
+            "voice_role": "host",
+            "text": f"The closing takeaway: {plan.desired_outcome}. This is an Audioraq Originals episode made with Audioraq's AI-assisted workflow.",
+        }
+    )
+    return turns
+
+
+def audio_turns_from_generation(plan: EpisodeBlueprint, title: str, generation: Dict[str, Any]) -> List[Dict[str, str]]:
+    turns = normalize_audio_turns(generation.get("audio_script_turns") or generation.get("audioScriptTurns"))
+    if turns:
+        return turns
+    return fallback_audio_turns(plan, title, generation)
+
+
+def synthesize_turn_audio(text: str, output_wav: Path, voices: List[str]) -> str:
+    require_tool("say")
+    require_tool("afconvert")
+    text_file = output_wav.with_suffix(".txt")
+    text_file.write_text(normalize_tts_text(text), encoding="utf-8")
+    last_error: Optional[Exception] = None
+    min_duration = 0.16 if len(text.split()) <= 3 else 0.35
+    for attempt, selected_voice in enumerate(dict.fromkeys(voices + ["Aman", "Samantha", "Daniel", "Alex"]), start=1):
+        tmp_aiff = output_wav.with_suffix(f".{attempt}.aiff")
+        try:
+            run(["say", "-v", selected_voice, "-o", str(tmp_aiff), "-f", str(text_file)])
+            run(["afconvert", "-f", "WAVE", "-d", "LEI16", str(tmp_aiff), str(output_wav)])
+            with wave.open(str(output_wav), "rb") as wav_file:
+                duration = wav_file.getnframes() / max(1, wav_file.getframerate())
+            if duration >= min_duration:
+                return selected_voice
+            last_error = RuntimeError(f"Generated short turn with voice {selected_voice}: {duration:.2f}s")
+        except Exception as exc:
+            last_error = exc
+        finally:
+            tmp_aiff.unlink(missing_ok=True)
+    raise RuntimeError(f"Could not synthesize dialogue turn: {last_error}")
+
+
+def concat_wavs(segment_paths: List[Path], output_wav: Path, gap_seconds: float = PROOF_STUDIO_APPLE_GAP_SECONDS) -> None:
+    if not segment_paths:
+        raise RuntimeError("No dialogue segments to concatenate")
+    with wave.open(str(segment_paths[0]), "rb") as first:
+        params = first.getparams()
+        framerate = first.getframerate()
+        sample_width = first.getsampwidth()
+        channels = first.getnchannels()
+    silence = b"\x00" * int(framerate * gap_seconds) * sample_width * channels
+    with wave.open(str(output_wav), "wb") as out:
+        out.setparams(params)
+        for segment_path in segment_paths:
+            with wave.open(str(segment_path), "rb") as segment:
+                if segment.getframerate() != framerate or segment.getsampwidth() != sample_width or segment.getnchannels() != channels:
+                    raise RuntimeError(f"Dialogue segment format mismatch: {segment_path}")
+                out.writeframes(segment.readframes(segment.getnframes()))
+                out.writeframes(silence)
+
+
+def render_apple_say_audio(turns: List[Dict[str, str]], output_wav: Path) -> Dict[str, Any]:
+    selected_voices: Dict[str, str] = {}
+    with tempfile.TemporaryDirectory(prefix="audioraq-originals-dialogue-") as temp_dir:
+        temp_path = Path(temp_dir)
+        segments = []
+        for index, turn in enumerate(turns, start=1):
+            role = normalize_voice_role(turn.get("speaker", ""), turn.get("voice_role", ""))
+            segment = temp_path / f"{index:03d}-{role}.wav"
+            selected_voice = synthesize_turn_audio(turn["text"], segment, PROOF_STUDIO_APPLE_VOICES.get(role, PROOF_STUDIO_APPLE_VOICES["host"]))
+            selected_voices.setdefault(role, selected_voice)
+            segments.append(segment)
+        concat_wavs(segments, output_wav)
+    return {
+        "provider": "apple-say:proof-studio",
+        "provider_kind": "local-proof",
+        "voices": selected_voices,
+        "turn_count": len(turns),
+    }
 
 
 def speaker_plan_for(index: int, base_format: str) -> str:
@@ -284,7 +467,7 @@ def build_catalog_plan(target_total: int = 300, single_count: int = 25) -> List[
         selected_shows = SHOWS
         show_episode_counts = SHOW_EPISODE_COUNTS_275
     elif target_total == 125 and single_count == 0:
-        selected_shows = [SHOWS[index] for index in SHOW_INDEXES_125]
+        selected_shows = SHOWS_125_TRENDING
         show_episode_counts = SHOW_EPISODE_COUNTS_125
     else:
         raise RuntimeError("Supported seed plans are 300 total with 25 singles, or 125 total with 0 singles")
@@ -388,6 +571,8 @@ def create_ai_episode(
     token: str,
     show_id: str,
     plan: EpisodeBlueprint,
+    publish_mode: str,
+    media_dir: Path,
 ) -> Dict[str, Any]:
     draft = api_post(
         session,
@@ -404,6 +589,47 @@ def create_ai_episode(
         f"{description}\n\n"
         "Disclosure: this is transparent Audioraq Originals proof-of-work content created with Audioraq's AI-assisted workflow."
     ).strip()
+
+    if publish_mode == "apple-say-upload":
+        media_dir.mkdir(parents=True, exist_ok=True)
+        turns = audio_turns_from_generation(plan, title, draft.get("generation") or {})
+        audio_path = media_dir / f"{plan.global_index:03d}-{slugify(title)}.wav"
+        render_metadata = render_apple_say_audio(turns, audio_path)
+        with audio_path.open("rb") as media_file:
+            episode = api_post(
+                session,
+                f"{base_url}/api/podcasts/upload",
+                token=token,
+                files={"file": (audio_path.name, media_file, "audio/wav")},
+                data={
+                    "show_id": show_id,
+                    "ai_draft_id": draft["id"],
+                    "title": title,
+                    "description": description,
+                    "category": plan.category,
+                    "audience_rating": "all_ages",
+                    "season_number": "1",
+                    "episode_number": str(plan.episode_index),
+                },
+            ).json()
+        return {
+            "draft_id": draft.get("id", ""),
+            "episode_id": episode.get("id", ""),
+            "episode_url": f"{public_origin}/episodes/{episode.get('id')}" if episode.get("id") else "",
+            "title": episode.get("title", title),
+            "show_id": show_id,
+            "moderation_status": episode.get("moderation_status", ""),
+            "quality_status": episode.get("quality_status", ""),
+            "quality_score": episode.get("quality_score", 0),
+            "media_type": episode.get("media_type", ""),
+            "content_type": episode.get("content_type", ""),
+            "ai_audio_provider": render_metadata["provider"],
+            "ai_audio_provider_kind": render_metadata["provider_kind"],
+            "ai_audio_turn_count": render_metadata["turn_count"],
+            "ai_audio_voices": render_metadata["voices"],
+            "local_media_path": str(audio_path),
+            "is_playable": episode.get("is_playable", False),
+        }
 
     episode = api_post(
         session,
@@ -437,6 +663,52 @@ def create_ai_episode(
         "ai_audio_turn_count": episode.get("ai_audio_turn_count", 0),
         "is_playable": episode.get("is_playable", False),
     }
+
+
+def find_existing_episode(
+    session: requests.Session,
+    base_url: str,
+    public_origin: str,
+    token: str,
+    show_id: str,
+    plan: EpisodeBlueprint,
+) -> Optional[Dict[str, Any]]:
+    body = api_get(session, f"{base_url}/api/podcasts/my?show_id={show_id}", token=token).json()
+    for episode in body.get("podcasts", []):
+        if int(episode.get("season_number") or 0) != 1:
+            continue
+        if int(episode.get("episode_number") or 0) != plan.episode_index:
+            continue
+        if not str(episode.get("title") or "").lower().startswith("audioraq originals"):
+            continue
+        return {
+            "draft_id": episode.get("ai_draft_id", ""),
+            "episode_id": episode.get("id", ""),
+            "episode_url": f"{public_origin}/episodes/{episode.get('id')}" if episode.get("id") else "",
+            "title": episode.get("title", plan.topic),
+            "show_id": show_id,
+            "moderation_status": episode.get("moderation_status", ""),
+            "quality_status": episode.get("quality_status", ""),
+            "quality_score": episode.get("quality_score", 0),
+            "media_type": episode.get("media_type", ""),
+            "content_type": episode.get("content_type", ""),
+            "ai_audio_provider": episode.get("ai_audio_provider", ""),
+            "ai_audio_provider_kind": episode.get("ai_audio_provider_kind", ""),
+            "ai_audio_turn_count": episode.get("ai_audio_turn_count", 0),
+            "is_playable": episode.get("is_playable", False),
+        }
+    return None
+
+
+def quality_failure_reason(result: Dict[str, Any], min_quality_score: float, require_moderation: str, require_quality_status: str) -> str:
+    if require_moderation and (result.get("moderation_status") or "").lower() != require_moderation.lower():
+        return f"moderation_status={result.get('moderation_status') or 'unknown'}"
+    allowed_statuses = {part.strip().lower() for part in require_quality_status.split(",") if part.strip()}
+    if allowed_statuses and (result.get("quality_status") or "").lower() not in allowed_statuses:
+        return f"quality_status={result.get('quality_status') or 'unknown'}"
+    if min_quality_score and float(result.get("quality_score") or 0) < min_quality_score:
+        return f"quality_score={result.get('quality_score') or 0} below {min_quality_score}"
+    return ""
 
 
 def delete_episode(session: requests.Session, base_url: str, token: str, episode_id: str) -> Dict[str, Any]:
@@ -519,22 +791,38 @@ def main() -> None:
     parser.add_argument("--start", type=int, default=1)
     parser.add_argument("--limit", type=int, default=1, help="Safety limit. Use 0 only when intentionally publishing the full selected range.")
     parser.add_argument("--publish", action="store_true", help="Actually create accounts, drafts, and episodes on the target Audioraq deployment.")
+    parser.add_argument("--publish-mode", choices=["apple-say-upload", "ai-create"], default="apple-say-upload", help="apple-say-upload uses the Create-with-AI draft plus the restored local proof-studio voices; ai-create renders on the server.")
     parser.add_argument("--password", default="", help="Optional shared password for generated seed accounts.")
     parser.add_argument("--require-provider-kind", default="", help="If set, delete and reject episodes that publish with a different TTS provider kind.")
     parser.add_argument("--continue-on-provider-mismatch", action="store_true", help="Keep processing after a required-provider mismatch. Off by default to avoid burning credits or seeding low-quality audio.")
+    parser.add_argument("--min-quality-score", type=float, default=60.0, help="Delete the episode if Agent 2 returns a lower quality score.")
+    parser.add_argument("--require-moderation", default="clear", help="Delete the episode if moderation_status does not match. Set empty to disable.")
+    parser.add_argument("--require-quality-status", default="pass,review", help="Comma-separated accepted quality statuses. Set empty to disable.")
     args = parser.parse_args()
 
     base_url = args.base_url.rstrip("/")
     public_origin = args.public_origin.rstrip("/")
     password = args.password or f"{DEFAULT_PASSWORD_PREFIX}!{args.run_id}"
     output_dir = Path(args.output_root).resolve() / args.run_id
+    media_dir = output_dir / "media"
     plans = build_catalog_plan(target_total=args.target_total, single_count=args.single_count)
     selected = select_plans(plans, args.start, args.limit)
     session = requests.Session()
     account_cache: Dict[int, Dict[str, str]] = {}
     results = []
+    manifest_path = output_dir / "manifest.json"
+    previous_by_index: Dict[int, Dict[str, Any]] = {}
+    if manifest_path.exists():
+        previous_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        previous_by_index = {int(item["global_index"]): item for item in previous_manifest.get("results", []) if item.get("status") in {"published", "skipped_existing"}}
 
     for plan in selected:
+        previous = previous_by_index.get(plan.global_index)
+        if previous:
+            previous = {**previous, "status": "skipped_manifest"}
+            print(json.dumps(previous, ensure_ascii=True), flush=True)
+            results.append(previous)
+            continue
         provider_mismatch = False
         email = f"audioraq-originals-{args.run_id}-{plan.account_kind}-{plan.show_index:02d}@audioraq.test"
         result = {
@@ -560,9 +848,82 @@ def main() -> None:
             if cache_key not in account_cache:
                 account_cache[cache_key] = get_token_and_show_id(session, base_url, email, password, plan)
             auth = account_cache[cache_key]
-            episode_result = create_ai_episode(session, base_url, public_origin, auth["token"], auth["show_id"], plan)
+            existing_episode = find_existing_episode(session, base_url, public_origin, auth["token"], auth["show_id"], plan)
+            if existing_episode:
+                result.update(existing_episode)
+                result["status"] = "skipped_existing"
+                print(json.dumps(result, ensure_ascii=True), flush=True)
+                results.append(result)
+                write_outputs(
+                    output_dir,
+                    {
+                        "run_id": args.run_id,
+                        "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                        "base_url": base_url,
+                        "public_origin": public_origin,
+                        "target_total": args.target_total,
+                        "single_count": args.single_count,
+                        "dry_run": not args.publish,
+                        "publish_mode": args.publish_mode,
+                        "safety_note": "Transparent Audioraq Originals seed content. No fake reviews or fake customer claims.",
+                        "constraints": [
+                            "Create with AI publishes audio-only episodes.",
+                            "Single episodes use one-episode capsule shows because the data model is show-first.",
+                            "Default distribution is 275 show episodes plus 25 singles, totaling 300.",
+                            "The 125-episode campaign is 125 show episodes across 12 topic shows.",
+                            "Video-suitable episodes are tagged video_ready_audio, but Create with AI publishes audio only.",
+                        ],
+                        "results": results,
+                    },
+                )
+                continue
+            episode_result = create_ai_episode(
+                session,
+                base_url,
+                public_origin,
+                auth["token"],
+                auth["show_id"],
+                plan,
+                args.publish_mode,
+                media_dir,
+            )
             result.update(episode_result)
             result["status"] = "published"
+            failure_reason = quality_failure_reason(
+                episode_result,
+                args.min_quality_score,
+                args.require_moderation.strip(),
+                args.require_quality_status.strip(),
+            )
+            if failure_reason:
+                result["delete_result"] = delete_episode(session, base_url, auth["token"], episode_result["episode_id"])
+                result["status"] = "deleted_quality_failure"
+                result["quality_failure_reason"] = failure_reason
+                print(json.dumps(result, ensure_ascii=True), flush=True)
+                results.append(result)
+                write_outputs(
+                    output_dir,
+                    {
+                        "run_id": args.run_id,
+                        "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                        "base_url": base_url,
+                        "public_origin": public_origin,
+                        "target_total": args.target_total,
+                        "single_count": args.single_count,
+                        "dry_run": not args.publish,
+                        "publish_mode": args.publish_mode,
+                        "safety_note": "Transparent Audioraq Originals seed content. No fake reviews or fake customer claims.",
+                        "constraints": [
+                            "Create with AI publishes audio-only episodes.",
+                            "Single episodes use one-episode capsule shows because the data model is show-first.",
+                            "Default distribution is 275 show episodes plus 25 singles, totaling 300.",
+                            "The 125-episode campaign is 125 show episodes across 12 topic shows.",
+                            "Video-suitable episodes are tagged video_ready_audio, but Create with AI publishes audio only.",
+                        ],
+                        "results": results,
+                    },
+                )
+                raise RuntimeError(f"Stopped after quality failure: {failure_reason}; deleted the episode to protect product quality.")
             required_provider = args.require_provider_kind.strip().lower()
             actual_provider = (episode_result.get("ai_audio_provider_kind") or "").strip().lower()
             if required_provider and actual_provider != required_provider:
@@ -584,12 +945,13 @@ def main() -> None:
                 "target_total": args.target_total,
                 "single_count": args.single_count,
                 "dry_run": not args.publish,
+                "publish_mode": args.publish_mode,
                 "safety_note": "Transparent Audioraq Originals seed content. No fake reviews or fake customer claims.",
                 "constraints": [
                     "Create with AI publishes audio-only episodes.",
                     "Single episodes use one-episode capsule shows because the data model is show-first.",
                     "Default distribution is 275 show episodes plus 25 singles, totaling 300.",
-                    "The 125-episode campaign is 125 show episodes across 10 topic shows.",
+                    "The 125-episode campaign is 125 show episodes across 12 topic shows.",
                     "Video-suitable episodes are tagged video_ready_audio, but Create with AI publishes audio only.",
                 ],
                 "results": results,
