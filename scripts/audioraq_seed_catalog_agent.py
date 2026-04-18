@@ -15,9 +15,9 @@ Important constraints:
 - The default plan creates 300 episodes total: 275 across 25 shows plus 25
   single-episode capsule shows. The user's requested 280 show episodes plus
   25 singles would equal 305, so 275 is the default to honor "stop at 300".
-- A smaller 125-episode campaign is available as 125 episodes across 12
-  shows, with no singles, for lower-risk proof-of-work seeding.
-- The default 125-episode publishing mode uses the Create-with-AI draft flow,
+- Smaller 125-episode and 65-episode campaigns are available for lower-risk
+  proof-of-work seeding. The current default is 65 episodes across 7 shows.
+- The default 65-episode publishing mode uses the Create-with-AI draft flow,
   then uploads locally rendered Apple proof-studio audio for the restored
   Aman/Samantha reference voice family.
 """
@@ -48,6 +48,7 @@ DEFAULT_PUBLIC_ORIGIN = "https://www.audioraq.com"
 DEFAULT_PASSWORD_PREFIX = "AudioraqSeed"
 SHOW_EPISODE_COUNTS_275 = [17, 15, 14, 14, 13, 13, 12, 12, 12, 11, 11, 11, 11, 10, 10, 10, 10, 9, 9, 9, 9, 9, 8, 8, 8]
 SHOW_EPISODE_COUNTS_125 = [12, 11, 11, 11, 10, 10, 10, 10, 10, 10, 10, 10]
+SHOW_EPISODE_COUNTS_65 = [10, 10, 9, 9, 9, 9, 9]
 PROOF_STUDIO_APPLE_GAP_SECONDS = 0.22
 PROOF_STUDIO_APPLE_TARGET_PEAK_DBFS = -4.5
 PROOF_STUDIO_APPLE_RATES = {
@@ -145,6 +146,7 @@ SHOWS_125_TRENDING: List[ShowBlueprint] = [
     ShowBlueprint("The Audience Shift", "creator economy", "how podcasts grow across video, clips, and community", "creators, media teams, and brands", "casual", "interview", "moderate", "educate", "retention", ["clips to full episodes", "titles that convert", "transcript SEO", "newsletter loops", "sponsor packaging", "chapter strategy"]),
     ShowBlueprint("Binge Nation", "culture", "why sports, true crime, comedy, and fandom shows become habits", "mainstream listeners and fandom-heavy audiences", "energetic", "interview", "short", "entertain", "virality", ["sports second screens", "true-crime ethics", "comedy room dynamics", "fandom wars", "recap formats", "meme cycles"]),
 ]
+SHOWS_65_TRENDING: List[ShowBlueprint] = SHOWS_125_TRENDING[:7]
 
 
 SINGLE_TOPICS = [
@@ -527,8 +529,11 @@ def build_catalog_plan(target_total: int = 300, single_count: int = 25) -> List[
     elif target_total == 125 and single_count == 0:
         selected_shows = SHOWS_125_TRENDING
         show_episode_counts = SHOW_EPISODE_COUNTS_125
+    elif target_total == 65 and single_count == 0:
+        selected_shows = SHOWS_65_TRENDING
+        show_episode_counts = SHOW_EPISODE_COUNTS_65
     else:
-        raise RuntimeError("Supported seed plans are 300 total with 25 singles, or 125 total with 0 singles")
+        raise RuntimeError("Supported seed plans are 300 total with 25 singles, 125 total with 0 singles, or 65 total with 0 singles")
     show_episode_total = target_total - single_count
     if sum(show_episode_counts) != show_episode_total:
         raise RuntimeError(f"Expected {show_episode_total} show episodes, got {sum(show_episode_counts)}")
@@ -847,8 +852,8 @@ def main() -> None:
     parser.add_argument("--public-origin", default=DEFAULT_PUBLIC_ORIGIN)
     parser.add_argument("--output-root", default=str(DEFAULT_OUTPUT_ROOT))
     parser.add_argument("--run-id", default=timestamp())
-    parser.add_argument("--target-total", type=int, default=300)
-    parser.add_argument("--single-count", type=int, default=25)
+    parser.add_argument("--target-total", type=int, default=65)
+    parser.add_argument("--single-count", type=int, default=0)
     parser.add_argument("--start", type=int, default=1)
     parser.add_argument("--limit", type=int, default=1, help="Safety limit. Use 0 only when intentionally publishing the full selected range.")
     parser.add_argument("--publish", action="store_true", help="Actually create accounts, drafts, and episodes on the target Audioraq deployment.")
@@ -870,19 +875,50 @@ def main() -> None:
     selected = select_plans(plans, args.start, args.limit)
     session = requests.Session()
     account_cache: Dict[int, Dict[str, str]] = {}
-    results = []
+    run_results: List[Dict[str, Any]] = []
     manifest_path = output_dir / "manifest.json"
+    manifest_by_index: Dict[int, Dict[str, Any]] = {}
     previous_by_index: Dict[int, Dict[str, Any]] = {}
     if manifest_path.exists():
         previous_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest_by_index = {
+            int(item["global_index"]): item
+            for item in previous_manifest.get("results", [])
+            if item.get("global_index") is not None
+        }
         previous_by_index = {int(item["global_index"]): item for item in previous_manifest.get("results", []) if item.get("status") in {"published", "skipped_existing"}}
+
+    def persist_outputs() -> None:
+        write_outputs(
+            output_dir,
+            {
+                "run_id": args.run_id,
+                "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "base_url": base_url,
+                "public_origin": public_origin,
+                "target_total": args.target_total,
+                "single_count": args.single_count,
+                "dry_run": not args.publish,
+                "publish_mode": args.publish_mode,
+                "safety_note": "Transparent Audioraq Originals seed content. No fake reviews or fake customer claims.",
+                "constraints": [
+                    "Create with AI publishes audio-only episodes.",
+                    "Single episodes use one-episode capsule shows because the data model is show-first.",
+                    "Default distribution is 275 show episodes plus 25 singles, totaling 300.",
+                    "The 125-episode campaign is 125 show episodes across 12 topic shows.",
+                    "The current 65-episode campaign is 65 show episodes across 7 topic shows.",
+                    "Video-suitable episodes are tagged video_ready_audio, but Create with AI publishes audio only.",
+                ],
+                "results": [manifest_by_index[index] for index in sorted(manifest_by_index)],
+            },
+        )
 
     for plan in selected:
         previous = previous_by_index.get(plan.global_index)
         if previous:
             previous = {**previous, "status": "skipped_manifest"}
             print(json.dumps(previous, ensure_ascii=True), flush=True)
-            results.append(previous)
+            run_results.append(previous)
             continue
         provider_mismatch = False
         email = f"audioraq-originals-{args.run_id}-{plan.account_kind}-{plan.show_index:02d}@audioraq.test"
@@ -914,29 +950,9 @@ def main() -> None:
                 result.update(existing_episode)
                 result["status"] = "skipped_existing"
                 print(json.dumps(result, ensure_ascii=True), flush=True)
-                results.append(result)
-                write_outputs(
-                    output_dir,
-                    {
-                        "run_id": args.run_id,
-                        "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-                        "base_url": base_url,
-                        "public_origin": public_origin,
-                        "target_total": args.target_total,
-                        "single_count": args.single_count,
-                        "dry_run": not args.publish,
-                        "publish_mode": args.publish_mode,
-                        "safety_note": "Transparent Audioraq Originals seed content. No fake reviews or fake customer claims.",
-                        "constraints": [
-                            "Create with AI publishes audio-only episodes.",
-                            "Single episodes use one-episode capsule shows because the data model is show-first.",
-                            "Default distribution is 275 show episodes plus 25 singles, totaling 300.",
-                            "The 125-episode campaign is 125 show episodes across 12 topic shows.",
-                            "Video-suitable episodes are tagged video_ready_audio, but Create with AI publishes audio only.",
-                        ],
-                        "results": results,
-                    },
-                )
+                run_results.append(result)
+                manifest_by_index[plan.global_index] = result
+                persist_outputs()
                 continue
             episode_result = create_ai_episode(
                 session,
@@ -961,29 +977,9 @@ def main() -> None:
                 result["status"] = "deleted_quality_failure"
                 result["quality_failure_reason"] = failure_reason
                 print(json.dumps(result, ensure_ascii=True), flush=True)
-                results.append(result)
-                write_outputs(
-                    output_dir,
-                    {
-                        "run_id": args.run_id,
-                        "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-                        "base_url": base_url,
-                        "public_origin": public_origin,
-                        "target_total": args.target_total,
-                        "single_count": args.single_count,
-                        "dry_run": not args.publish,
-                        "publish_mode": args.publish_mode,
-                        "safety_note": "Transparent Audioraq Originals seed content. No fake reviews or fake customer claims.",
-                        "constraints": [
-                            "Create with AI publishes audio-only episodes.",
-                            "Single episodes use one-episode capsule shows because the data model is show-first.",
-                            "Default distribution is 275 show episodes plus 25 singles, totaling 300.",
-                            "The 125-episode campaign is 125 show episodes across 12 topic shows.",
-                            "Video-suitable episodes are tagged video_ready_audio, but Create with AI publishes audio only.",
-                        ],
-                        "results": results,
-                    },
-                )
+                run_results.append(result)
+                manifest_by_index[plan.global_index] = result
+                persist_outputs()
                 raise RuntimeError(f"Stopped after quality failure: {failure_reason}; deleted the episode to protect product quality.")
             required_provider = args.require_provider_kind.strip().lower()
             actual_provider = (episode_result.get("ai_audio_provider_kind") or "").strip().lower()
@@ -995,36 +991,16 @@ def main() -> None:
             print(json.dumps(result, ensure_ascii=True), flush=True)
         else:
             print(json.dumps(result, ensure_ascii=True), flush=True)
-        results.append(result)
-        write_outputs(
-            output_dir,
-            {
-                "run_id": args.run_id,
-                "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-                "base_url": base_url,
-                "public_origin": public_origin,
-                "target_total": args.target_total,
-                "single_count": args.single_count,
-                "dry_run": not args.publish,
-                "publish_mode": args.publish_mode,
-                "safety_note": "Transparent Audioraq Originals seed content. No fake reviews or fake customer claims.",
-                "constraints": [
-                    "Create with AI publishes audio-only episodes.",
-                    "Single episodes use one-episode capsule shows because the data model is show-first.",
-                    "Default distribution is 275 show episodes plus 25 singles, totaling 300.",
-                    "The 125-episode campaign is 125 show episodes across 12 topic shows.",
-                    "Video-suitable episodes are tagged video_ready_audio, but Create with AI publishes audio only.",
-                ],
-                "results": results,
-            },
-        )
+        run_results.append(result)
+        manifest_by_index[plan.global_index] = result
+        persist_outputs()
         if provider_mismatch and not args.continue_on_provider_mismatch:
             raise RuntimeError(
                 f"Stopped after provider mismatch. Required {required_provider}, got {actual_provider or 'unknown'}; "
                 "deleted the fallback episode to protect product quality."
             )
 
-    print(json.dumps({"output_dir": str(output_dir), "published": args.publish, "processed": len(results)}, ensure_ascii=True))
+    print(json.dumps({"output_dir": str(output_dir), "published": args.publish, "processed": len(run_results)}, ensure_ascii=True))
 
 
 if __name__ == "__main__":

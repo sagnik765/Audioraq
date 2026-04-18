@@ -4540,6 +4540,11 @@ async def startup():
     await db.podcasts.create_index("podcaster_id")
     await db.podcasts.create_index("show_id")
     await db.podcasts.create_index("created_at")
+    await db.podcasts.create_index(
+        [("podcaster_id", 1), ("ai_draft_id", 1)],
+        unique=True,
+        partialFilterExpression={"ai_draft_id": {"$exists": True}, "is_deleted": False},
+    )
     await db.view_history.create_index([("user_id", 1), ("podcast_id", 1)])
     await db.shows.create_index("id", unique=True)
     await db.shows.create_index("podcaster_id")
@@ -5961,6 +5966,12 @@ async def upload_podcast(
                 status_code=400,
                 detail="Create with AI supports audio-only publishing. Use the regular Publish Episode flow for recorded video uploads.",
             )
+        existing_ai_episode = await db.podcasts.find_one(
+            {"ai_draft_id": ai_draft["id"], "podcaster_id": user["_id"], "is_deleted": False}
+        )
+        if existing_ai_episode:
+            enriched = await enrich_episodes([existing_ai_episode], current_user=user)
+            return enriched[0]
 
     ext = file.filename.split(".")[-1] if "." in file.filename else "bin"
     media_path = f"{APP_NAME}/episodes/{user['_id']}/{uuid.uuid4()}.{ext}"
@@ -6103,6 +6114,12 @@ async def create_ai_podcast_episode(
     ai_draft = await db.ai_podcast_drafts.find_one({"id": selected_ai_draft_id, "podcaster_id": user["_id"]})
     if ai_draft is None:
         raise HTTPException(status_code=404, detail="AI draft not found")
+    existing_ai_episode = await db.podcasts.find_one(
+        {"ai_draft_id": ai_draft["id"], "podcaster_id": user["_id"], "is_deleted": False}
+    )
+    if existing_ai_episode:
+        enriched = await enrich_episodes([existing_ai_episode], current_user=user)
+        return enriched[0]
 
     final_title = (title or ai_draft.get("publish_prefill", {}).get("title") or ai_draft.get("generation", {}).get("episode_title") or "").strip()
     final_description = (description or ai_draft.get("publish_prefill", {}).get("description") or ai_draft.get("generation", {}).get("suggested_description") or "").strip()
