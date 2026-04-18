@@ -25,6 +25,7 @@ Important constraints:
 from __future__ import annotations
 
 import argparse
+from array import array
 import json
 import re
 import shutil
@@ -48,6 +49,12 @@ DEFAULT_PASSWORD_PREFIX = "AudioraqSeed"
 SHOW_EPISODE_COUNTS_275 = [17, 15, 14, 14, 13, 13, 12, 12, 12, 11, 11, 11, 11, 10, 10, 10, 10, 9, 9, 9, 9, 9, 8, 8, 8]
 SHOW_EPISODE_COUNTS_125 = [12, 11, 11, 11, 10, 10, 10, 10, 10, 10, 10, 10]
 PROOF_STUDIO_APPLE_GAP_SECONDS = 0.22
+PROOF_STUDIO_APPLE_TARGET_PEAK_DBFS = -4.5
+PROOF_STUDIO_APPLE_RATES = {
+    "host": 150,
+    "guest": 148,
+    "narrator": 144,
+}
 PROOF_STUDIO_APPLE_VOICES = {
     "host": ["Aman", "Daniel", "Alex"],
     "guest": ["Samantha", "Ava", "Victoria"],
@@ -305,7 +312,7 @@ def audio_turns_from_generation(plan: EpisodeBlueprint, title: str, generation: 
     return fallback_audio_turns(plan, title, generation)
 
 
-def synthesize_turn_audio(text: str, output_wav: Path, voices: List[str]) -> str:
+def synthesize_turn_audio(text: str, output_wav: Path, voices: List[str], rate_wpm: int) -> str:
     require_tool("say")
     require_tool("afconvert")
     text_file = output_wav.with_suffix(".txt")
@@ -315,7 +322,7 @@ def synthesize_turn_audio(text: str, output_wav: Path, voices: List[str]) -> str
     for attempt, selected_voice in enumerate(dict.fromkeys(voices + ["Aman", "Samantha", "Daniel", "Alex"]), start=1):
         tmp_aiff = output_wav.with_suffix(f".{attempt}.aiff")
         try:
-            run(["say", "-v", selected_voice, "-o", str(tmp_aiff), "-f", str(text_file)])
+            run(["say", "-v", selected_voice, "-r", str(rate_wpm), "-o", str(tmp_aiff), "-f", str(text_file)])
             run(["afconvert", "-f", "WAVE", "-d", "LEI16", str(tmp_aiff), str(output_wav)])
             with wave.open(str(output_wav), "rb") as wav_file:
                 duration = wav_file.getnframes() / max(1, wav_file.getframerate())
@@ -348,6 +355,49 @@ def concat_wavs(segment_paths: List[Path], output_wav: Path, gap_seconds: float 
                 out.writeframes(silence)
 
 
+def master_wav_headroom(path: Path, target_peak_dbfs: float = PROOF_STUDIO_APPLE_TARGET_PEAK_DBFS) -> Dict[str, Any]:
+    """Apply transparent peak gain so proof-studio renders are comfortable over long sessions."""
+    with wave.open(str(path), "rb") as wav_in:
+        params = wav_in.getparams()
+        frames = wav_in.readframes(wav_in.getnframes())
+    if params.sampwidth != 2 or not frames:
+        return {"target_peak_dbfs": target_peak_dbfs, "gain": 1.0, "peak_before": None, "peak_after": None}
+
+    samples = array("h")
+    samples.frombytes(frames)
+    if sys.byteorder != "little":
+        samples.byteswap()
+
+    max_abs = max((abs(sample) for sample in samples), default=0)
+    if max_abs <= 0:
+        return {"target_peak_dbfs": target_peak_dbfs, "gain": 1.0, "peak_before": None, "peak_after": None}
+
+    full_scale = float((1 << (params.sampwidth * 8 - 1)) - 1)
+    target_abs = max(1, int(full_scale * (10 ** (target_peak_dbfs / 20.0))))
+    gain = target_abs / max_abs
+    mastered = array("h", (max(-32768, min(32767, int(round(sample * gain)))) for sample in samples))
+    peak_after = max((abs(sample) for sample in mastered), default=0)
+    if sys.byteorder != "little":
+        mastered.byteswap()
+
+    with wave.open(str(path), "wb") as wav_out:
+        wav_out.setparams(params)
+        wav_out.writeframes(mastered.tobytes())
+
+    return {
+        "target_peak_dbfs": target_peak_dbfs,
+        "gain": round(gain, 4),
+        "peak_before": round(20 * math_log10(max_abs / full_scale), 2),
+        "peak_after": round(20 * math_log10(max(1, peak_after) / full_scale), 2),
+    }
+
+
+def math_log10(value: float) -> float:
+    import math
+
+    return math.log10(max(value, 0.0000001))
+
+
 def render_apple_say_audio(turns: List[Dict[str, str]], output_wav: Path) -> Dict[str, Any]:
     selected_voices: Dict[str, str] = {}
     with tempfile.TemporaryDirectory(prefix="audioraq-originals-dialogue-") as temp_dir:
@@ -356,15 +406,23 @@ def render_apple_say_audio(turns: List[Dict[str, str]], output_wav: Path) -> Dic
         for index, turn in enumerate(turns, start=1):
             role = normalize_voice_role(turn.get("speaker", ""), turn.get("voice_role", ""))
             segment = temp_path / f"{index:03d}-{role}.wav"
-            selected_voice = synthesize_turn_audio(turn["text"], segment, PROOF_STUDIO_APPLE_VOICES.get(role, PROOF_STUDIO_APPLE_VOICES["host"]))
+            selected_voice = synthesize_turn_audio(
+                turn["text"],
+                segment,
+                PROOF_STUDIO_APPLE_VOICES.get(role, PROOF_STUDIO_APPLE_VOICES["host"]),
+                PROOF_STUDIO_APPLE_RATES.get(role, PROOF_STUDIO_APPLE_RATES["host"]),
+            )
             selected_voices.setdefault(role, selected_voice)
             segments.append(segment)
         concat_wavs(segments, output_wav)
+    mastering = master_wav_headroom(output_wav)
     return {
         "provider": "apple-say:proof-studio",
         "provider_kind": "local-proof",
         "voices": selected_voices,
         "turn_count": len(turns),
+        "rates_wpm": PROOF_STUDIO_APPLE_RATES,
+        "mastering": mastering,
     }
 
 
@@ -604,6 +662,9 @@ def create_ai_episode(
                 data={
                     "show_id": show_id,
                     "ai_draft_id": draft["id"],
+                    "ai_audio_provider": render_metadata["provider"],
+                    "ai_audio_provider_kind": render_metadata["provider_kind"],
+                    "ai_audio_voice_profile": "apple_proof_studio",
                     "title": title,
                     "description": description,
                     "category": plan.category,

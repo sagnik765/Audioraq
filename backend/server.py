@@ -132,6 +132,12 @@ AI_AUDIO_VOICE_ROLES = {"host", "guest", "narrator"}
 AI_AUDIO_DISCLOSURE = "This episode includes AI-generated voice audio."
 PROOF_STUDIO_LOCAL_FILTER = "highpass=f=80,lowpass=f=12000,loudnorm=I=-16:TP=-1.5:LRA=11"
 PROOF_STUDIO_APPLE_GAP_SECONDS = 0.22
+PROOF_STUDIO_APPLE_TARGET_PEAK_DBFS = -4.5
+PROOF_STUDIO_APPLE_RATES = {
+    "host": 150,
+    "guest": 148,
+    "narrator": 144,
+}
 PROOF_STUDIO_APPLE_VOICES = {
     "host": ["Aman", "Daniel", "Alex"],
     "guest": ["Samantha", "Ava", "Victoria"],
@@ -2678,7 +2684,7 @@ def proof_studio_apple_role(voice_role: str, speaker: str = "") -> str:
     return voice_role if voice_role in AI_AUDIO_VOICE_ROLES else "host"
 
 
-def synthesize_apple_say_turn(text: str, output_wav: Path, voices: List[str]) -> Tuple[str, float]:
+def synthesize_apple_say_turn(text: str, output_wav: Path, voices: List[str], rate_wpm: int) -> Tuple[str, float]:
     say = shutil.which("say")
     afconvert = shutil.which("afconvert")
     if not say or not afconvert:
@@ -2690,7 +2696,12 @@ def synthesize_apple_say_turn(text: str, output_wav: Path, voices: List[str]) ->
     for attempt, selected_voice in enumerate(dict.fromkeys(voices), start=1):
         tmp_aiff = output_wav.with_suffix(f".{attempt}.aiff")
         try:
-            say_result = subprocess.run([say, "-v", selected_voice, "-o", str(tmp_aiff), "-f", str(text_path)], capture_output=True, text=True, timeout=240)
+            say_result = subprocess.run(
+                [say, "-v", selected_voice, "-r", str(rate_wpm), "-o", str(tmp_aiff), "-f", str(text_path)],
+                capture_output=True,
+                text=True,
+                timeout=240,
+            )
             if say_result.returncode != 0:
                 raise RuntimeError(say_result.stderr or say_result.stdout or "Apple say rendering failed")
             convert_result = subprocess.run([afconvert, "-f", "WAVE", "-d", "LEI16", str(tmp_aiff), str(output_wav)], capture_output=True, text=True, timeout=240)
@@ -2729,6 +2740,42 @@ def concat_wav_files_with_silence(segment_paths: List[Path], output_wav: Path, g
                 out.writeframes(silence)
 
 
+def master_wav_peak_headroom(path: Path, target_peak_dbfs: float = PROOF_STUDIO_APPLE_TARGET_PEAK_DBFS) -> Dict[str, Any]:
+    with wave.open(str(path), "rb") as wav_in:
+        params = wav_in.getparams()
+        frames = wav_in.readframes(wav_in.getnframes())
+    if params.sampwidth != 2 or not frames:
+        return {"target_peak_dbfs": target_peak_dbfs, "gain": 1.0, "peak_before": None, "peak_after": None}
+
+    samples = array("h")
+    samples.frombytes(frames)
+    if sys.byteorder != "little":
+        samples.byteswap()
+
+    max_abs = max((abs(sample) for sample in samples), default=0)
+    if max_abs <= 0:
+        return {"target_peak_dbfs": target_peak_dbfs, "gain": 1.0, "peak_before": None, "peak_after": None}
+
+    full_scale = float((1 << (params.sampwidth * 8 - 1)) - 1)
+    target_abs = max(1, int(full_scale * (10 ** (target_peak_dbfs / 20.0))))
+    gain = target_abs / max_abs
+    mastered = array("h", (max(-32768, min(32767, int(round(sample * gain)))) for sample in samples))
+    peak_after = max((abs(sample) for sample in mastered), default=0)
+    if sys.byteorder != "little":
+        mastered.byteswap()
+
+    with wave.open(str(path), "wb") as wav_out:
+        wav_out.setparams(params)
+        wav_out.writeframes(mastered.tobytes())
+
+    return {
+        "target_peak_dbfs": target_peak_dbfs,
+        "gain": round(gain, 4),
+        "peak_before": round(20 * math.log10(max(max_abs / full_scale, 0.0000001)), 2),
+        "peak_after": round(20 * math.log10(max(max(1, peak_after) / full_scale, 0.0000001)), 2),
+    }
+
+
 def render_apple_say_proof_audio(script_text: str, turns: Optional[List[Dict[str, str]]] = None) -> Dict[str, Any]:
     if not apple_say_tts_available():
         raise RuntimeError("Apple proof-studio TTS is only available on macOS with say and afconvert")
@@ -2747,7 +2794,12 @@ def render_apple_say_proof_audio(script_text: str, turns: Optional[List[Dict[str
             role = proof_studio_apple_role(str(turn.get("voice_role") or "host"), str(turn.get("speaker") or ""))
             voice_candidates = PROOF_STUDIO_APPLE_VOICES.get(role, PROOF_STUDIO_APPLE_VOICES["host"])
             segment_path = temp_path / f"segment-{index:03d}-{role}.wav"
-            selected_voice, duration_seconds = synthesize_apple_say_turn(turn.get("text") or "", segment_path, voice_candidates)
+            selected_voice, duration_seconds = synthesize_apple_say_turn(
+                turn.get("text") or "",
+                segment_path,
+                voice_candidates,
+                PROOF_STUDIO_APPLE_RATES.get(role, PROOF_STUDIO_APPLE_RATES["host"]),
+            )
             voices[role] = selected_voice
             timings.append(
                 {
@@ -2764,6 +2816,7 @@ def render_apple_say_proof_audio(script_text: str, turns: Optional[List[Dict[str
 
         output_path = temp_path / "episode.wav"
         concat_wav_files_with_silence(segments, output_path)
+        mastering = master_wav_peak_headroom(output_path)
         data = output_path.read_bytes()
         if len(data) < 1024:
             raise RuntimeError("Apple proof-studio TTS produced an empty audio file")
@@ -2777,7 +2830,9 @@ def render_apple_say_proof_audio(script_text: str, turns: Optional[List[Dict[str
             "turn_count": len(rendered_turns),
             "chunk_count": len(segments),
             "timings": timings,
-            "enhancement_profile": "audioraq-qa-proof-dialogue+apple-system-voices+0.22s-turn-gaps",
+            "rates_wpm": PROOF_STUDIO_APPLE_RATES,
+            "mastering": mastering,
+            "enhancement_profile": "audioraq-qa-proof-dialogue+apple-system-voices+calm-podcast-rate+0.22s-turn-gaps",
             "benchmark_note": "Replicates the April 11 QA proof-studio recipe using generic macOS system voices; does not clone a real person's voice.",
             "voice_profile": "apple_proof_studio",
             "extension": "wav",
@@ -5865,6 +5920,9 @@ async def upload_podcast(
     audience_rating: str = Form(ALL_AGES_RATING),
     show_id: str = Form(""),
     ai_draft_id: str = Form(""),
+    ai_audio_provider: str = Form(""),
+    ai_audio_provider_kind: str = Form(""),
+    ai_audio_voice_profile: str = Form(""),
     season_number: Optional[int] = Form(None),
     episode_number: Optional[int] = Form(None),
     thumbnail: Optional[UploadFile] = File(None),
@@ -5917,12 +5975,15 @@ async def upload_podcast(
     keywords = await extract_keywords(f"{title} {description} {normalized_category} {show['title']}")
     media_type = "video" if is_video_upload else "audio"
     selected_rating = normalize_content_rating(audience_rating)
+    analysis_provider = "uploaded-media"
+    if ai_draft:
+        analysis_provider = (ai_audio_provider or "ai-audio-upload").strip()[:120] or "ai-audio-upload"
     media_analysis = attach_voice_clarity(
         transcribe_media_for_safety(data, file.filename or "", content_type),
         data,
         file.filename or "",
         content_type,
-        provider="uploaded-media",
+        provider=analysis_provider,
     )
     moderation = await review_episode_safety(
         show,
@@ -5984,6 +6045,9 @@ async def upload_podcast(
     if ai_draft:
         podcast_doc["ai_draft_id"] = ai_draft["id"]
         podcast_doc["ai_assisted"] = True
+        podcast_doc["ai_audio_provider"] = analysis_provider
+        podcast_doc["ai_audio_provider_kind"] = (ai_audio_provider_kind or "").strip()[:80]
+        podcast_doc["ai_audio_voice_profile"] = (ai_audio_voice_profile or "").strip()[:80]
     await db.podcasts.insert_one(podcast_doc)
     await db.shows.update_one({"id": show["id"]}, {"$set": {"updated_at": now_iso()}})
     if ai_draft:
