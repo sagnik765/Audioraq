@@ -30,6 +30,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import uuid
 import wave
 import xml.etree.ElementTree as ET
@@ -132,23 +133,23 @@ AGENT2_RLAIF_POLICY = [
 AI_AUDIO_VOICE_ROLES = {"host", "guest", "narrator"}
 AI_AUDIO_DISCLOSURE = "This episode includes AI-generated voice audio."
 PROOF_STUDIO_LOCAL_FILTER = "highpass=f=80,lowpass=f=12000,loudnorm=I=-16:TP=-1.5:LRA=11"
-PROOF_STUDIO_APPLE_GAP_SECONDS = 0.22
-PROOF_STUDIO_APPLE_NARRATIVE_GAP_SECONDS = 0.42
+PROOF_STUDIO_APPLE_GAP_SECONDS = 0.28
+PROOF_STUDIO_APPLE_NARRATIVE_GAP_SECONDS = 0.75
 PROOF_STUDIO_APPLE_TARGET_PEAK_DBFS = -4.5
 PROOF_STUDIO_APPLE_RATES = {
-    "host": 142,
-    "guest": 140,
-    "narrator": 128,
+    "host": 124,
+    "guest": 122,
+    "narrator": 116,
 }
 PROOF_STUDIO_APPLE_NARRATIVE_RATES = {
-    "host": 126,
-    "guest": 126,
-    "narrator": 112,
+    "host": 100,
+    "guest": 98,
+    "narrator": 96,
 }
 PROOF_STUDIO_APPLE_VOICES = {
     "host": ["Aman", "Daniel", "Alex"],
     "guest": ["Samantha", "Ava", "Victoria"],
-    "narrator": ["Daniel", "Oliver", "Fred"],
+    "narrator": ["Samantha", "Aman", "Alex"],
 }
 AI_STUDIO_STAGES = [
     "brief",
@@ -548,13 +549,25 @@ def put_object(path, data, content_type):
         return {"path": path, "storage_backend": "local"}
 
     key = init_storage()
-    resp = requests.put(
-        f"{STORAGE_URL}/objects/{path}",
-        headers={"X-Storage-Key": key, "Content-Type": content_type},
-        data=data,
-        timeout=300,
-    )
-    resp.raise_for_status()
+    for attempt in range(4):
+        try:
+            resp = requests.put(
+                f"{STORAGE_URL}/objects/{path}",
+                headers={"X-Storage-Key": key, "Content-Type": content_type},
+                data=data,
+                timeout=300,
+            )
+            resp.raise_for_status()
+            break
+        except requests.RequestException as exc:
+            status_code = getattr(getattr(exc, "response", None), "status_code", None)
+            if status_code and status_code < 500:
+                raise
+            if attempt == 3:
+                raise
+            delay = 2 ** attempt
+            logger.warning(f"Storage upload retry {attempt + 1}/4 for {path} after {status_code or exc.__class__.__name__}; waiting {delay}s")
+            time.sleep(delay)
     try:
         cache_object_locally(path, data, content_type)
     except Exception as exc:

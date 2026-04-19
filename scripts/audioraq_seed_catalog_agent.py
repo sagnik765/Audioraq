@@ -49,23 +49,23 @@ DEFAULT_PASSWORD_PREFIX = "AudioraqSeed"
 SHOW_EPISODE_COUNTS_275 = [17, 15, 14, 14, 13, 13, 12, 12, 12, 11, 11, 11, 11, 10, 10, 10, 10, 9, 9, 9, 9, 9, 8, 8, 8]
 SHOW_EPISODE_COUNTS_125 = [12, 11, 11, 11, 10, 10, 10, 10, 10, 10, 10, 10]
 SHOW_EPISODE_COUNTS_65 = [10, 10, 9, 9, 9, 9, 9]
-PROOF_STUDIO_APPLE_GAP_SECONDS = 0.22
-PROOF_STUDIO_APPLE_NARRATIVE_GAP_SECONDS = 0.42
+PROOF_STUDIO_APPLE_GAP_SECONDS = 0.28
+PROOF_STUDIO_APPLE_NARRATIVE_GAP_SECONDS = 0.75
 PROOF_STUDIO_APPLE_TARGET_PEAK_DBFS = -4.5
 PROOF_STUDIO_APPLE_RATES = {
-    "host": 142,
-    "guest": 140,
-    "narrator": 128,
+    "host": 124,
+    "guest": 122,
+    "narrator": 116,
 }
 PROOF_STUDIO_APPLE_NARRATIVE_RATES = {
-    "host": 126,
-    "guest": 126,
-    "narrator": 112,
+    "host": 100,
+    "guest": 98,
+    "narrator": 96,
 }
 PROOF_STUDIO_APPLE_VOICES = {
     "host": ["Aman", "Daniel", "Alex"],
     "guest": ["Samantha", "Ava", "Victoria"],
-    "narrator": ["Daniel", "Oliver", "Fred"],
+    "narrator": ["Samantha", "Aman", "Alex"],
 }
 
 
@@ -145,7 +145,7 @@ SHOWS_125_TRENDING: List[ShowBlueprint] = [
     ShowBlueprint("Frontier Markets Now", "emerging markets", "where growth is compounding outside the US and Europe", "operators, VCs, exporters, and policy watchers", "professional", "interview", "long", "educate", "clarity", ["India manufacturing", "Nigeria fintech", "Vietnam supply chains", "Brazil agri-tech", "Gulf capital", "Africa mobile money"]),
     ShowBlueprint("Agentic Era", "technology", "AI agents, robotics, spatial computing, and workflow automation", "builders, operators, and early adopters", "energetic", "interview", "short", "educate", "virality", ["AI agents at work", "robotics reality checks", "on-device AI", "workflow orchestration", "spatial computing", "model governance"]),
     ShowBlueprint("The Briefing Room", "current affairs", "calm explainers on the week's biggest events", "busy listeners who want context without panic", "professional", "interview", "moderate", "educate", "clarity", ["tariff diplomacy", "misinformation", "sanctions", "election aftershocks", "migration", "cyber incidents"]),
-    ShowBlueprint("Cosmos Next", "astrophysics", "near-term space missions and big cosmic questions", "curious generalists, STEM fans, and educators", "storytelling", "narrative", "short", "storytelling", "retention", ["Roman telescope", "exoplanet atmospheres", "cosmic dawn", "dark matter", "astrobiology", "citizen science"]),
+    ShowBlueprint("Cosmos Next", "astrophysics", "near-term space missions and big cosmic questions", "curious generalists, STEM fans, and educators", "professional", "interview", "short", "educate", "clarity", ["Roman telescope", "exoplanet atmospheres", "cosmic dawn", "dark matter", "astrobiology", "citizen science"]),
     ShowBlueprint("The Movement Dividend", "physical health", "evidence-based health habits for real life", "desk workers, founders, and fitness-curious listeners", "professional", "interview", "moderate", "educate", "clarity", ["sedentary work", "strength after 40", "sleep and recovery", "zone 2 myths", "mobility", "habit design"]),
     ShowBlueprint("Nervous System Nation", "mental health", "stress, burnout, attention, and practical self-regulation", "professionals, caregivers, parents, and managers", "casual", "interview", "short", "educate", "retention", ["burnout", "teen anxiety", "digital overload", "grief", "men's mental health", "stress resets"]),
     ShowBlueprint("Scam School", "finance", "fraud, impersonation, and digital trust", "consumers, small businesses, and compliance teams", "energetic", "interview", "short", "educate", "virality", ["invoice fraud", "romance scams", "crypto fraud", "AI impersonation", "payroll theft", "consumer recovery"]),
