@@ -37,6 +37,7 @@ export default function PodcasterDashboard() {
   const [category, setCategory] = useState('general');
   const [file, setFile] = useState(null);
   const [thumbnail, setThumbnail] = useState(null);
+  const [autoGenerateEpisodeThumbnail, setAutoGenerateEpisodeThumbnail] = useState(true);
   const [episodeNumber, setEpisodeNumber] = useState('');
   const [seasonNumber, setSeasonNumber] = useState('');
   const [publishMode, setPublishMode] = useState('upload');
@@ -45,6 +46,8 @@ export default function PodcasterDashboard() {
   const [showTitle, setShowTitle] = useState('');
   const [showDescription, setShowDescription] = useState('');
   const [showCategory, setShowCategory] = useState('general');
+  const [showThumbnail, setShowThumbnail] = useState(null);
+  const [autoGenerateShowThumbnail, setAutoGenerateShowThumbnail] = useState(true);
   const [rssFeedUrl, setRssFeedUrl] = useState('');
   const [aiDraftApplied, setAiDraftApplied] = useState(null);
 
@@ -86,6 +89,7 @@ export default function PodcasterDashboard() {
     setCategory('general');
     setFile(null);
     setThumbnail(null);
+    setAutoGenerateEpisodeThumbnail(true);
     setEpisodeNumber('');
     setSeasonNumber('');
     setAudienceRating('all_ages');
@@ -140,6 +144,7 @@ export default function PodcasterDashboard() {
       formData.append('audience_rating', audienceRating);
       if (aiDraftApplied?.id) formData.append('ai_draft_id', aiDraftApplied.id);
       if (thumbnail) formData.append('thumbnail', thumbnail);
+      formData.append('auto_generate_thumbnail', autoGenerateEpisodeThumbnail ? 'true' : 'false');
       if (episodeNumber) formData.append('episode_number', episodeNumber);
       if (seasonNumber) formData.append('season_number', seasonNumber);
       if (publishMode === 'upload') {
@@ -170,6 +175,8 @@ export default function PodcasterDashboard() {
       formData.append('title', showTitle);
       formData.append('description', showDescription);
       formData.append('category', showCategory);
+      if (showThumbnail) formData.append('thumbnail', showThumbnail);
+      formData.append('auto_generate_thumbnail', autoGenerateShowThumbnail ? 'true' : 'false');
       const res = await axios.post(`${API}/shows`, formData, {
         withCredentials: true,
         headers: { 'Content-Type': 'multipart/form-data' },
@@ -179,6 +186,8 @@ export default function PodcasterDashboard() {
       setShowTitle('');
       setShowDescription('');
       setShowCategory('general');
+      setShowThumbnail(null);
+      setAutoGenerateShowThumbnail(true);
       setSelectedShowId(res.data.id);
       fetchStudio();
       checkAuth();
@@ -237,6 +246,8 @@ export default function PodcasterDashboard() {
       show_id: episode.show_id || selectedShowId,
       episode_number: episode.episode_number || '',
       season_number: episode.season_number || '',
+      thumbnail: null,
+      auto_generate_thumbnail: false,
     });
   };
 
@@ -251,6 +262,8 @@ export default function PodcasterDashboard() {
       formData.append('show_id', editingEpisode.show_id);
       if (editingEpisode.episode_number) formData.append('episode_number', editingEpisode.episode_number);
       if (editingEpisode.season_number) formData.append('season_number', editingEpisode.season_number);
+      if (editingEpisode.thumbnail) formData.append('thumbnail', editingEpisode.thumbnail);
+      formData.append('auto_generate_thumbnail', editingEpisode.auto_generate_thumbnail ? 'true' : 'false');
 
       await axios.put(`${API}/podcasts/${editingEpisode.id}`, formData, {
         withCredentials: true,
@@ -277,6 +290,26 @@ export default function PodcasterDashboard() {
     setTimeout(() => {
       document.querySelector('[data-testid="upload-podcast-form"]')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
     }, 100);
+  };
+
+  const handleGenerateShowThumbnail = async (showId) => {
+    try {
+      const { data } = await axios.post(`${API}/shows/${showId}/thumbnail/generate`, {}, { withCredentials: true });
+      setShows((prev) => prev.map((show) => (show.id === showId ? data : show)));
+      toast.success('Show thumbnail created');
+    } catch (error) {
+      toast.error(error.response?.data?.detail || 'Could not create show thumbnail');
+    }
+  };
+
+  const handleGenerateEpisodeThumbnail = async (episodeId) => {
+    try {
+      const { data } = await axios.post(`${API}/podcasts/${episodeId}/thumbnail/generate`, {}, { withCredentials: true });
+      setEpisodes((prev) => prev.map((episode) => (episode.id === episodeId ? data : episode)));
+      toast.success('Episode thumbnail created');
+    } catch (error) {
+      toast.error(error.response?.data?.detail || 'Could not create episode thumbnail');
+    }
   };
 
   return (
@@ -335,6 +368,98 @@ export default function PodcasterDashboard() {
             </div>
           ))}
         </div>
+
+        <section className="bg-[#141417] border border-[#27272A] rounded-3xl p-8 mb-10">
+          <div className="flex flex-col md:flex-row md:items-end md:justify-between gap-4 mb-6">
+            <div>
+              <p className="text-xs uppercase tracking-[0.2em] font-semibold text-[#F5A623] mb-2">Show Manager</p>
+              <h2 className="font-['Outfit'] text-2xl font-semibold text-white">Show > Season > Episode organization</h2>
+              <p className="text-sm text-[#8A8A93] mt-1">
+                Keep each show branded, then publish episodes into seasons with Agent 2 quality status attached.
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => setShowCreateShow(true)}
+              className="bg-[#0A0A0B] hover:bg-[#27272A] border border-[#27272A] text-white rounded-full px-5 py-3 transition-colors inline-flex items-center gap-2"
+            >
+              <Plus className="w-5 h-5" />
+              New Show
+            </button>
+          </div>
+
+          {shows.length > 0 ? (
+            <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+              {shows.map((show) => (
+                <div
+                  key={show.id}
+                  role="button"
+                  tabIndex={0}
+                  onClick={() => setSelectedShowId(show.id)}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter' || event.key === ' ') {
+                      event.preventDefault();
+                      setSelectedShowId(show.id);
+                    }
+                  }}
+                  className={`text-left rounded-2xl border p-5 transition-all ${
+                    selectedShowId === show.id
+                      ? 'border-[#F5A623] bg-[#F5A623]/10'
+                      : 'border-[#27272A] bg-[#0A0A0B] hover:border-[#8A8A93]'
+                  }`}
+                >
+                  <div className="flex items-start justify-between gap-4 mb-3">
+                    <div className="min-w-0">
+                      <p className="text-xs uppercase tracking-[0.18em] text-[#F5A623] mb-1">{show.category || 'general'}</p>
+                      <h3 className="font-['Outfit'] text-lg font-semibold text-white truncate">{show.title}</h3>
+                    </div>
+                    <span className="text-xs text-[#8A8A93] whitespace-nowrap">{show.episode_count || 0} episodes</span>
+                  </div>
+                  <p className="text-sm text-[#8A8A93] line-clamp-2 mb-4">{show.description || 'Add a show description so listeners know what to expect.'}</p>
+                  <div className="flex flex-wrap gap-2 mb-4">
+                    {(show.quality_signals || ['Ready for episodes']).slice(0, 3).map((signal) => (
+                      <span key={signal} className="bg-[#141417] border border-[#27272A] rounded-full px-2.5 py-1 text-[10px] uppercase tracking-[0.16em] text-[#C7C7D1]">
+                        {signal}
+                      </span>
+                    ))}
+                  </div>
+                  <div className="flex items-center justify-between gap-3">
+                    <span className="text-xs text-[#8A8A93]">{show.total_play_count || 0} plays</span>
+                    <span
+                      role="button"
+                      tabIndex={0}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        handleGenerateShowThumbnail(show.id);
+                      }}
+                      onKeyDown={(event) => {
+                        if (event.key === 'Enter' || event.key === ' ') {
+                          event.preventDefault();
+                          event.stopPropagation();
+                          handleGenerateShowThumbnail(show.id);
+                        }
+                      }}
+                      className="text-xs text-[#F5A623] hover:text-[#F7B84B] transition-colors"
+                    >
+                      Create thumbnail
+                    </span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="bg-[#0A0A0B] border border-[#27272A] rounded-2xl p-8 text-center">
+              <p className="text-[#8A8A93] mb-4">Create a show first, then add seasons and episodes under it.</p>
+              <button
+                type="button"
+                onClick={() => setShowCreateShow(true)}
+                className="bg-[#F5A623] hover:bg-[#F7B84B] text-[#0A0A0B] font-bold rounded-full px-6 py-3 transition-colors"
+              >
+                Create Show
+              </button>
+            </div>
+          )}
+        </section>
 
         <Dialog open={showAICreator} onOpenChange={setShowAICreator}>
           <DialogContent className="max-w-6xl bg-[#0A0A0B] border border-[#27272A] text-white p-0 overflow-hidden">
@@ -437,6 +562,30 @@ export default function PodcasterDashboard() {
                   className="w-full bg-[#0A0A0B] border border-[#27272A] rounded-xl text-white px-4 py-3 outline-none min-h-[140px] resize-none"
                 />
               </div>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
+                <div>
+                  <label className="text-xs uppercase tracking-[0.2em] font-semibold text-[#8A8A93] mb-2 block">Show Artwork</label>
+                  <input
+                    type="file"
+                    accept="image/*"
+                    onChange={(e) => setShowThumbnail(e.target.files[0])}
+                    className="w-full bg-[#0A0A0B] border border-[#27272A] rounded-xl text-white px-4 py-3 file:mr-4 file:rounded-full file:border-0 file:bg-[#27272A] file:text-white file:font-medium file:px-4 file:py-1 file:text-sm"
+                  />
+                  <p className="text-xs text-[#8A8A93] mt-2">Upload custom cover art if you already have it.</p>
+                </div>
+                <label className="rounded-2xl border border-[#27272A] bg-[#0A0A0B] px-4 py-4 flex items-start gap-3 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={autoGenerateShowThumbnail}
+                    onChange={(e) => setAutoGenerateShowThumbnail(e.target.checked)}
+                    className="mt-1 accent-[#F5A623]"
+                  />
+                  <span>
+                    <span className="block text-sm font-semibold text-white">Create artwork automatically</span>
+                    <span className="block text-xs text-[#8A8A93] mt-1">Audioraq will generate a branded show thumbnail from the title and category if no custom file is uploaded.</span>
+                  </span>
+                </label>
+              </div>
               <button
                 type="submit"
                 disabled={savingShow}
@@ -451,6 +600,12 @@ export default function PodcasterDashboard() {
         {showUpload && (
           <div className="bg-[#141417] border border-[#27272A] rounded-3xl p-8 mb-8" data-testid="upload-podcast-form">
             <h2 className="font-['Outfit'] text-xl font-semibold text-white mb-6">Publish Episode</h2>
+            <div className="bg-[#0A0A0B] border border-[#27272A] rounded-2xl px-4 py-4 mb-6">
+              <p className="text-xs uppercase tracking-[0.18em] text-[#F5A623] mb-2">Fast Agent 2 gate</p>
+              <p className="text-sm text-[#C7C7D1]">
+                Clean episodes use Audioraq's local fast-path safety and quality checks first, then publish. Risky packages still escalate before they reach listeners.
+              </p>
+            </div>
             {aiDraftApplied && (
               <div className="bg-[#0A0A0B] border border-[#27272A] rounded-2xl px-4 py-4 mb-6">
                 <p className="text-xs uppercase tracking-[0.18em] text-[#8A8A93] mb-2">AI draft applied</p>
@@ -610,6 +765,18 @@ export default function PodcasterDashboard() {
                     className="w-full bg-[#0A0A0B] border border-[#27272A] rounded-xl text-white px-4 py-3 file:mr-4 file:rounded-full file:border-0 file:bg-[#27272A] file:text-white file:font-medium file:px-4 file:py-1 file:text-sm"
                     data-testid="upload-thumbnail-input"
                   />
+                  <label className="flex items-start gap-3 mt-3 text-sm text-[#C7C7D1] cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={autoGenerateEpisodeThumbnail}
+                      onChange={(e) => setAutoGenerateEpisodeThumbnail(e.target.checked)}
+                      className="mt-1 accent-[#F5A623]"
+                    />
+                    <span>
+                      <span className="block text-white">Create thumbnail automatically</span>
+                      <span className="block text-xs text-[#8A8A93] mt-1">If no file is uploaded, Audioraq generates category-aware artwork for this episode.</span>
+                    </span>
+                  </label>
                 </div>
               </div>
 
@@ -689,6 +856,29 @@ export default function PodcasterDashboard() {
                 onChange={(e) => setEditingEpisode((prev) => ({ ...prev, description: e.target.value }))}
                 className="w-full bg-[#0A0A0B] border border-[#27272A] rounded-xl text-white px-4 py-3 outline-none min-h-[120px] resize-none"
               />
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
+                <div>
+                  <label className="text-xs uppercase tracking-[0.2em] font-semibold text-[#8A8A93] mb-2 block">Replace Thumbnail</label>
+                  <input
+                    type="file"
+                    accept="image/*"
+                    onChange={(e) => setEditingEpisode((prev) => ({ ...prev, thumbnail: e.target.files[0] }))}
+                    className="w-full bg-[#0A0A0B] border border-[#27272A] rounded-xl text-white px-4 py-3 file:mr-4 file:rounded-full file:border-0 file:bg-[#27272A] file:text-white file:font-medium file:px-4 file:py-1 file:text-sm"
+                  />
+                </div>
+                <label className="rounded-2xl border border-[#27272A] bg-[#0A0A0B] px-4 py-4 flex items-start gap-3 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={editingEpisode.auto_generate_thumbnail}
+                    onChange={(e) => setEditingEpisode((prev) => ({ ...prev, auto_generate_thumbnail: e.target.checked }))}
+                    className="mt-1 accent-[#F5A623]"
+                  />
+                  <span>
+                    <span className="block text-sm font-semibold text-white">Regenerate from metadata</span>
+                    <span className="block text-xs text-[#8A8A93] mt-1">Create fresh episode artwork from the title, show, and category.</span>
+                  </span>
+                </label>
+              </div>
               <div className="flex gap-3">
                 <button type="button" onClick={() => setEditingEpisode(null)} className="bg-[#0A0A0B] hover:bg-[#27272A] border border-[#27272A] text-white rounded-full px-6 py-3 transition-colors">
                   Cancel
@@ -813,6 +1003,16 @@ export default function PodcasterDashboard() {
                 <div key={episode.id} className="relative group">
                   <PodcastCard podcast={episode} />
                   <div className="absolute top-3 right-3 flex gap-2 z-10">
+                    <button
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        handleGenerateEpisodeThumbnail(episode.id);
+                      }}
+                      className="bg-[#0A0A0B]/85 hover:bg-[#0A0A0B] text-white rounded-full p-2 opacity-0 group-hover:opacity-100 transition-opacity"
+                      data-testid={`generate-thumbnail-${episode.id}`}
+                    >
+                      <Plus weight="bold" className="w-4 h-4" />
+                    </button>
                     <button
                       onClick={(event) => beginEditEpisode(episode, event)}
                       className="bg-[#0A0A0B]/85 hover:bg-[#0A0A0B] text-white rounded-full p-2 opacity-0 group-hover:opacity-100 transition-opacity"

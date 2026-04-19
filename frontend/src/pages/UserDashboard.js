@@ -174,10 +174,10 @@ export default function UserDashboard() {
                 Explore Browse
               </Link>
               <Link
-                to="/settings"
+                to="/library"
                 className="bg-[#0A0A0B] hover:bg-[#27272A] border border-[#27272A] text-white rounded-full px-6 py-3 transition-colors"
               >
-                Refine Interests
+                Open Library
               </Link>
             </div>
           </div>
@@ -306,26 +306,21 @@ export default function UserDashboard() {
               </section>
             )}
 
-            {savedEpisodes.length > 0 && (
+            {(savedEpisodes.length > 0 || listeningHistory.length > 0) && (
               <section className="mb-12">
-                <div className="flex items-center justify-between mb-6">
+                <div className="bg-[#141417] border border-[#27272A] rounded-3xl p-6 md:p-8 flex flex-col lg:flex-row lg:items-center lg:justify-between gap-6">
                   <div className="flex items-center gap-3">
                     <BookmarkSimple className="text-[#F5A623] w-5 h-5" />
-                    <h2 className="font-['Outfit'] text-xl font-semibold text-white">Saved for later</h2>
+                    <div>
+                      <h2 className="font-['Outfit'] text-xl font-semibold text-white">Your Library has your saved and listened episodes</h2>
+                      <p className="text-sm text-[#8A8A93] mt-1">
+                        {savedEpisodes.length} saved for later and {listeningHistory.length} recent listens are organized away from Home so this feed can stay personalized and fresh.
+                      </p>
+                    </div>
                   </div>
-                  <Link to="/browse" className="text-sm text-[#F5A623] hover:text-[#F7B84B] transition-colors">
-                    Find more
+                  <Link to="/library" className="bg-[#0A0A0B] hover:bg-[#27272A] border border-[#27272A] text-white rounded-full px-5 py-3 transition-colors text-center">
+                    Open Library
                   </Link>
-                </div>
-                <div className="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-4 gap-6">
-                  {savedEpisodes.map((podcast) => (
-                    <PodcastCard
-                      key={podcast.id}
-                      podcast={podcast}
-                      onHide={removeEpisodeEverywhere}
-                      onSaveChange={(_, nextSaved) => handleSaveStateChange(podcast, nextSaved)}
-                    />
-                  ))}
                 </div>
               </section>
             )}
@@ -400,25 +395,6 @@ export default function UserDashboard() {
                 </div>
                 <div className="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-4 gap-6">
                   {trending.slice(0, 4).map((podcast) => (
-                    <PodcastCard
-                      key={podcast.id}
-                      podcast={podcast}
-                      onHide={removeEpisodeEverywhere}
-                      onSaveChange={(_, nextSaved) => handleSaveStateChange(podcast, nextSaved)}
-                    />
-                  ))}
-                </div>
-              </section>
-            )}
-
-            {listeningHistory.length > 0 && (
-              <section className="mb-12">
-                <div className="flex items-center gap-3 mb-6">
-                  <Fire weight="duotone" className="text-[#F5A623] w-5 h-5" />
-                  <h2 className="font-['Outfit'] text-xl font-semibold text-white">Listening history</h2>
-                </div>
-                <div className="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-4 gap-6">
-                  {listeningHistory.map((podcast) => (
                     <PodcastCard
                       key={podcast.id}
                       podcast={podcast}

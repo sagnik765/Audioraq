@@ -11,6 +11,7 @@ import UserDashboard from "./pages/UserDashboard";
 import PodcasterDashboard from "./pages/PodcasterDashboard";
 import BrowsePage from "./pages/BrowsePage";
 import EpisodeDetailPage from "./pages/EpisodeDetailPage";
+import LibraryPage from "./pages/LibraryPage";
 import ShowPage from "./pages/ShowPage";
 import SettingsPage from "./pages/SettingsPage";
 
@@ -61,6 +62,7 @@ function AppRoutes() {
         <Route path="/register" element={<PublicRoute><RegisterPage /></PublicRoute>} />
         <Route path="/dashboard" element={<ProtectedRoute allowedRoles={['user', 'admin']}><UserDashboard /></ProtectedRoute>} />
         <Route path="/dashboard/podcaster" element={<ProtectedRoute allowedRoles={['podcaster']}><PodcasterDashboard /></ProtectedRoute>} />
+        <Route path="/library" element={<ProtectedRoute allowedRoles={['user', 'admin']}><LibraryPage /></ProtectedRoute>} />
         <Route path="/settings" element={<ProtectedRoute><SettingsPage /></ProtectedRoute>} />
         <Route path="/browse" element={<BrowsePage />} />
         <Route path="/shows/:showId" element={<ShowPage />} />

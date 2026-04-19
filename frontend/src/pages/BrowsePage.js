@@ -32,7 +32,11 @@ export default function BrowsePage() {
     setLoading(true);
     try {
       const showsUrl = `${API}/shows?limit=8${nextSearch ? `&search=${encodeURIComponent(nextSearch)}` : ''}${nextCategory ? `&category=${encodeURIComponent(nextCategory)}` : ''}${nextFollowingOnly ? '&following_only=true' : ''}`;
-      const episodesUrl = `${API}/podcasts?limit=12&sort=${encodeURIComponent(nextSort)}${nextSearch ? `&search=${encodeURIComponent(nextSearch)}` : ''}${nextCategory ? `&category=${encodeURIComponent(nextCategory)}` : ''}${nextMediaType ? `&media_type=${encodeURIComponent(nextMediaType)}` : ''}${nextFollowingOnly ? '&following_only=true' : ''}`;
+      const useTopicRecommendations = Boolean(user && nextCategory && !nextSearch && !nextMediaType && !nextFollowingOnly);
+      const topicSort = ['highest_rated', 'most_viewed'].includes(nextSort) ? nextSort : 'smart';
+      const episodesUrl = useTopicRecommendations
+        ? `${API}/recommendations?category=${encodeURIComponent(nextCategory)}&sort=${encodeURIComponent(topicSort)}`
+        : `${API}/podcasts?limit=12&sort=${encodeURIComponent(nextSort)}${nextSearch ? `&search=${encodeURIComponent(nextSearch)}` : ''}${nextCategory ? `&category=${encodeURIComponent(nextCategory)}` : ''}${nextMediaType ? `&media_type=${encodeURIComponent(nextMediaType)}` : ''}${nextFollowingOnly ? '&following_only=true' : ''}`;
 
       const [showsRes, episodesRes] = await Promise.all([
         axios.get(showsUrl, authRequest).catch(() => ({ data: { shows: [] } })),
@@ -44,7 +48,7 @@ export default function BrowsePage() {
     } finally {
       setLoading(false);
     }
-  }, [followingOnly, mediaType, searchQuery, selectedCategory, sort]);
+  }, [followingOnly, mediaType, searchQuery, selectedCategory, sort, user]);
 
   useEffect(() => {
     fetchBrowse();
@@ -232,10 +236,18 @@ export default function BrowsePage() {
               <div className="flex items-center justify-between mb-6">
                 <div>
                   <h2 className="font-['Outfit'] text-xl font-semibold text-white">
-                    {followingOnly ? 'Episodes from shows you follow' : searchQuery || selectedCategory || mediaType ? 'Matching episodes' : 'Latest episodes'}
+                    {followingOnly
+                      ? 'Episodes from shows you follow'
+                      : selectedCategory
+                        ? `Recommended ${selectedCategory} episodes`
+                        : searchQuery || mediaType
+                          ? 'Matching episodes'
+                          : 'Latest episodes'}
                   </h2>
                   <p className="text-sm text-[#8A8A93] mt-1">
-                    Recommendation reasons and trust cues are built in so you can make a decision quickly.
+                    {selectedCategory
+                      ? `Topic-mapped recommendations for ${selectedCategory}, using category, keywords, titles, and show context.`
+                      : 'Recommendation reasons and trust cues are built in so you can make a decision quickly.'}
                   </p>
                 </div>
                 <span className="text-sm text-[#8A8A93]">{episodes.length} episodes</span>

@@ -295,11 +295,7 @@ export default function PlayerBar() {
         <div className="max-w-7xl mx-auto px-6 py-3 flex items-center gap-6">
           <div className="flex items-center gap-3 min-w-0 flex-1">
             <div className="w-10 h-10 rounded-lg bg-[#F5A623]/10 flex-shrink-0 flex items-center justify-center overflow-hidden">
-              {(currentPodcast.thumbnail_path || currentPodcast.show_thumbnail_path || currentPodcast.external_thumbnail_url) ? (
-                <img src={`${API}/podcasts/${currentPodcast.id}/thumbnail`} alt="" className="w-full h-full object-cover" />
-              ) : (
-                <Play weight="fill" className="w-4 h-4 text-[#F5A623]" />
-              )}
+              <img src={`${API}/podcasts/${currentPodcast.id}/thumbnail`} alt="" className="w-full h-full object-cover" />
             </div>
             <div className="min-w-0">
               <Link to={`/episodes/${currentPodcast.id}`} className="text-sm font-medium text-white truncate hover:text-[#F5A623] transition-colors block">

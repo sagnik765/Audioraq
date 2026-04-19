@@ -12,7 +12,7 @@ export default function ShowCard({ show, onFollowChange }) {
   const [isFollowing, setIsFollowing] = useState(Boolean(show.is_following));
   const [followerCount, setFollowerCount] = useState(show.follower_count || 0);
   const isOwnShow = Boolean(user && show.podcaster_id === user.id);
-  const thumbnailUrl = (show.thumbnail_path || show.external_thumbnail_url) ? `${API}/shows/${show.id}/thumbnail` : null;
+  const thumbnailUrl = `${API}/shows/${show.id}/thumbnail`;
 
   useEffect(() => {
     setIsFollowing(Boolean(show.is_following));

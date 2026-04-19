@@ -2,7 +2,6 @@ import React, { useEffect, useState } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import axios from 'axios';
 import { Eye, EyeSlash, Microphone, MicrophoneStage, User } from '@phosphor-icons/react';
-import SocialAuthButtons from '../components/SocialAuthButtons';
 import { useAuth } from '../contexts/AuthContext';
 import { API } from '../lib/api';
 
@@ -204,7 +203,12 @@ export default function RegisterPage() {
                     </button>
                   </div>
                 ) : (
-                  <SocialAuthButtons context="sign up" roleHint={role} />
+                  <div className="rounded-2xl border border-[#27272A] bg-[#141417] px-4 py-4">
+                    <p className="text-xs uppercase tracking-[0.2em] text-[#8A8A93] mb-2">Email account</p>
+                    <p className="text-sm text-[#C7C7D1]">
+                      Sign up with email to keep Audioraq onboarding simple and predictable.
+                    </p>
+                  </div>
                 )}
               </div>
 
@@ -258,7 +262,10 @@ export default function RegisterPage() {
                     <p className="text-white font-medium">{pendingSocial?.email || email}</p>
                   </div>
                 ) : (
-                  <SocialAuthButtons context="sign up" roleHint={role} />
+                  <div className="rounded-2xl border border-[#27272A] bg-[#141417] px-4 py-4">
+                    <p className="text-xs uppercase tracking-[0.2em] text-[#8A8A93] mb-2">Secure sign up</p>
+                    <p className="text-sm text-[#C7C7D1]">Use your email and password. Social sign-up has been removed from this flow.</p>
+                  </div>
                 )}
               </div>
 

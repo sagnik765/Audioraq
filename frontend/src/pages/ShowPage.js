@@ -75,9 +75,29 @@ export default function ShowPage() {
     );
   }
 
-  const thumbnailUrl = (show.thumbnail_path || show.external_thumbnail_url) ? `${API}/shows/${show.id}/thumbnail` : null;
+  const thumbnailUrl = `${API}/shows/${show.id}/thumbnail`;
   const latestEpisode = episodes[0];
   const isOwnShow = Boolean(user && show.podcaster_id === user.id);
+  const seasonGroups = Object.entries(
+    episodes.reduce((groups, episode) => {
+      const seasonKey = episode.season_number ? `Season ${episode.season_number}` : 'Episodes';
+      groups[seasonKey] = groups[seasonKey] || [];
+      groups[seasonKey].push(episode);
+      return groups;
+    }, {}),
+  ).map(([label, seasonEpisodes]) => ({
+    label,
+    episodes: [...seasonEpisodes].sort((a, b) => {
+      const aNumber = Number(a.episode_number || 0);
+      const bNumber = Number(b.episode_number || 0);
+      if (aNumber && bNumber) return aNumber - bNumber;
+      return new Date(b.created_at || 0) - new Date(a.created_at || 0);
+    }),
+  })).sort((a, b) => {
+    if (a.label === 'Episodes') return 1;
+    if (b.label === 'Episodes') return -1;
+    return Number(b.label.replace(/\D/g, '') || 0) - Number(a.label.replace(/\D/g, '') || 0);
+  });
 
   const handleFollowToggle = async () => {
     if (!user || isOwnShow) return;
@@ -210,13 +230,23 @@ export default function ShowPage() {
           </div>
 
           {episodes.length > 0 ? (
-            <div className="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-4 gap-6">
-              {episodes.map((episode) => (
-                <PodcastCard
-                  key={episode.id}
-                  podcast={episode}
-                  onHide={(hiddenId) => setEpisodes((prev) => prev.filter((item) => item.id !== hiddenId))}
-                />
+            <div className="space-y-10">
+              {seasonGroups.map((group) => (
+                <div key={group.label}>
+                  <div className="flex items-center justify-between mb-4">
+                    <h3 className="font-['Outfit'] text-lg font-semibold text-white">{group.label}</h3>
+                    <span className="text-sm text-[#8A8A93]">{group.episodes.length} episodes</span>
+                  </div>
+                  <div className="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-4 gap-6">
+                    {group.episodes.map((episode) => (
+                      <PodcastCard
+                        key={episode.id}
+                        podcast={episode}
+                        onHide={(hiddenId) => setEpisodes((prev) => prev.filter((item) => item.id !== hiddenId))}
+                      />
+                    ))}
+                  </div>
+                </div>
               ))}
             </div>
           ) : (

@@ -93,7 +93,7 @@ export default function EpisodeDetailPage() {
     );
   }
 
-  const thumbnailUrl = (episode.thumbnail_path || episode.show_thumbnail_path || episode.external_thumbnail_url) ? `${API}/podcasts/${episode.id}/thumbnail` : null;
+  const thumbnailUrl = `${API}/podcasts/${episode.id}/thumbnail`;
   const isOwnShow = Boolean(user && episode.podcaster_id === user.id);
   const canEngage = user?.role === 'user' && episode.publication_status !== 'draft';
   const canPlayEpisode = episode.is_playable !== false;

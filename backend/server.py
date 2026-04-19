@@ -174,6 +174,45 @@ AI_STUDIO_STAGE_LABELS = {
     "publish": "Publish",
 }
 
+try:
+    AUDIORAQ_ORIGINALS_MIN_QUALITY_SCORE = float(os.environ.get("AUDIORAQ_ORIGINALS_AGENT2_MIN_SCORE", 90.0))
+except (TypeError, ValueError):
+    AUDIORAQ_ORIGINALS_MIN_QUALITY_SCORE = 90.0
+
+TOPIC_FILTER_TERMS = {
+    "finance": ["finance", "investing", "markets", "money", "economy", "wealth", "banking", "startups"],
+    "law": ["law", "legal", "policy", "rights", "justice", "regulation", "contracts", "governance"],
+    "environment": ["environment", "climate", "sustainability", "energy", "nature", "carbon", "green"],
+    "emerging markets": ["emerging markets", "india", "africa", "latin america", "growth", "frontier markets"],
+    "technology": ["technology", "tech", "ai", "software", "automation", "future", "innovation"],
+    "upcoming technologies": ["upcoming technologies", "ai", "robotics", "quantum", "biotech", "spatial computing"],
+    "current affairs": ["current affairs", "news", "geopolitics", "policy", "elections", "world"],
+    "astrophysics": ["astrophysics", "space", "cosmos", "universe", "stars", "black holes", "nasa"],
+    "physical health": ["physical health", "fitness", "nutrition", "sleep", "exercise", "strength", "medicine"],
+    "mental health": ["mental health", "mindfulness", "stress", "therapy", "wellbeing", "resilience"],
+    "business": ["business", "strategy", "founders", "startups", "management", "markets"],
+    "science": ["science", "research", "biology", "physics", "chemistry", "evidence"],
+    "education": ["education", "learning", "students", "teaching", "skills"],
+    "entertainment": ["entertainment", "culture", "movies", "music", "media"],
+}
+
+CURATED_TOPIC_CATEGORIES = [
+    "finance",
+    "law",
+    "environment",
+    "emerging markets",
+    "technology",
+    "upcoming technologies",
+    "current affairs",
+    "astrophysics",
+    "physical health",
+    "mental health",
+    "business",
+    "science",
+    "education",
+    "entertainment",
+]
+
 
 def now_iso():
     return datetime.now(timezone.utc).isoformat()
@@ -1386,7 +1425,7 @@ def analyze_voice_clarity(data: bytes, filename: str, content_type: str, provide
     if not ffmpeg:
         return voice_clarity_unavailable("unavailable", "ffmpeg is required for voice clarity analysis.")
 
-    max_seconds = max(0, parse_int_env("AI_AUDIO_CLARITY_MAX_SECONDS", 900))
+    max_seconds = max(0, parse_int_env("AI_AUDIO_CLARITY_MAX_SECONDS", 180))
     suffix = Path(filename or "episode.bin").suffix or ".bin"
     source_path = ""
     extracted_path = ""
@@ -1695,7 +1734,7 @@ def transcribe_media_for_safety(data: bytes, filename: str, content_type: str) -
             "error": "",
         }
 
-    max_seconds = max(0, parse_int_env("MAX_MEDIA_TRANSCRIPT_SECONDS", 1800))
+    max_seconds = max(0, parse_int_env("MAX_MEDIA_TRANSCRIPT_SECONDS", 180))
     suffix = Path(filename or "upload.bin").suffix or ".bin"
     extracted_path = ""
     source_path = ""
@@ -1793,6 +1832,14 @@ async def review_episode_safety(
     if media_analysis and media_analysis.get("transcript_text"):
         heuristic_input = f"{review_text}\n\nFull transcript text:\n{media_analysis.get('transcript_text', '')}"
     fallback = heuristic_episode_safety_review(heuristic_input, selected_rating=selected_rating)
+    if parse_bool_env("EPISODE_SAFETY_FAST_PATH", True) and fallback.get("status") == MODERATION_STATUS_CLEAR:
+        fast_result = dict(fallback)
+        fast_result["provider"] = "heuristic-fast-path"
+        fast_result["summary"] = (
+            f"{fallback.get('summary', 'No obvious safety risk detected')} "
+            "Clean packages use the local fast path so publishing stays responsive; risky packages still escalate."
+        ).strip()
+        return normalize_episode_safety_result(fast_result, fallback, selected_rating, media_analysis=media_analysis)
 
     schema = {
         "status": "clear|review|blocked",
@@ -4108,6 +4155,194 @@ def build_recommendation_reason(episode, user_interests, viewed_keywords, method
     return "Trending on Audioraq right now" if method == "popular" else "Picked for your home feed"
 
 
+def normalize_topic_name(value: Optional[str]) -> str:
+    return re.sub(r"\s+", " ", str(value or "").strip().lower())
+
+
+def topic_filter_terms(topic: Optional[str]) -> List[str]:
+    normalized = normalize_topic_name(topic)
+    if not normalized:
+        return []
+    terms = TOPIC_FILTER_TERMS.get(normalized, [])
+    return list(dict.fromkeys([normalized, *terms]))
+
+
+def topic_match_clause(topic: Optional[str]) -> Optional[Dict[str, Any]]:
+    terms = topic_filter_terms(topic)
+    if not terms:
+        return None
+    regex_terms = [re.escape(term) for term in terms if len(term) > 2]
+    text_regex = "|".join(regex_terms[:12])
+    clause: Dict[str, Any] = {
+        "$or": [
+            {"category": {"$in": terms}},
+            {"keywords": {"$in": terms}},
+        ]
+    }
+    if text_regex:
+        clause["$or"].extend(
+            [
+                {"title": {"$regex": text_regex, "$options": "i"}},
+                {"description": {"$regex": text_regex, "$options": "i"}},
+                {"show_title": {"$regex": text_regex, "$options": "i"}},
+            ]
+        )
+    return clause
+
+
+def add_query_clause(query: Dict[str, Any], clause: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    if not clause:
+        return query
+    if not query:
+        return clause
+    return {"$and": [query, clause]}
+
+
+def xml_escape(value: Any) -> str:
+    return (
+        str(value or "")
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+        .replace("'", "&apos;")
+    )
+
+
+def wrap_thumbnail_text(value: Any, max_chars: int = 28, max_lines: int = 3) -> List[str]:
+    words = re.findall(r"[A-Za-z0-9+&'-]+", str(value or ""))
+    lines: List[str] = []
+    current = ""
+    for word in words:
+        next_line = f"{current} {word}".strip()
+        if current and len(next_line) > max_chars:
+            lines.append(current)
+            current = word
+        else:
+            current = next_line
+        if len(lines) >= max_lines:
+            break
+    if current and len(lines) < max_lines:
+        lines.append(current)
+    return lines or ["Audioraq", "Originals"]
+
+
+def thumbnail_palette(category: Optional[str]) -> Tuple[str, str, str]:
+    normalized = normalize_topic_name(category)
+    palettes = {
+        "finance": ("#0E3B2E", "#D8A63A", "#F7F1E8"),
+        "law": ("#182033", "#BFA46A", "#F7F1E8"),
+        "environment": ("#12382A", "#69C08E", "#F4F9F0"),
+        "emerging markets": ("#2A1E4A", "#FFB86B", "#F7F1E8"),
+        "technology": ("#0E2338", "#45C4F9", "#EEF8FF"),
+        "upcoming technologies": ("#181C3A", "#B086F5", "#F4F0FF"),
+        "current affairs": ("#2D1B1B", "#F97316", "#FFF7ED"),
+        "astrophysics": ("#0B1026", "#8EA7FF", "#F2F5FF"),
+        "physical health": ("#173126", "#5EEAD4", "#ECFEFF"),
+        "mental health": ("#2B2442", "#C4B5FD", "#F5F3FF"),
+        "business": ("#1F2937", "#F5A623", "#F7F1E8"),
+        "science": ("#102A43", "#38BDF8", "#F0F9FF"),
+        "education": ("#243B2F", "#FACC15", "#FEFCE8"),
+        "entertainment": ("#3A162E", "#F472B6", "#FDF2F8"),
+    }
+    return palettes.get(normalized, ("#0E1117", "#F5A623", "#F7F1E8"))
+
+
+def build_generated_thumbnail_svg(title: str, subtitle: str = "", category: str = DEFAULT_SHOW_CATEGORY, kind: str = "episode") -> bytes:
+    background, accent, foreground = thumbnail_palette(category)
+    title_lines = wrap_thumbnail_text(title, max_chars=26, max_lines=3)
+    subtitle_text = (subtitle or category or APP_NAME).strip()
+    eyebrow = "AUDIORAQ ORIGINALS" if "audioraq originals" in f"{title} {subtitle}".lower() else f"AUDIORAQ {kind.upper()}"
+
+    title_nodes = []
+    y = 238
+    for line in title_lines:
+        title_nodes.append(
+            f'<text x="80" y="{y}" font-family="Outfit, Arial, sans-serif" font-size="58" font-weight="800" fill="{foreground}">{xml_escape(line)}</text>'
+        )
+        y += 66
+
+    svg = f'''<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="720" viewBox="0 0 1280 720" role="img" aria-label="{xml_escape(title)} thumbnail">
+  <defs>
+    <radialGradient id="glow" cx="78%" cy="20%" r="58%">
+      <stop offset="0%" stop-color="{accent}" stop-opacity="0.42"/>
+      <stop offset="55%" stop-color="{accent}" stop-opacity="0.10"/>
+      <stop offset="100%" stop-color="{background}" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="wave" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="{accent}" stop-opacity="0.20"/>
+      <stop offset="50%" stop-color="{accent}" stop-opacity="0.95"/>
+      <stop offset="100%" stop-color="{accent}" stop-opacity="0.20"/>
+    </linearGradient>
+  </defs>
+  <rect width="1280" height="720" fill="{background}"/>
+  <rect width="1280" height="720" fill="url(#glow)"/>
+  <circle cx="1080" cy="130" r="210" fill="{accent}" opacity="0.12"/>
+  <circle cx="1120" cy="610" r="260" fill="{accent}" opacity="0.08"/>
+  <path d="M80 548 C210 500 330 596 460 548 S710 500 840 548 1085 596 1200 548" fill="none" stroke="url(#wave)" stroke-width="12" stroke-linecap="round"/>
+  <path d="M80 586 C210 538 330 634 460 586 S710 538 840 586 1085 634 1200 586" fill="none" stroke="{foreground}" stroke-opacity="0.18" stroke-width="6" stroke-linecap="round"/>
+  <rect x="70" y="70" width="1140" height="580" rx="44" fill="none" stroke="{foreground}" stroke-opacity="0.16" stroke-width="2"/>
+  <text x="80" y="132" font-family="Outfit, Arial, sans-serif" font-size="24" font-weight="800" letter-spacing="5" fill="{accent}">{xml_escape(eyebrow)}</text>
+  {''.join(title_nodes)}
+  <text x="80" y="492" font-family="Outfit, Arial, sans-serif" font-size="28" font-weight="600" fill="{foreground}" opacity="0.72">{xml_escape(subtitle_text[:70])}</text>
+  <g transform="translate(1040 430)">
+    <rect x="0" y="0" width="120" height="120" rx="30" fill="{accent}" opacity="0.94"/>
+    <path d="M39 30 v60 M60 18 v84 M81 35 v50" stroke="{background}" stroke-width="12" stroke-linecap="round"/>
+  </g>
+</svg>'''
+    return svg.encode("utf-8")
+
+
+def generated_thumbnail_response(title: str, subtitle: str = "", category: str = DEFAULT_SHOW_CATEGORY, kind: str = "episode") -> Response:
+    return Response(
+        content=build_generated_thumbnail_svg(title, subtitle, category, kind),
+        media_type="image/svg+xml",
+        headers={"Cache-Control": "public, max-age=86400"},
+    )
+
+
+def store_generated_thumbnail(path_prefix: str, title: str, subtitle: str = "", category: str = DEFAULT_SHOW_CATEGORY, kind: str = "episode") -> str:
+    object_path = f"{APP_NAME}/{path_prefix}/{uuid.uuid4()}.svg"
+    put_object(object_path, build_generated_thumbnail_svg(title, subtitle, category, kind), "image/svg+xml")
+    return object_path
+
+
+def is_audioraq_original_package(show: Optional[Dict[str, Any]], title: str = "", episode: Optional[Dict[str, Any]] = None) -> bool:
+    combined = " ".join(
+        [
+            str(title or ""),
+            str((episode or {}).get("title") or ""),
+            str((episode or {}).get("show_title") or ""),
+            str((episode or {}).get("podcaster_name") or ""),
+            str((show or {}).get("title") or ""),
+            str((show or {}).get("podcaster_name") or ""),
+        ]
+    ).lower()
+    return "audioraq originals" in combined
+
+
+def enforce_audioraq_originals_quality_gate(
+    show: Optional[Dict[str, Any]],
+    title: str,
+    quality_agent: Dict[str, Any],
+    stored_paths: Optional[List[str]] = None,
+) -> None:
+    if not is_audioraq_original_package(show, title):
+        return
+    score = float((quality_agent or {}).get("quality_score", 0) or 0)
+    status = (quality_agent or {}).get("status", "")
+    if status == "blocked" or score < AUDIORAQ_ORIGINALS_MIN_QUALITY_SCORE:
+        if stored_paths:
+            cleanup_storage_paths(stored_paths, strict=False)
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "Audioraq Originals must pass the Agent 2 quality gate before publishing. "
+                f"Current score: {score}/100; required: {AUDIORAQ_ORIGINALS_MIN_QUALITY_SCORE}/100."
+            ),
+        )
+
+
 async def store_upload(upload: UploadFile, path_prefix: str, default_content_type: str):
     ext = upload.filename.split(".")[-1] if upload.filename and "." in upload.filename else "bin"
     object_path = f"{APP_NAME}/{path_prefix}/{uuid.uuid4()}.{ext}"
@@ -4259,6 +4494,8 @@ def build_show_quality_signals(show: Dict) -> List[str]:
 
 def build_episode_quality_signals(episode: Dict, show: Optional[Dict]) -> List[str]:
     signals = []
+    if is_audioraq_original_package(show, episode.get("title", ""), episode):
+        signals.append("Audioraq Originals")
     if show and show.get("episode_count", 0) >= 3:
         signals.append(f"{show['episode_count']} episodes in this show")
     if episode.get("season_number") and episode.get("episode_number"):
@@ -5481,7 +5718,7 @@ async def get_shows(
             {"podcaster_name": {"$regex": search, "$options": "i"}},
         ]
     if category:
-        query["category"] = category.lower()
+        query = add_query_clause(query, topic_match_clause(category))
     if following_only:
         followed_show_ids = list(await get_followed_show_ids(current_user))
         if not followed_show_ids:
@@ -6036,6 +6273,7 @@ async def create_show(
     description: str = Form(""),
     category: str = Form(DEFAULT_SHOW_CATEGORY),
     thumbnail: Optional[UploadFile] = File(None),
+    auto_generate_thumbnail: bool = Form(True),
 ):
     user = await get_current_user(request)
     if user["role"] != "podcaster":
@@ -6048,6 +6286,14 @@ async def create_show(
     thumbnail_path = ""
     if thumbnail:
         thumbnail_path, _ = await store_upload(thumbnail, f"show-thumbnails/{user['_id']}", "image/jpeg")
+    elif auto_generate_thumbnail:
+        thumbnail_path = store_generated_thumbnail(
+            f"show-thumbnails/{user['_id']}",
+            title.strip() or "Audioraq Show",
+            user.get("name", ""),
+            category or DEFAULT_SHOW_CATEGORY,
+            kind="show",
+        )
 
     keywords = await extract_keywords(f"{show_title} {description} {category}")
     existing_count = await db.shows.count_documents({"podcaster_id": user["_id"], "is_deleted": False})
@@ -6126,6 +6372,7 @@ async def update_show(
     description: str = Form(""),
     category: str = Form(DEFAULT_SHOW_CATEGORY),
     thumbnail: Optional[UploadFile] = File(None),
+    auto_generate_thumbnail: bool = Form(False),
 ):
     user = await get_current_user(request)
     if user["role"] != "podcaster":
@@ -6147,9 +6394,17 @@ async def update_show(
     if thumbnail:
         thumbnail_path, _ = await store_upload(thumbnail, f"show-thumbnails/{user['_id']}", "image/jpeg")
         updates["thumbnail_path"] = thumbnail_path
+    elif auto_generate_thumbnail:
+        updates["thumbnail_path"] = store_generated_thumbnail(
+            f"show-thumbnails/{user['_id']}",
+            updates["title"],
+            user.get("name", ""),
+            updates["category"],
+            kind="show",
+        )
 
     await db.shows.update_one({"id": show_id}, {"$set": updates})
-    if thumbnail:
+    if thumbnail or auto_generate_thumbnail:
         replacement_thumbnail_path = (updates.get("thumbnail_path") or "").strip()
         if previous_thumbnail_path and previous_thumbnail_path != replacement_thumbnail_path:
             cleanup_storage_paths([previous_thumbnail_path], strict=False)
@@ -6164,6 +6419,34 @@ async def update_show(
                 }
             },
         )
+    updated = await db.shows.find_one({"id": show_id, "is_deleted": False})
+    enriched = await enrich_shows([updated], current_user=user)
+    return enriched[0]
+
+
+@api_router.post("/shows/{show_id}/thumbnail/generate")
+async def generate_show_thumbnail(show_id: str, request: Request):
+    user = await get_current_user(request)
+    if user["role"] != "podcaster" and user["role"] != "admin":
+        raise HTTPException(status_code=403, detail="Only creators can generate show thumbnails")
+    owner_filter = {"id": show_id, "is_deleted": False}
+    if user["role"] != "admin":
+        owner_filter["podcaster_id"] = user["_id"]
+    show = await db.shows.find_one(owner_filter)
+    if not show:
+        raise HTTPException(status_code=404, detail="Show not found")
+
+    previous_thumbnail_path = (show.get("thumbnail_path") or "").strip()
+    thumbnail_path = store_generated_thumbnail(
+        f"show-thumbnails/{show['podcaster_id']}",
+        show.get("title", "Audioraq Show"),
+        show.get("podcaster_name", ""),
+        show.get("category", DEFAULT_SHOW_CATEGORY),
+        kind="show",
+    )
+    await db.shows.update_one({"id": show_id}, {"$set": {"thumbnail_path": thumbnail_path, "updated_at": now_iso()}})
+    if previous_thumbnail_path and previous_thumbnail_path != thumbnail_path:
+        cleanup_storage_paths([previous_thumbnail_path], strict=False)
     updated = await db.shows.find_one({"id": show_id, "is_deleted": False})
     enriched = await enrich_shows([updated], current_user=user)
     return enriched[0]
@@ -6201,7 +6484,12 @@ async def get_show_thumbnail(show_id: str):
     if not thumbnail_path:
         if external_thumbnail_url:
             return RedirectResponse(external_thumbnail_url)
-        raise HTTPException(status_code=404, detail="Thumbnail not found")
+        return generated_thumbnail_response(
+            show.get("title", "Audioraq Show"),
+            show.get("podcaster_name", ""),
+            show.get("category", DEFAULT_SHOW_CATEGORY),
+            kind="show",
+        )
     try:
         data, ct = get_object(thumbnail_path)
         return Response(content=data, media_type=ct)
@@ -6226,6 +6514,7 @@ async def upload_podcast(
     season_number: Optional[int] = Form(None),
     episode_number: Optional[int] = Form(None),
     thumbnail: Optional[UploadFile] = File(None),
+    auto_generate_thumbnail: bool = Form(True),
 ):
     user = await get_current_user(request)
     if user["role"] != "podcaster":
@@ -6278,6 +6567,14 @@ async def upload_podcast(
         thumbnail_path, _ = await store_upload(thumbnail, f"episode-thumbnails/{user['_id']}", "image/jpeg")
 
     normalized_category = (category or DEFAULT_SHOW_CATEGORY).lower()
+    if not thumbnail_path and auto_generate_thumbnail:
+        thumbnail_path = store_generated_thumbnail(
+            f"episode-thumbnails/{user['_id']}",
+            title,
+            show.get("title", ""),
+            normalized_category,
+            kind="episode",
+        )
     keywords = await extract_keywords(f"{title} {description} {normalized_category} {show['title']}")
     media_type = "video" if is_video_upload else "audio"
     selected_rating = normalize_content_rating(audience_rating)
@@ -6311,6 +6608,7 @@ async def upload_podcast(
     )
     if ai_draft:
         enforce_ai_audio_listenability_gate(quality_agent, [media_path, thumbnail_path])
+    enforce_audioraq_originals_quality_gate(show, title, quality_agent, [media_path, thumbnail_path])
     moderation = merge_agent2_quality_into_moderation(moderation, quality_agent)
     enforce_episode_moderation_gate(moderation, [media_path, thumbnail_path])
     resolved_rating = MATURE_RATING if moderation.get("recommended_age_gate") == MATURE_RATING else selected_rating
@@ -6394,6 +6692,7 @@ async def create_ai_podcast_episode(
     season_number: Optional[int] = Form(None),
     episode_number: Optional[int] = Form(None),
     thumbnail: Optional[UploadFile] = File(None),
+    auto_generate_thumbnail: bool = Form(True),
 ):
     user = await get_current_user(request)
     if user["role"] != "podcaster":
@@ -6434,6 +6733,14 @@ async def create_ai_podcast_episode(
         or show.get("category")
         or DEFAULT_SHOW_CATEGORY
     ).lower()
+    if not thumbnail_path and auto_generate_thumbnail:
+        thumbnail_path = store_generated_thumbnail(
+            f"episode-thumbnails/{user['_id']}",
+            final_title,
+            show.get("title", ""),
+            normalized_category,
+            kind="episode",
+        )
     keywords = await extract_keywords(f"{final_title} {final_description} {normalized_category} {show['title']}")
     selected_rating = normalize_content_rating(audience_rating)
     audio_turns = build_ai_audio_turns(show, final_title, ai_draft.get("generation", {}), ai_draft.get("intake", {}))
@@ -6464,9 +6771,10 @@ async def create_ai_podcast_episode(
         source_kind="ai_audio_render",
         voice_context=voice_context,
     )
-    enforce_ai_audio_listenability_gate(quality_agent)
+    enforce_ai_audio_listenability_gate(quality_agent, [thumbnail_path])
+    enforce_audioraq_originals_quality_gate(show, final_title, quality_agent, [thumbnail_path])
     moderation = merge_agent2_quality_into_moderation(moderation, quality_agent)
-    enforce_episode_moderation_gate(moderation)
+    enforce_episode_moderation_gate(moderation, [thumbnail_path])
     resolved_rating = MATURE_RATING if moderation.get("recommended_age_gate") == MATURE_RATING else selected_rating
     episode_id = str(uuid.uuid4())
     audio_extension = rendered_audio.get("extension") or extension_for_content_type(rendered_audio["content_type"])
@@ -6572,7 +6880,7 @@ async def get_podcasts(
             {"show_title": {"$regex": search, "$options": "i"}},
         ]
     if category:
-        query["category"] = category.lower()
+        query = add_query_clause(query, topic_match_clause(category))
     if media_type in {"audio", "video"}:
         query["media_type"] = media_type
     if show_id:
@@ -6740,6 +7048,7 @@ async def update_podcast(
     season_number: Optional[int] = Form(None),
     episode_number: Optional[int] = Form(None),
     thumbnail: Optional[UploadFile] = File(None),
+    auto_generate_thumbnail: bool = Form(False),
 ):
     user = await get_current_user(request)
     podcast = await db.podcasts.find_one({"id": podcast_id})
@@ -6781,13 +7090,50 @@ async def update_podcast(
     if thumbnail:
         thumbnail_path, _ = await store_upload(thumbnail, f"episode-thumbnails/{podcast['podcaster_id']}", "image/jpeg")
         updates["thumbnail_path"] = thumbnail_path
+    elif auto_generate_thumbnail:
+        updates["thumbnail_path"] = store_generated_thumbnail(
+            f"episode-thumbnails/{podcast['podcaster_id']}",
+            updates["title"],
+            show.get("title", ""),
+            updates["category"],
+            kind="episode",
+        )
 
     await db.podcasts.update_one({"id": podcast_id}, {"$set": updates})
-    if thumbnail:
+    if thumbnail or auto_generate_thumbnail:
         replacement_thumbnail_path = (updates.get("thumbnail_path") or "").strip()
         if previous_thumbnail_path and previous_thumbnail_path != replacement_thumbnail_path:
             cleanup_storage_paths([previous_thumbnail_path], strict=False)
     await db.shows.update_one({"id": show["id"]}, {"$set": {"updated_at": now_iso()}})
+    updated = await db.podcasts.find_one({"id": podcast_id})
+    enriched = await enrich_episodes([updated], current_user=user)
+    return enriched[0]
+
+
+@api_router.post("/podcasts/{podcast_id}/thumbnail/generate")
+async def generate_podcast_thumbnail(podcast_id: str, request: Request):
+    user = await get_current_user(request)
+    podcast = await db.podcasts.find_one({"id": podcast_id, "is_deleted": False})
+    if not podcast:
+        raise HTTPException(status_code=404, detail="Episode not found")
+    if podcast["podcaster_id"] != user["_id"] and user["role"] != "admin":
+        raise HTTPException(status_code=403, detail="Not authorized")
+
+    show = None
+    if podcast.get("show_id"):
+        show = await db.shows.find_one({"id": podcast["show_id"], "is_deleted": False})
+
+    previous_thumbnail_path = (podcast.get("thumbnail_path") or "").strip()
+    thumbnail_path = store_generated_thumbnail(
+        f"episode-thumbnails/{podcast['podcaster_id']}",
+        podcast.get("title", "Audioraq Episode"),
+        (show or {}).get("title", podcast.get("show_title", "")),
+        podcast.get("category", DEFAULT_SHOW_CATEGORY),
+        kind="episode",
+    )
+    await db.podcasts.update_one({"id": podcast_id}, {"$set": {"thumbnail_path": thumbnail_path, "updated_at": now_iso()}})
+    if previous_thumbnail_path and previous_thumbnail_path != thumbnail_path:
+        cleanup_storage_paths([previous_thumbnail_path], strict=False)
     updated = await db.podcasts.find_one({"id": podcast_id})
     enriched = await enrich_episodes([updated], current_user=user)
     return enriched[0]
@@ -6915,7 +7261,12 @@ async def get_thumbnail(podcast_id: str, request: Request):
     if not thumbnail_path:
         if external_thumbnail_url:
             return RedirectResponse(external_thumbnail_url)
-        raise HTTPException(status_code=404, detail="Thumbnail not found")
+        return generated_thumbnail_response(
+            podcast.get("title", "Audioraq Episode"),
+            podcast.get("show_title", podcast.get("podcaster_name", "")),
+            podcast.get("category", DEFAULT_SHOW_CATEGORY),
+            kind="episode",
+        )
     try:
         data, ct = get_object(thumbnail_path)
         return Response(content=data, media_type=ct)
@@ -7072,7 +7423,7 @@ async def restore_podcast_to_feed(podcast_id: str, request: Request):
 
 
 @api_router.get("/recommendations")
-async def get_recommendations(request: Request, sort: str = "smart"):
+async def get_recommendations(request: Request, sort: str = "smart", category: Optional[str] = None):
     user = await get_current_user(request)
     user_interests = user.get("interests", [])
     hidden_ids = list(await get_hidden_podcast_ids(user))
@@ -7099,8 +7450,11 @@ async def get_recommendations(request: Request, sort: str = "smart"):
         viewed_keywords = list(set(viewed_keywords))
 
     base_query = build_public_episode_query(user)
+    topic_terms = topic_filter_terms(category)
+    if category:
+        base_query = add_query_clause(base_query, topic_match_clause(category))
     if hidden_ids:
-        base_query["id"] = {"$nin": hidden_ids}
+        base_query = add_query_clause(base_query, {"id": {"$nin": hidden_ids}})
 
     all_podcasts = await db.podcasts.find(base_query).to_list(100)
     if not all_podcasts:
@@ -7115,12 +7469,12 @@ async def get_recommendations(request: Request, sort: str = "smart"):
         method = "ai"
 
     if not ordered:
-        all_terms = list(set(user_interests + viewed_keywords))
+        all_terms = list(set(user_interests + viewed_keywords + topic_terms))
         if all_terms:
             ordered = await db.podcasts.find(
                 {**base_query, "keywords": {"$in": all_terms}}
             ).sort("play_count", -1).limit(20).to_list(20)
-            method = "keyword" if ordered else "popular"
+            method = "topic" if category and ordered else "keyword" if ordered else "popular"
 
     if not ordered:
         ordered = await db.podcasts.find(base_query).sort("play_count", -1).limit(20).to_list(20)
@@ -7146,15 +7500,18 @@ async def get_recommendations(request: Request, sort: str = "smart"):
             reverse=True,
         )
     for episode in enriched:
-        episode["recommendation_reason"] = build_recommendation_reason(episode, user_interests, viewed_keywords, method)
-    return {"podcasts": enriched, "method": method, "sort": sort}
+        if category:
+            episode["recommendation_reason"] = f"Recommended under {normalize_topic_name(category)}"
+        else:
+            episode["recommendation_reason"] = build_recommendation_reason(episode, user_interests, viewed_keywords, method)
+    return {"podcasts": enriched, "method": method, "sort": sort, "category": normalize_topic_name(category)}
 
 
 @api_router.get("/categories")
 async def get_categories():
     podcast_categories = await db.podcasts.distinct("category", build_public_episode_query())
     show_categories = await db.shows.distinct("category", {"is_deleted": False})
-    cats = sorted({c for c in podcast_categories + show_categories if c})
+    cats = sorted(set(CURATED_TOPIC_CATEGORIES) | {c for c in podcast_categories + show_categories if c})
     return {"categories": cats}
 
 

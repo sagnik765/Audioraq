@@ -17,7 +17,7 @@ export default function PodcastCard({ podcast, onHide, onSaveChange }) {
   const [isSaved, setIsSaved] = useState(Boolean(podcast.is_saved));
   const [isHidden, setIsHidden] = useState(Boolean(podcast.is_hidden));
 
-  const thumbnailUrl = (podcast.thumbnail_path || podcast.show_thumbnail_path || podcast.external_thumbnail_url) ? `${API}/podcasts/${podcast.id}/thumbnail` : null;
+  const thumbnailUrl = `${API}/podcasts/${podcast.id}/thumbnail`;
 
   useEffect(() => {
     setIsSaved(Boolean(podcast.is_saved));

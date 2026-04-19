@@ -1,7 +1,7 @@
 import React from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
-import { Broadcast, Gear, House, MagnifyingGlass, Microphone, SignOut, User } from '@phosphor-icons/react';
+import { BookmarkSimple, Broadcast, Gear, House, MagnifyingGlass, Microphone, SignOut, User } from '@phosphor-icons/react';
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -49,6 +49,17 @@ export default function Navbar() {
                 {user.role === 'podcaster' ? <Broadcast weight="bold" className="w-4 h-4" /> : <House weight="bold" className="w-4 h-4" />}
                 {user.role === 'podcaster' ? 'Studio' : 'Home'}
               </Link>
+
+              {user.role !== 'podcaster' && (
+                <Link
+                  to="/library"
+                  className="text-[#8A8A93] hover:text-white transition-colors text-sm font-medium flex items-center gap-1.5"
+                  data-testid="nav-library-link"
+                >
+                  <BookmarkSimple weight="bold" className="w-4 h-4" />
+                  Library
+                </Link>
+              )}
 
               <Link
                 to="/settings"
