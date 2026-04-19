@@ -133,13 +133,13 @@ AGENT2_RLAIF_POLICY = [
 AI_AUDIO_VOICE_ROLES = {"host", "guest", "narrator"}
 AI_AUDIO_DISCLOSURE = "This episode includes AI-generated voice audio."
 PROOF_STUDIO_LOCAL_FILTER = "highpass=f=80,lowpass=f=12000,loudnorm=I=-16:TP=-1.5:LRA=11"
-PROOF_STUDIO_APPLE_GAP_SECONDS = 0.28
+PROOF_STUDIO_APPLE_GAP_SECONDS = 0.45
 PROOF_STUDIO_APPLE_NARRATIVE_GAP_SECONDS = 0.75
 PROOF_STUDIO_APPLE_TARGET_PEAK_DBFS = -4.5
 PROOF_STUDIO_APPLE_RATES = {
-    "host": 124,
-    "guest": 122,
-    "narrator": 116,
+    "host": 100,
+    "guest": 98,
+    "narrator": 96,
 }
 PROOF_STUDIO_APPLE_NARRATIVE_RATES = {
     "host": 100,
