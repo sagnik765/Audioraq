@@ -779,6 +779,7 @@ def find_existing_episode(
     plan: EpisodeBlueprint,
 ) -> Optional[Dict[str, Any]]:
     body = api_get(session, f"{base_url}/api/podcasts/my?show_id={show_id}", token=token).json()
+    matches = []
     for episode in body.get("podcasts", []):
         if int(episode.get("season_number") or 0) != 1:
             continue
@@ -786,25 +787,52 @@ def find_existing_episode(
             continue
         if not str(episode.get("title") or "").lower().startswith("audioraq originals"):
             continue
-        voice_review = (episode.get("quality_agent") or {}).get("podcast_voice") or {}
-        return {
-            "draft_id": episode.get("ai_draft_id", ""),
-            "episode_id": episode.get("id", ""),
-            "episode_url": f"{public_origin}/episodes/{episode.get('id')}" if episode.get("id") else "",
-            "title": episode.get("title", plan.topic),
-            "show_id": show_id,
-            "moderation_status": episode.get("moderation_status", ""),
-            "quality_status": episode.get("quality_status", ""),
-            "quality_score": episode.get("quality_score", 0),
-            "media_type": episode.get("media_type", ""),
-            "content_type": episode.get("content_type", ""),
-            "ai_audio_provider": episode.get("ai_audio_provider", ""),
-            "ai_audio_provider_kind": episode.get("ai_audio_provider_kind", ""),
-            "ai_audio_turn_count": episode.get("ai_audio_turn_count", 0),
-            "voice_listenability_score": voice_review.get("listenability_score"),
-            "voice_listenability_status": voice_review.get("status", ""),
-            "is_playable": episode.get("is_playable", False),
-        }
+        matches.append(episode)
+    if not matches:
+        return None
+
+    matches.sort(key=lambda item: str(item.get("created_at") or item.get("updated_at") or ""), reverse=True)
+    episode = matches[0]
+    voice_review = (episode.get("quality_agent") or {}).get("podcast_voice") or {}
+    return {
+        "draft_id": episode.get("ai_draft_id", ""),
+        "episode_id": episode.get("id", ""),
+        "episode_url": f"{public_origin}/episodes/{episode.get('id')}" if episode.get("id") else "",
+        "title": episode.get("title", plan.topic),
+        "show_id": show_id,
+        "moderation_status": episode.get("moderation_status", ""),
+        "quality_status": episode.get("quality_status", ""),
+        "quality_score": episode.get("quality_score", 0),
+        "media_type": episode.get("media_type", ""),
+        "content_type": episode.get("content_type", ""),
+        "ai_audio_provider": episode.get("ai_audio_provider", ""),
+        "ai_audio_provider_kind": episode.get("ai_audio_provider_kind", ""),
+        "ai_audio_turn_count": episode.get("ai_audio_turn_count", 0),
+        "voice_listenability_score": voice_review.get("listenability_score"),
+        "voice_listenability_status": voice_review.get("status", ""),
+        "is_playable": episode.get("is_playable", False),
+    }
+
+
+def recover_episode_after_network_drop(
+    session: requests.Session,
+    base_url: str,
+    public_origin: str,
+    token: str,
+    show_id: str,
+    plan: EpisodeBlueprint,
+    attempts: int = 4,
+    delay_seconds: float = 3.0,
+) -> Optional[Dict[str, Any]]:
+    for attempt in range(attempts):
+        if attempt:
+            time.sleep(delay_seconds)
+        try:
+            recovered = find_existing_episode(session, base_url, public_origin, token, show_id, plan)
+        except Exception:
+            recovered = None
+        if recovered:
+            return recovered
     return None
 
 
@@ -1036,16 +1064,34 @@ def main() -> None:
                     manifest_by_index[plan.global_index] = result
                     persist_outputs()
                     continue
-            episode_result = create_ai_episode(
-                session,
-                base_url,
-                public_origin,
-                auth["token"],
-                auth["show_id"],
-                plan,
-                args.publish_mode,
-                media_dir,
-            )
+            try:
+                episode_result = create_ai_episode(
+                    session,
+                    base_url,
+                    public_origin,
+                    auth["token"],
+                    auth["show_id"],
+                    plan,
+                    args.publish_mode,
+                    media_dir,
+                )
+            except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as exc:
+                recovered = recover_episode_after_network_drop(
+                    session,
+                    base_url,
+                    public_origin,
+                    auth["token"],
+                    auth["show_id"],
+                    plan,
+                )
+                if not recovered:
+                    raise
+                if existing_to_replace and recovered.get("episode_id") == existing_to_replace.get("episode_id"):
+                    raise RuntimeError(
+                        "Network dropped during replacement and no distinct replacement episode was found; kept the original episode live."
+                    ) from exc
+                recovered["network_recovery_note"] = f"Recovered live episode after {exc.__class__.__name__}: {str(exc)[:220]}"
+                episode_result = recovered
             result.update(episode_result)
             result["status"] = "published"
             failure_reason = quality_failure_reason(
