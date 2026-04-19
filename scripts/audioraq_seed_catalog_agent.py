@@ -50,11 +50,17 @@ SHOW_EPISODE_COUNTS_275 = [17, 15, 14, 14, 13, 13, 12, 12, 12, 11, 11, 11, 11, 1
 SHOW_EPISODE_COUNTS_125 = [12, 11, 11, 11, 10, 10, 10, 10, 10, 10, 10, 10]
 SHOW_EPISODE_COUNTS_65 = [10, 10, 9, 9, 9, 9, 9]
 PROOF_STUDIO_APPLE_GAP_SECONDS = 0.22
+PROOF_STUDIO_APPLE_NARRATIVE_GAP_SECONDS = 0.42
 PROOF_STUDIO_APPLE_TARGET_PEAK_DBFS = -4.5
 PROOF_STUDIO_APPLE_RATES = {
     "host": 142,
     "guest": 140,
-    "narrator": 136,
+    "narrator": 128,
+}
+PROOF_STUDIO_APPLE_NARRATIVE_RATES = {
+    "host": 126,
+    "guest": 126,
+    "narrator": 112,
 }
 PROOF_STUDIO_APPLE_VOICES = {
     "host": ["Aman", "Daniel", "Alex"],
@@ -421,29 +427,34 @@ def math_log10(value: float) -> float:
 
 
 def render_apple_say_audio(turns: List[Dict[str, str]], output_wav: Path) -> Dict[str, Any]:
+    rendered_roles = [normalize_voice_role(turn.get("speaker", ""), turn.get("voice_role", "")) for turn in turns]
+    narrative_mode = "narrator" in rendered_roles
+    active_rates = PROOF_STUDIO_APPLE_NARRATIVE_RATES if narrative_mode else PROOF_STUDIO_APPLE_RATES
+    turn_gap_seconds = PROOF_STUDIO_APPLE_NARRATIVE_GAP_SECONDS if narrative_mode else PROOF_STUDIO_APPLE_GAP_SECONDS
     selected_voices: Dict[str, str] = {}
     with tempfile.TemporaryDirectory(prefix="audioraq-originals-dialogue-") as temp_dir:
         temp_path = Path(temp_dir)
         segments = []
         for index, turn in enumerate(turns, start=1):
-            role = normalize_voice_role(turn.get("speaker", ""), turn.get("voice_role", ""))
+            role = rendered_roles[index - 1]
             segment = temp_path / f"{index:03d}-{role}.wav"
             selected_voice = synthesize_turn_audio(
                 turn["text"],
                 segment,
                 PROOF_STUDIO_APPLE_VOICES.get(role, PROOF_STUDIO_APPLE_VOICES["host"]),
-                PROOF_STUDIO_APPLE_RATES.get(role, PROOF_STUDIO_APPLE_RATES["host"]),
+                active_rates.get(role, active_rates["host"]),
             )
             selected_voices.setdefault(role, selected_voice)
             segments.append(segment)
-        concat_wavs(segments, output_wav)
+        concat_wavs(segments, output_wav, gap_seconds=turn_gap_seconds)
     mastering = master_wav_headroom(output_wav)
     return {
         "provider": "apple-say:proof-studio",
         "provider_kind": "local-proof",
         "voices": selected_voices,
         "turn_count": len(turns),
-        "rates_wpm": PROOF_STUDIO_APPLE_RATES,
+        "rates_wpm": active_rates,
+        "turn_gap_seconds": turn_gap_seconds,
         "mastering": mastering,
     }
 
@@ -700,6 +711,7 @@ def create_ai_episode(
                     "episode_number": str(plan.episode_index),
                 },
             ).json()
+        voice_review = (episode.get("quality_agent") or {}).get("podcast_voice") or {}
         return {
             "draft_id": draft.get("id", ""),
             "episode_id": episode.get("id", ""),
@@ -715,6 +727,8 @@ def create_ai_episode(
             "ai_audio_provider_kind": render_metadata["provider_kind"],
             "ai_audio_turn_count": render_metadata["turn_count"],
             "ai_audio_voices": render_metadata["voices"],
+            "voice_listenability_score": voice_review.get("listenability_score"),
+            "voice_listenability_status": voice_review.get("status", ""),
             "local_media_path": str(audio_path),
             "is_playable": episode.get("is_playable", False),
         }
@@ -734,6 +748,7 @@ def create_ai_episode(
             "episode_number": str(plan.episode_index),
         },
     ).json()
+    voice_review = (episode.get("quality_agent") or {}).get("podcast_voice") or {}
 
     return {
         "draft_id": draft.get("id", ""),
@@ -749,6 +764,8 @@ def create_ai_episode(
         "ai_audio_provider": episode.get("ai_audio_provider", ""),
         "ai_audio_provider_kind": episode.get("ai_audio_provider_kind", ""),
         "ai_audio_turn_count": episode.get("ai_audio_turn_count", 0),
+        "voice_listenability_score": voice_review.get("listenability_score"),
+        "voice_listenability_status": voice_review.get("status", ""),
         "is_playable": episode.get("is_playable", False),
     }
 
@@ -769,6 +786,7 @@ def find_existing_episode(
             continue
         if not str(episode.get("title") or "").lower().startswith("audioraq originals"):
             continue
+        voice_review = (episode.get("quality_agent") or {}).get("podcast_voice") or {}
         return {
             "draft_id": episode.get("ai_draft_id", ""),
             "episode_id": episode.get("id", ""),
@@ -783,12 +801,21 @@ def find_existing_episode(
             "ai_audio_provider": episode.get("ai_audio_provider", ""),
             "ai_audio_provider_kind": episode.get("ai_audio_provider_kind", ""),
             "ai_audio_turn_count": episode.get("ai_audio_turn_count", 0),
+            "voice_listenability_score": voice_review.get("listenability_score"),
+            "voice_listenability_status": voice_review.get("status", ""),
             "is_playable": episode.get("is_playable", False),
         }
     return None
 
 
-def quality_failure_reason(result: Dict[str, Any], min_quality_score: float, require_moderation: str, require_quality_status: str) -> str:
+def quality_failure_reason(
+    result: Dict[str, Any],
+    min_quality_score: float,
+    require_moderation: str,
+    require_quality_status: str,
+    min_voice_listenability_score: float,
+    require_voice_status: str,
+) -> str:
     if require_moderation and (result.get("moderation_status") or "").lower() != require_moderation.lower():
         return f"moderation_status={result.get('moderation_status') or 'unknown'}"
     allowed_statuses = {part.strip().lower() for part in require_quality_status.split(",") if part.strip()}
@@ -796,6 +823,13 @@ def quality_failure_reason(result: Dict[str, Any], min_quality_score: float, req
         return f"quality_status={result.get('quality_status') or 'unknown'}"
     if min_quality_score and float(result.get("quality_score") or 0) < min_quality_score:
         return f"quality_score={result.get('quality_score') or 0} below {min_quality_score}"
+    allowed_voice_statuses = {part.strip().lower() for part in require_voice_status.split(",") if part.strip()}
+    voice_status = (result.get("voice_listenability_status") or "").lower()
+    if allowed_voice_statuses and voice_status not in allowed_voice_statuses:
+        return f"voice_listenability_status={result.get('voice_listenability_status') or 'unknown'}"
+    voice_score = result.get("voice_listenability_score")
+    if min_voice_listenability_score and float(voice_score or 0) < min_voice_listenability_score:
+        return f"voice_listenability_score={voice_score or 0} below {min_voice_listenability_score}"
     return ""
 
 
@@ -886,6 +920,8 @@ def main() -> None:
     parser.add_argument("--min-quality-score", type=float, default=60.0, help="Delete the episode if Agent 2 returns a lower quality score.")
     parser.add_argument("--require-moderation", default="clear", help="Delete the episode if moderation_status does not match. Set empty to disable.")
     parser.add_argument("--require-quality-status", default="pass,review", help="Comma-separated accepted quality statuses. Set empty to disable.")
+    parser.add_argument("--min-voice-listenability-score", type=float, default=0.0, help="Delete the episode if Agent 2's podcast voice listenability score is lower.")
+    parser.add_argument("--require-voice-status", default="", help="Comma-separated accepted podcast voice listenability statuses. Set empty to disable.")
     parser.add_argument("--replace-existing-below-score", action="store_true", help="Publish a replacement before deleting an existing Audioraq Originals episode that scores below --min-quality-score.")
     args = parser.parse_args()
 
@@ -960,6 +996,8 @@ def main() -> None:
             "ai_audio_provider": "",
             "ai_audio_provider_kind": "",
             "ai_audio_turn_count": 0,
+            "voice_listenability_score": None,
+            "voice_listenability_status": "",
             "is_playable": False,
             "status": "planned",
         }
@@ -972,9 +1010,22 @@ def main() -> None:
             existing_to_replace = None
             if existing_episode:
                 existing_score = float(existing_episode.get("quality_score") or 0)
-                if args.replace_existing_below_score and args.min_quality_score and existing_score < args.min_quality_score:
+                existing_voice_score = float(existing_episode.get("voice_listenability_score") or 0)
+                existing_voice_status = (existing_episode.get("voice_listenability_status") or "").lower()
+                voice_statuses = {part.strip().lower() for part in args.require_voice_status.split(",") if part.strip()}
+                should_replace_for_quality = bool(args.min_quality_score and existing_score < args.min_quality_score)
+                should_replace_for_voice_score = bool(args.min_voice_listenability_score and existing_voice_score < args.min_voice_listenability_score)
+                should_replace_for_voice_status = bool(voice_statuses and existing_voice_status not in voice_statuses)
+                if args.replace_existing_below_score and (should_replace_for_quality or should_replace_for_voice_score or should_replace_for_voice_status):
                     existing_to_replace = existing_episode
-                    result["replacement_reason"] = f"existing quality_score={existing_score} below {args.min_quality_score}"
+                    replacement_reasons = []
+                    if should_replace_for_quality:
+                        replacement_reasons.append(f"existing quality_score={existing_score} below {args.min_quality_score}")
+                    if should_replace_for_voice_score:
+                        replacement_reasons.append(f"existing voice_listenability_score={existing_voice_score} below {args.min_voice_listenability_score}")
+                    if should_replace_for_voice_status:
+                        replacement_reasons.append(f"existing voice_listenability_status={existing_voice_status or 'unknown'}")
+                    result["replacement_reason"] = "; ".join(replacement_reasons)
                     result["replaces_episode_id"] = existing_to_replace.get("episode_id", "")
                     result["replaces_episode_url"] = existing_to_replace.get("episode_url", "")
                 else:
@@ -1002,6 +1053,8 @@ def main() -> None:
                 args.min_quality_score,
                 args.require_moderation.strip(),
                 args.require_quality_status.strip(),
+                args.min_voice_listenability_score,
+                args.require_voice_status.strip(),
             )
             if failure_reason:
                 result["delete_result"] = delete_episode(session, base_url, auth["token"], episode_result["episode_id"])

@@ -80,7 +80,7 @@ MODERATION_STATUS_BLOCKED = "blocked"
 SOCIAL_PROVIDER_GOOGLE = "google"
 SOCIAL_PROVIDER_APPLE = "apple"
 SUPPORTED_SOCIAL_PROVIDERS = {SOCIAL_PROVIDER_GOOGLE, SOCIAL_PROVIDER_APPLE}
-AGENT2_VERSION = "2026-04-18.1"
+AGENT2_VERSION = "2026-04-19.0"
 AI_TEXT_PROVIDER_DETERMINISTIC = "deterministic"
 AI_TEXT_PROVIDER_EMERGENT = "emergent"
 AI_TEXT_PROVIDER_OLLAMA = "ollama"
@@ -133,11 +133,17 @@ AI_AUDIO_VOICE_ROLES = {"host", "guest", "narrator"}
 AI_AUDIO_DISCLOSURE = "This episode includes AI-generated voice audio."
 PROOF_STUDIO_LOCAL_FILTER = "highpass=f=80,lowpass=f=12000,loudnorm=I=-16:TP=-1.5:LRA=11"
 PROOF_STUDIO_APPLE_GAP_SECONDS = 0.22
+PROOF_STUDIO_APPLE_NARRATIVE_GAP_SECONDS = 0.42
 PROOF_STUDIO_APPLE_TARGET_PEAK_DBFS = -4.5
 PROOF_STUDIO_APPLE_RATES = {
     "host": 142,
     "guest": 140,
-    "narrator": 136,
+    "narrator": 128,
+}
+PROOF_STUDIO_APPLE_NARRATIVE_RATES = {
+    "host": 126,
+    "guest": 126,
+    "narrator": 112,
 }
 PROOF_STUDIO_APPLE_VOICES = {
     "host": ["Aman", "Daniel", "Alex"],
@@ -1881,7 +1887,8 @@ def agent2_text_features(text: str, generation: Optional[Dict[str, Any]] = None)
         "journey of discovery",
         "at the end of the day",
     ]
-    speaker_turns = len(re.findall(r"(?im)^\s*(host|co-host|guest|speaker\s*\d+)\s*:", text or ""))
+    speaker_turn_pattern = r"(?im)^\s*(host|co[-\s]?host|guest|narrator|analyst|expert|speaker\s*\d+)\s*:"
+    speaker_turns = len(re.findall(speaker_turn_pattern, text or ""))
     question_count = sum(1 for sentence in sentences if "?" in sentence)
     outline_sections = len(generation.get("outline", []) if generation else [])
     talking_points = len(normalize_string_list(generation.get("talking_points"), limit=20) if generation else [])
@@ -1911,8 +1918,12 @@ def agent2_gan_inspired_discriminator(text: str, generation: Optional[Dict[str, 
         score += min(16, (features["avg_sentence_words"] - 27) * 1.8)
     if features["sentence_length_stdev"] < 5 and features["sentence_count"] >= 4:
         score += 8
+    human_narrative_depth = features["speaker_turn_count"] >= 8 and features["concrete_marker_count"] >= 10
+    high_dialogue_depth = features["speaker_turn_count"] >= 12 and features["concrete_marker_count"] >= 12
     if features["question_rate"] < 0.05:
-        score += 3 if features["speaker_turn_count"] >= 12 and features["concrete_marker_count"] >= 12 else 9
+        score += 2 if human_narrative_depth else 9
+    elif high_dialogue_depth:
+        score -= 2
     score += min(18, features["generic_marker_count"] * 6)
     score += min(16, features["repetition_rate"] * 42)
     if features["concrete_marker_count"] >= 12:
@@ -2018,12 +2029,11 @@ def agent2_rlaif_self_feedback(gan_review: Dict[str, Any], rag_review: Dict[str,
         reward -= min(12, features["generic_marker_count"] * 4)
         critique.append("The draft uses generic AI-sounding phrases.")
         actions.append("Replace vague phrases with specific listener-facing claims.")
-    if features.get("question_rate", 0) < 0.05 and not (
-        features.get("speaker_turn_count", 0) >= 12 and features.get("concrete_marker_count", 0) >= 12
-    ):
+    has_human_depth = features.get("speaker_turn_count", 0) >= 8 and features.get("concrete_marker_count", 0) >= 10
+    if features.get("question_rate", 0) < 0.05 and not has_human_depth:
         reward -= 5
         actions.append("Add at least one curiosity-led question.")
-    elif features.get("speaker_turn_count", 0) >= 12 and features.get("concrete_marker_count", 0) >= 12:
+    elif has_human_depth:
         reward += 1
     if features.get("concrete_marker_count", 0) < 5:
         reward -= 8
@@ -2917,6 +2927,13 @@ def render_apple_say_proof_audio(script_text: str, turns: Optional[List[Dict[str
     rendered_turns = split_audio_turns_for_tts(turns or [{"speaker": "Host", "voice_role": "host", "text": script_text}])
     if not rendered_turns:
         raise RuntimeError("no voice turns were available for Apple proof-studio TTS")
+    rendered_roles = [
+        proof_studio_apple_role(str(turn.get("voice_role") or "host"), str(turn.get("speaker") or ""))
+        for turn in rendered_turns
+    ]
+    narrative_mode = "narrator" in rendered_roles
+    active_rates = PROOF_STUDIO_APPLE_NARRATIVE_RATES if narrative_mode else PROOF_STUDIO_APPLE_RATES
+    turn_gap_seconds = PROOF_STUDIO_APPLE_NARRATIVE_GAP_SECONDS if narrative_mode else PROOF_STUDIO_APPLE_GAP_SECONDS
 
     with tempfile.TemporaryDirectory(prefix="audioraq-apple-proof-") as temp_dir:
         temp_path = Path(temp_dir)
@@ -2925,14 +2942,14 @@ def render_apple_say_proof_audio(script_text: str, turns: Optional[List[Dict[str
         timings = []
         cursor = 0.0
         for index, turn in enumerate(rendered_turns, start=1):
-            role = proof_studio_apple_role(str(turn.get("voice_role") or "host"), str(turn.get("speaker") or ""))
+            role = rendered_roles[index - 1]
             voice_candidates = PROOF_STUDIO_APPLE_VOICES.get(role, PROOF_STUDIO_APPLE_VOICES["host"])
             segment_path = temp_path / f"segment-{index:03d}-{role}.wav"
             selected_voice, duration_seconds = synthesize_apple_say_turn(
                 turn.get("text") or "",
                 segment_path,
                 voice_candidates,
-                PROOF_STUDIO_APPLE_RATES.get(role, PROOF_STUDIO_APPLE_RATES["host"]),
+                active_rates.get(role, active_rates["host"]),
             )
             voices[role] = selected_voice
             timings.append(
@@ -2945,11 +2962,11 @@ def render_apple_say_proof_audio(script_text: str, turns: Optional[List[Dict[str
                     "duration": round(duration_seconds, 3),
                 }
             )
-            cursor += duration_seconds + PROOF_STUDIO_APPLE_GAP_SECONDS
+            cursor += duration_seconds + turn_gap_seconds
             segments.append(segment_path)
 
         output_path = temp_path / "episode.wav"
-        concat_wav_files_with_silence(segments, output_path)
+        concat_wav_files_with_silence(segments, output_path, gap_seconds=turn_gap_seconds)
         mastering = master_wav_peak_headroom(output_path)
         data = output_path.read_bytes()
         if len(data) < 1024:
@@ -2964,9 +2981,10 @@ def render_apple_say_proof_audio(script_text: str, turns: Optional[List[Dict[str
             "turn_count": len(rendered_turns),
             "chunk_count": len(segments),
             "timings": timings,
-            "rates_wpm": PROOF_STUDIO_APPLE_RATES,
+            "rates_wpm": active_rates,
+            "turn_gap_seconds": turn_gap_seconds,
             "mastering": mastering,
-            "enhancement_profile": "audioraq-qa-proof-dialogue+apple-system-voices+calm-podcast-rate+0.22s-turn-gaps",
+            "enhancement_profile": f"audioraq-qa-proof-dialogue+apple-system-voices+calm-podcast-rate+{turn_gap_seconds}s-turn-gaps",
             "benchmark_note": "Replicates the April 11 QA proof-studio recipe using generic macOS system voices; does not clone a real person's voice.",
             "voice_profile": "apple_proof_studio",
             "extension": "wav",
@@ -3271,19 +3289,20 @@ def render_ai_audio_bytes(script_text: str, turns: Optional[List[Dict[str, str]]
     )
 
 
-def enforce_ai_audio_listenability_gate(quality_agent: Dict[str, Any]) -> None:
+def enforce_ai_audio_listenability_gate(quality_agent: Dict[str, Any], stored_paths: Optional[List[str]] = None) -> None:
     if not parse_bool_env("AI_AUDIO_ENFORCE_LISTENABILITY_GATE", True):
         return
     voice_review = (quality_agent or {}).get("podcast_voice") or {}
-    min_score = parse_float_env("AI_AUDIO_MIN_LISTENABILITY_SCORE", 68.0)
+    min_score = parse_float_env("AI_AUDIO_MIN_LISTENABILITY_SCORE", 82.0)
     score = voice_review.get("listenability_score")
     status = voice_review.get("status")
-    provider = ((voice_review.get("metrics") or {}).get("provider") or "").strip()
-    effective_min_score = min(min_score, 64.0) if is_proof_studio_provider(provider) else min_score
+    effective_min_score = min_score
     require_metrics = parse_bool_env("AI_AUDIO_REQUIRE_VOICE_METRICS", False)
 
     if score is None:
         if require_metrics:
+            if stored_paths:
+                cleanup_storage_paths(stored_paths, strict=False)
             raise HTTPException(
                 status_code=422,
                 detail="Agent 2 could not measure voice listenability. Install ffmpeg or disable AI_AUDIO_REQUIRE_VOICE_METRICS for development.",
@@ -3291,6 +3310,8 @@ def enforce_ai_audio_listenability_gate(quality_agent: Dict[str, Any]) -> None:
         return
 
     if status == "revise" or float(score) < effective_min_score:
+        if stored_paths:
+            cleanup_storage_paths(stored_paths, strict=False)
         actions = normalize_string_list(voice_review.get("improvement_actions"), limit=3)
         guidance = " ".join(actions) if actions else "Use a local neural TTS worker and re-render with a calmer podcast profile."
         raise HTTPException(
@@ -3549,7 +3570,7 @@ def enforce_voice_ready_generation_depth(generation: Dict[str, Any], brief: Dict
 
     target_turns = 12 if format_name == "interview" else 10
     if format_name == "narrative":
-        target_turns = 11
+        target_turns = 13
 
     def turn_text_exists(text: str) -> bool:
         normalized = re.sub(r"\s+", " ", text or "").strip().lower()
@@ -3574,13 +3595,20 @@ def enforce_voice_ready_generation_depth(generation: Dict[str, Any], brief: Dict
                 if len(turns) < target_turns and not turn_text_exists(candidate["text"]):
                     turns.append(candidate)
         elif format_name == "narrative":
-            candidate = {
-                "speaker": "Narrator" if len(turns) % 2 else "Host",
-                "voice_role": "narrator" if len(turns) % 2 else "host",
-                "text": (
+            is_question_pivot = attempts % 4 == 0
+            narrative_text = (
+                f"What should the listener notice inside this example? {point}. Because the decision is visible, "
+                f"the idea becomes easier to trust and easier to act on."
+                if is_question_pivot
+                else (
                     f"Here is the specific scene to hold onto: {point}. Because the listener can picture the decision, "
                     f"the idea becomes easier to trust and easier to act on."
-                ),
+                )
+            )
+            candidate = {
+                "speaker": "Host" if is_question_pivot else "Narrator",
+                "voice_role": "host" if is_question_pivot else "narrator",
+                "text": narrative_text,
             }
             if not turn_text_exists(candidate["text"]):
                 turns.append(candidate)
@@ -3599,8 +3627,8 @@ def enforce_voice_ready_generation_depth(generation: Dict[str, Any], brief: Dict
             break
 
     question_turns = sum(1 for turn in turns if "?" in (turn.get("text") or ""))
-    target_questions = 4 if format_name == "interview" else 2
-    if format_name == "interview" and question_turns < target_questions:
+    target_questions = 4 if format_name == "interview" else 3 if format_name == "narrative" else 2
+    if question_turns < target_questions:
         enriched_turns = []
         question_templates = [
             "What is the decision hiding inside that example?",
@@ -3612,7 +3640,8 @@ def enforce_voice_ready_generation_depth(generation: Dict[str, Any], brief: Dict
         for index, turn in enumerate(turns):
             enriched_turns.append(turn)
             role = turn.get("voice_role") or "host"
-            if role == "guest" and question_turns + inserted < target_questions:
+            should_insert = role == "guest" if format_name == "interview" else (index + 1) % 3 == 0
+            if should_insert and question_turns + inserted < target_questions:
                 point = point_pool[(index + inserted) % len(point_pool)]
                 enriched_turns.append(
                     {
@@ -3622,6 +3651,16 @@ def enforce_voice_ready_generation_depth(generation: Dict[str, Any], brief: Dict
                     }
                 )
                 inserted += 1
+        while question_turns + inserted < target_questions and len(enriched_turns) < 64:
+            point = point_pool[inserted % len(point_pool)]
+            enriched_turns.append(
+                {
+                    "speaker": "Host",
+                    "voice_role": "host",
+                    "text": f"{question_templates[inserted % len(question_templates)]} In this case, how should they think about {point}?",
+                }
+            )
+            inserted += 1
         turns = enriched_turns[:64]
 
     enriched["audio_script_turns"] = normalize_audio_script_turns(turns, limit=64)
@@ -3693,6 +3732,7 @@ async def generate_ai_podcast_package(brief: Dict[str, Any], show: Dict[str, Any
         "- If the format is not interview, guest_questions can be an empty list.\n"
         "- audio_script_turns should be ready for text-to-speech and sound like a polished podcast, not outline notes.\n"
         "- For interview or dialogue formats, alternate Host and Guest turns with distinct voices; for solo formats, use Host only unless a Narrator improves clarity.\n"
+        "- For narrative formats, use Narrator for scene-setting and Host for reflective question pivots; include at least 12 spoken turns and 3 curiosity-led questions.\n"
         f"- Do not imitate or claim to be any real person's voice. Add no disclosure text unless it fits naturally; the platform stores this separately: {AI_AUDIO_DISCLOSURE}\n"
         "- Keep suggested keywords concise and usable for search/discovery.\n"
         "- recommended_category should be a single lowercase category.\n\n"
@@ -6256,6 +6296,8 @@ async def upload_podcast(
         source_kind="ai_audio_upload" if ai_draft else "recorded_upload",
         voice_context=voice_context,
     )
+    if ai_draft:
+        enforce_ai_audio_listenability_gate(quality_agent, [media_path, thumbnail_path])
     moderation = merge_agent2_quality_into_moderation(moderation, quality_agent)
     enforce_episode_moderation_gate(moderation, [media_path, thumbnail_path])
     resolved_rating = MATURE_RATING if moderation.get("recommended_age_gate") == MATURE_RATING else selected_rating
