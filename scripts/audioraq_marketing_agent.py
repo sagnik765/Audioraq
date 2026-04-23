@@ -7,8 +7,8 @@ Audioraq's LinkedIn and Instagram presence.
 
 Important constraints:
 - It does not buy followers, fake engagement, or generate spam outreach.
-- It does not post directly to LinkedIn or Instagram because those platform
-  integrations are not connected in this repository.
+- It generates campaigns, post drafts, and queue-ready copy that can be pushed
+  into Audioraq's native social publishing workflow.
 - It produces the strategy, content calendar, post drafts, asset briefs,
   experiments, and scorecards needed to grow followers in a repeatable way.
 """

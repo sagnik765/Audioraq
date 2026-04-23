@@ -17,6 +17,8 @@ import bcrypt
 import asyncio
 import base64
 import email.utils
+import hashlib
+import io
 import json
 import jwt
 import logging
@@ -30,6 +32,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import textwrap
 import time
 import uuid
 import wave
@@ -39,17 +42,20 @@ import zipfile
 from bson import ObjectId
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Iterator, List, Literal, Optional, Set, Tuple
-from urllib.parse import urlencode, urlparse
+from urllib.parse import quote, urlencode, urlparse
 
+from cryptography.fernet import Fernet, InvalidToken
 from backend.voice_quality import (
     build_voice_context_from_intake,
     is_proof_studio_provider,
     score_podcast_voice_listenability,
 )
+from PIL import Image, ImageDraw, ImageFont
 
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
+social_queue_lock = None
 
 
 mongo_url = os.environ["MONGO_URL"]
@@ -81,6 +87,34 @@ MODERATION_STATUS_BLOCKED = "blocked"
 SOCIAL_PROVIDER_GOOGLE = "google"
 SOCIAL_PROVIDER_APPLE = "apple"
 SUPPORTED_SOCIAL_PROVIDERS = {SOCIAL_PROVIDER_GOOGLE, SOCIAL_PROVIDER_APPLE}
+SOCIAL_PUBLISH_PROVIDER_LINKEDIN = "linkedin"
+SOCIAL_PUBLISH_PROVIDER_INSTAGRAM = "instagram"
+SUPPORTED_SOCIAL_PUBLISH_PROVIDERS = {
+    SOCIAL_PUBLISH_PROVIDER_LINKEDIN,
+    SOCIAL_PUBLISH_PROVIDER_INSTAGRAM,
+}
+SOCIAL_POST_STATUS_DRAFT = "draft"
+SOCIAL_POST_STATUS_QUEUED = "queued"
+SOCIAL_POST_STATUS_PUBLISHING = "publishing"
+SOCIAL_POST_STATUS_PUBLISHED = "published"
+SOCIAL_POST_STATUS_FAILED = "failed"
+SOCIAL_POST_STATUSES = {
+    SOCIAL_POST_STATUS_DRAFT,
+    SOCIAL_POST_STATUS_QUEUED,
+    SOCIAL_POST_STATUS_PUBLISHING,
+    SOCIAL_POST_STATUS_PUBLISHED,
+    SOCIAL_POST_STATUS_FAILED,
+}
+LINKEDIN_DEFAULT_VERSION = os.environ.get("LINKEDIN_VERSION", "202604").strip() or "202604"
+META_GRAPH_VERSION = os.environ.get("META_GRAPH_VERSION", "v22.0").strip() or "v22.0"
+try:
+    SOCIAL_QUEUE_POLL_SECONDS = max(15, int(os.environ.get("SOCIAL_QUEUE_POLL_SECONDS", 45)))
+except (TypeError, ValueError):
+    SOCIAL_QUEUE_POLL_SECONDS = 45
+try:
+    SOCIAL_QUEUE_BATCH_SIZE = max(1, min(20, int(os.environ.get("SOCIAL_QUEUE_BATCH_SIZE", 5))))
+except (TypeError, ValueError):
+    SOCIAL_QUEUE_BATCH_SIZE = 5
 AGENT2_VERSION = "2026-04-19.0"
 AI_TEXT_PROVIDER_DETERMINISTIC = "deterministic"
 AI_TEXT_PROVIDER_EMERGENT = "emergent"
@@ -277,6 +311,252 @@ def is_social_provider_configured(provider: str) -> bool:
     if provider == SOCIAL_PROVIDER_APPLE:
         return is_apple_oauth_configured()
     return False
+
+
+def get_public_app_origin(request: Optional[Request] = None) -> str:
+    configured = (
+        os.environ.get("PUBLIC_APP_ORIGIN")
+        or os.environ.get("PUBLIC_BASE_URL")
+        or os.environ.get("APP_ORIGIN")
+        or ""
+    ).strip().rstrip("/")
+    if configured:
+        return configured
+    if request is not None:
+        return get_public_request_origin(request)
+    return "https://www.audioraq.com"
+
+
+def get_social_token_encryption_key() -> bytes:
+    configured = os.environ.get("SOCIAL_TOKEN_ENCRYPTION_KEY", "").strip()
+    if configured:
+        digest = hashlib.sha256(configured.encode("utf-8")).digest()
+    else:
+        digest = hashlib.sha256(get_jwt_secret().encode("utf-8")).digest()
+    return base64.urlsafe_b64encode(digest)
+
+
+def get_social_token_cipher() -> Fernet:
+    return Fernet(get_social_token_encryption_key())
+
+
+def encrypt_social_token(value: str) -> str:
+    if not value:
+        return ""
+    return get_social_token_cipher().encrypt(value.encode("utf-8")).decode("utf-8")
+
+
+def decrypt_social_token(value: str) -> str:
+    if not value:
+        return ""
+    try:
+        return get_social_token_cipher().decrypt(value.encode("utf-8")).decode("utf-8")
+    except (InvalidToken, ValueError, TypeError):
+        logger.warning("Could not decrypt social provider token")
+        return ""
+
+
+def mask_secret(value: str) -> str:
+    stripped = (value or "").strip()
+    if len(stripped) <= 8:
+        return "*" * len(stripped)
+    return f"{stripped[:4]}{'*' * max(4, len(stripped) - 8)}{stripped[-4:]}"
+
+
+def get_linkedin_social_client_id() -> str:
+    return os.environ.get("LINKEDIN_SOCIAL_CLIENT_ID", "").strip()
+
+
+def get_linkedin_social_client_secret() -> str:
+    return os.environ.get("LINKEDIN_SOCIAL_CLIENT_SECRET", "").strip()
+
+
+def get_linkedin_social_redirect_uri(request: Optional[Request] = None) -> str:
+    override = os.environ.get("LINKEDIN_SOCIAL_REDIRECT_URI", "").strip()
+    if override:
+        return override
+    return f"{get_public_app_origin(request)}/api/social/oauth/{SOCIAL_PUBLISH_PROVIDER_LINKEDIN}/callback"
+
+
+def is_linkedin_social_configured() -> bool:
+    return bool(get_linkedin_social_client_id() and get_linkedin_social_client_secret())
+
+
+def get_meta_app_id() -> str:
+    return os.environ.get("META_APP_ID", "").strip()
+
+
+def get_meta_app_secret() -> str:
+    return os.environ.get("META_APP_SECRET", "").strip()
+
+
+def get_instagram_social_redirect_uri(request: Optional[Request] = None) -> str:
+    override = os.environ.get("INSTAGRAM_SOCIAL_REDIRECT_URI", "").strip()
+    if override:
+        return override
+    return f"{get_public_app_origin(request)}/api/social/oauth/{SOCIAL_PUBLISH_PROVIDER_INSTAGRAM}/callback"
+
+
+def is_instagram_social_configured() -> bool:
+    return bool(get_meta_app_id() and get_meta_app_secret())
+
+
+def is_social_publish_provider_configured(provider: str) -> bool:
+    if provider == SOCIAL_PUBLISH_PROVIDER_LINKEDIN:
+        return is_linkedin_social_configured()
+    if provider == SOCIAL_PUBLISH_PROVIDER_INSTAGRAM:
+        return is_instagram_social_configured()
+    return False
+
+
+def build_social_publish_state(provider: str, user_id: str, return_origin: str) -> str:
+    payload = {
+        "type": "social_publish_state",
+        "provider": provider,
+        "sub": user_id,
+        "return_origin": return_origin,
+        "nonce": secrets.token_urlsafe(24),
+        "exp": datetime.now(timezone.utc) + timedelta(minutes=20),
+    }
+    return jwt.encode(payload, get_jwt_secret(), algorithm=JWT_ALGORITHM)
+
+
+def decode_social_publish_state(state: str, expected_provider: str) -> Dict[str, Any]:
+    try:
+        payload = jwt.decode(state, get_jwt_secret(), algorithms=[JWT_ALGORITHM])
+    except jwt.PyJWTError:
+        raise HTTPException(status_code=400, detail="Invalid social publishing state")
+    if payload.get("type") != "social_publish_state" or payload.get("provider") != expected_provider:
+        raise HTTPException(status_code=400, detail="Invalid social publishing state")
+    return payload
+
+
+def get_linkedin_social_scopes() -> str:
+    return "r_organization_social w_organization_social"
+
+
+def build_linkedin_social_authorize_url(request: Request, state: str) -> str:
+    params = {
+        "response_type": "code",
+        "client_id": get_linkedin_social_client_id(),
+        "redirect_uri": get_linkedin_social_redirect_uri(request),
+        "state": state,
+        "scope": get_linkedin_social_scopes(),
+    }
+    return f"https://www.linkedin.com/oauth/v2/authorization?{urlencode(params)}"
+
+
+def get_instagram_social_scopes() -> str:
+    return ",".join(
+        [
+            "pages_show_list",
+            "pages_read_engagement",
+            "business_management",
+            "instagram_basic",
+            "instagram_content_publish",
+            "instagram_manage_insights",
+        ]
+    )
+
+
+def build_instagram_social_authorize_url(request: Request, state: str) -> str:
+    params = {
+        "client_id": get_meta_app_id(),
+        "redirect_uri": get_instagram_social_redirect_uri(request),
+        "response_type": "code",
+        "scope": get_instagram_social_scopes(),
+        "state": state,
+    }
+    return f"https://www.facebook.com/{META_GRAPH_VERSION}/dialog/oauth?{urlencode(params)}"
+
+
+def exchange_linkedin_social_code(request: Request, code: str) -> Dict[str, Any]:
+    response = requests.post(
+        "https://www.linkedin.com/oauth/v2/accessToken",
+        data={
+            "grant_type": "authorization_code",
+            "code": code,
+            "client_id": get_linkedin_social_client_id(),
+            "client_secret": get_linkedin_social_client_secret(),
+            "redirect_uri": get_linkedin_social_redirect_uri(request),
+        },
+        timeout=45,
+    )
+    if response.status_code >= 400:
+        raise HTTPException(status_code=502, detail=f"LinkedIn token exchange failed: {response.text[:300]}")
+    payload = response.json() or {}
+    expires_in = int(payload.get("expires_in", 0) or 0)
+    token_expires_at = (
+        datetime.now(timezone.utc) + timedelta(seconds=expires_in)
+    ).isoformat() if expires_in else ""
+    return {
+        "access_token": payload.get("access_token", ""),
+        "refresh_token": payload.get("refresh_token", ""),
+        "token_expires_at": token_expires_at,
+    }
+
+
+def exchange_instagram_social_code(request: Request, code: str) -> Dict[str, Any]:
+    response = requests.get(
+        f"https://graph.facebook.com/{META_GRAPH_VERSION}/oauth/access_token",
+        params={
+            "client_id": get_meta_app_id(),
+            "client_secret": get_meta_app_secret(),
+            "redirect_uri": get_instagram_social_redirect_uri(request),
+            "code": code,
+        },
+        timeout=45,
+    )
+    if response.status_code >= 400:
+        raise HTTPException(status_code=502, detail=f"Meta token exchange failed: {response.text[:300]}")
+    payload = response.json() or {}
+    access_token = payload.get("access_token", "")
+    expires_in = int(payload.get("expires_in", 0) or 0)
+
+    long_lived_response = requests.get(
+        f"https://graph.facebook.com/{META_GRAPH_VERSION}/oauth/access_token",
+        params={
+            "grant_type": "fb_exchange_token",
+            "client_id": get_meta_app_id(),
+            "client_secret": get_meta_app_secret(),
+            "fb_exchange_token": access_token,
+        },
+        timeout=45,
+    )
+    if long_lived_response.status_code < 400:
+        long_lived_payload = long_lived_response.json() or {}
+        access_token = long_lived_payload.get("access_token", access_token)
+        expires_in = int(long_lived_payload.get("expires_in", expires_in) or expires_in or 0)
+
+    token_expires_at = (
+        datetime.now(timezone.utc) + timedelta(seconds=expires_in)
+    ).isoformat() if expires_in else ""
+    return {
+        "access_token": access_token,
+        "refresh_token": "",
+        "token_expires_at": token_expires_at,
+    }
+
+
+def social_publish_redirect(request: Request, return_origin: str, params: Optional[Dict[str, Any]] = None) -> RedirectResponse:
+    destination = build_frontend_url(return_origin, "/settings", params or {})
+    return RedirectResponse(destination, status_code=302)
+
+
+def sanitize_social_account(account: Dict[str, Any]) -> Dict[str, Any]:
+    cleaned = clean_doc(account) or {}
+    cleaned.pop("access_token", None)
+    cleaned.pop("refresh_token", None)
+    cleaned["has_access_token"] = bool(account.get("access_token"))
+    cleaned["token_preview"] = mask_secret(decrypt_social_token(account.get("access_token", "")))
+    return cleaned
+
+
+def sanitize_social_post(post: Dict[str, Any]) -> Dict[str, Any]:
+    cleaned = clean_doc(post) or {}
+    cleaned.pop("provider_response", None)
+    cleaned["card_image_url"] = f"{get_public_app_origin()}/api/social/posts/{cleaned.get('id')}/card.png"
+    return cleaned
 
 
 def get_public_request_origin(request: Request) -> str:
@@ -950,6 +1230,11 @@ def clean_doc(doc):
     return cleaned
 
 
+def ensure_social_publishing_access(user: Dict[str, Any]):
+    if user.get("role") not in {"podcaster", "admin"}:
+        raise HTTPException(status_code=403, detail="Only podcasters and admins can manage social publishing")
+
+
 def build_default_show_title(user_name: str) -> str:
     user_name = (user_name or "Audioraq Creator").strip()
     if user_name.lower().endswith("show"):
@@ -966,6 +1251,633 @@ def parse_iso_datetime(value: Optional[str]):
         return datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError:
         return None
+
+
+def normalize_social_post_status(value: Optional[str]) -> str:
+    normalized = (value or "").strip().lower()
+    if normalized in SOCIAL_POST_STATUSES:
+        return normalized
+    return SOCIAL_POST_STATUS_DRAFT
+
+
+def compose_social_post_text(post: Dict[str, Any], max_length: int = 2200) -> str:
+    parts = []
+    headline = (post.get("headline") or "").strip()
+    caption = (post.get("caption") or "").strip()
+    cta = (post.get("cta") or "").strip()
+    link_url = (post.get("link_url") or "").strip()
+    hashtags = [tag.strip() for tag in (post.get("hashtags") or []) if str(tag).strip()]
+
+    if headline:
+        parts.append(headline)
+    if caption:
+        parts.append(caption)
+    if cta:
+        parts.append(cta)
+    if link_url:
+        parts.append(link_url)
+    if hashtags:
+        parts.append(" ".join(tag if tag.startswith("#") else f"#{tag.replace(' ', '')}" for tag in hashtags[:8]))
+
+    text = "\n\n".join([part for part in parts if part]).strip()
+    if len(text) <= max_length:
+        return text
+    return textwrap.shorten(text, width=max_length, placeholder="...")
+
+
+def normalize_linkedin_organization_id(value: Any) -> str:
+    raw = str(value or "").strip()
+    if raw.startswith("urn:li:organization:"):
+        return raw.rsplit(":", 1)[-1]
+    digits = "".join(ch for ch in raw if ch.isdigit())
+    return digits or raw
+
+
+def build_linkedin_headers(access_token: str, content_type: str = "application/json") -> Dict[str, str]:
+    return {
+        "Authorization": f"Bearer {access_token}",
+        "Linkedin-Version": LINKEDIN_DEFAULT_VERSION,
+        "X-Restli-Protocol-Version": "2.0.0",
+        "Content-Type": content_type,
+    }
+
+
+def linkedin_rest_request(method: str, path: str, access_token: str, **kwargs) -> requests.Response:
+    response = requests.request(
+        method.upper(),
+        f"https://api.linkedin.com/rest{path}",
+        headers=build_linkedin_headers(access_token, kwargs.pop("content_type", "application/json")),
+        timeout=45,
+        **kwargs,
+    )
+    if response.status_code >= 400:
+        raise HTTPException(status_code=502, detail=f"LinkedIn API error: {response.text[:300]}")
+    return response
+
+
+def meta_graph_request(method: str, path: str, access_token: str, **kwargs) -> requests.Response:
+    response = requests.request(
+        method.upper(),
+        f"https://graph.facebook.com/{META_GRAPH_VERSION}{path}",
+        params={**kwargs.pop("params", {}), "access_token": access_token},
+        timeout=45,
+        **kwargs,
+    )
+    if response.status_code >= 400:
+        raise HTTPException(status_code=502, detail=f"Meta API error: {response.text[:300]}")
+    return response
+
+
+def social_account_public_label(account: Dict[str, Any]) -> str:
+    return (
+        account.get("account_name")
+        or account.get("username")
+        or account.get("organization_name")
+        or account.get("page_name")
+        or account.get("account_id")
+        or "Connected account"
+    )
+
+
+async def upsert_social_connected_account(
+    user: Dict[str, Any],
+    provider: str,
+    account_id: str,
+    *,
+    account_name: str = "",
+    username: str = "",
+    organization_id: str = "",
+    page_id: str = "",
+    scopes: Optional[List[str]] = None,
+    access_token: str = "",
+    refresh_token: str = "",
+    token_expires_at: str = "",
+    metadata: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    account_id = str(account_id or "").strip()
+    if not account_id:
+        raise HTTPException(status_code=400, detail="Connected social accounts require an account id")
+
+    existing = await db.social_connected_accounts.find_one(
+        {"user_id": user_id_str(user), "provider": provider, "account_id": account_id}
+    )
+    doc_id = existing.get("id") if existing else str(uuid.uuid4())
+    payload = {
+        "id": doc_id,
+        "user_id": user_id_str(user),
+        "provider": provider,
+        "account_id": account_id,
+        "account_name": account_name.strip(),
+        "username": username.strip(),
+        "organization_id": normalize_linkedin_organization_id(organization_id),
+        "page_id": str(page_id or "").strip(),
+        "scopes": sorted({scope.strip() for scope in (scopes or []) if str(scope).strip()}),
+        "access_token": encrypt_social_token(access_token),
+        "refresh_token": encrypt_social_token(refresh_token),
+        "token_expires_at": token_expires_at or "",
+        "metadata": metadata or {},
+        "status": "connected",
+        "updated_at": now_iso(),
+        "last_synced_at": now_iso(),
+    }
+    if not existing:
+        payload["created_at"] = now_iso()
+    await db.social_connected_accounts.update_one({"id": doc_id}, {"$set": payload}, upsert=True)
+    saved = await db.social_connected_accounts.find_one({"id": doc_id})
+    return sanitize_social_account(saved)
+
+
+async def fetch_user_social_accounts(user: Dict[str, Any], provider: Optional[str] = None) -> List[Dict[str, Any]]:
+    query = {"user_id": user_id_str(user)}
+    if provider:
+        query["provider"] = provider
+    accounts = await db.social_connected_accounts.find(query).sort("updated_at", -1).to_list(100)
+    return [sanitize_social_account(account) for account in accounts]
+
+
+async def get_social_connected_account(user: Dict[str, Any], social_account_id: str) -> Dict[str, Any]:
+    account = await db.social_connected_accounts.find_one({"id": social_account_id, "user_id": user_id_str(user)})
+    if not account:
+        raise HTTPException(status_code=404, detail="Connected social account not found")
+    return account
+
+
+def generate_social_card_image(post: Dict[str, Any]) -> bytes:
+    width, height = 1200, 1200
+    image = Image.new("RGB", (width, height), "#0A0A0B")
+    draw = ImageDraw.Draw(image)
+
+    for index in range(height):
+        ratio = index / max(1, height - 1)
+        r = int(10 + (24 * ratio))
+        g = int(10 + (84 * ratio))
+        b = int(11 + (42 * ratio))
+        draw.line([(0, index), (width, index)], fill=(r, g, b))
+
+    try:
+        title_font = ImageFont.truetype("/System/Library/Fonts/Supplemental/Arial Bold.ttf", 72)
+        body_font = ImageFont.truetype("/System/Library/Fonts/Supplemental/Arial.ttf", 38)
+        meta_font = ImageFont.truetype("/System/Library/Fonts/Supplemental/Arial.ttf", 28)
+    except Exception:
+        title_font = ImageFont.load_default()
+        body_font = ImageFont.load_default()
+        meta_font = ImageFont.load_default()
+
+    headline = (post.get("headline") or post.get("caption") or "Audioraq Update").strip()
+    caption = (post.get("caption") or "").strip()
+    provider = (post.get("provider") or "").strip().title()
+    cta = (post.get("cta") or "audioraq.com").strip()
+    accent = "#F5A623" if post.get("provider") == SOCIAL_PUBLISH_PROVIDER_LINKEDIN else "#FF6A3D"
+
+    draw.rounded_rectangle((72, 72, width - 72, height - 72), radius=44, outline="#27272A", width=3)
+    draw.rounded_rectangle((90, 90, 390, 152), radius=28, fill=accent)
+    draw.text((124, 104), f"{provider or 'Social'} Post", fill="#0A0A0B", font=meta_font)
+
+    cursor_y = 240
+    for line in textwrap.wrap(headline, width=24)[:4]:
+        draw.text((96, cursor_y), line, fill="white", font=title_font)
+        cursor_y += 92
+
+    cursor_y += 24
+    for line in textwrap.wrap(caption, width=42)[:8]:
+        draw.text((96, cursor_y), line, fill="#D4D4D8", font=body_font)
+        cursor_y += 56
+
+    draw.text((96, height - 170), "Audioraq", fill="white", font=title_font)
+    draw.text((96, height - 110), cta[:80], fill="#A1A1AA", font=body_font)
+
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+async def create_social_post_record(
+    user: Dict[str, Any],
+    payload: Dict[str, Any],
+    *,
+    publish_now: bool = False,
+) -> Dict[str, Any]:
+    status = SOCIAL_POST_STATUS_PUBLISHING if publish_now else normalize_social_post_status(payload.get("status"))
+    if status == SOCIAL_POST_STATUS_DRAFT and payload.get("scheduled_at"):
+        status = SOCIAL_POST_STATUS_QUEUED
+
+    doc = {
+        "id": str(uuid.uuid4()),
+        "user_id": user_id_str(user),
+        "provider": payload["provider"],
+        "social_account_id": payload["social_account_id"],
+        "headline": (payload.get("headline") or "").strip(),
+        "caption": (payload.get("caption") or "").strip(),
+        "cta": (payload.get("cta") or "").strip(),
+        "link_url": (payload.get("link_url") or "").strip(),
+        "hashtags": [str(tag).strip() for tag in (payload.get("hashtags") or []) if str(tag).strip()],
+        "scheduled_at": (payload.get("scheduled_at") or "").strip(),
+        "status": status,
+        "asset_url": (payload.get("asset_url") or "").strip(),
+        "use_generated_card": bool(payload.get("use_generated_card", True)),
+        "source": (payload.get("source") or "manual").strip(),
+        "metrics": {},
+        "attempt_count": 0,
+        "last_attempt_at": "",
+        "failure_reason": "",
+        "provider_response": {},
+        "published_at": "",
+        "external_post_id": "",
+        "created_at": now_iso(),
+        "updated_at": now_iso(),
+    }
+    await db.social_posts.insert_one(doc)
+    if publish_now:
+        return await publish_social_post_record(doc["id"], user=user)
+    saved = await db.social_posts.find_one({"id": doc["id"]})
+    return sanitize_social_post(saved)
+
+
+def build_social_post_card_url(post_id: str) -> str:
+    return f"{get_public_app_origin()}/api/social/posts/{post_id}/card.png"
+
+
+async def fetch_linkedin_admin_organizations(access_token: str) -> List[Dict[str, Any]]:
+    response = linkedin_rest_request(
+        "GET",
+        "/organizationAcls",
+        access_token,
+        params={"q": "roleAssignee", "state": "APPROVED", "count": 25},
+    )
+    elements = response.json().get("elements", []) or []
+    organizations = []
+    seen = set()
+    for item in elements:
+        org_urn = item.get("organization") or ""
+        org_id = normalize_linkedin_organization_id(org_urn)
+        role = (item.get("role") or "").strip().upper()
+        if not org_id or org_id in seen:
+            continue
+        if role not in {"ADMINISTRATOR", "DIRECT_SPONSORED_CONTENT_POSTER", "CONTENT_ADMIN"}:
+            continue
+        seen.add(org_id)
+        name = f"LinkedIn Organization {org_id}"
+        try:
+            org_resp = linkedin_rest_request("GET", f"/organizations/{org_id}", access_token)
+            org_data = org_resp.json() or {}
+            name = org_data.get("localizedName") or org_data.get("name", {}).get("localized", {}).get("en_US") or name
+        except HTTPException:
+            pass
+        organizations.append(
+            {
+                "organization_id": org_id,
+                "organization_urn": f"urn:li:organization:{org_id}",
+                "account_id": org_id,
+                "account_name": name,
+                "role": role,
+            }
+        )
+    return organizations
+
+
+async def connect_linkedin_social_accounts(
+    user: Dict[str, Any],
+    access_token: str,
+    *,
+    refresh_token: str = "",
+    token_expires_at: str = "",
+    organization_id: str = "",
+    organization_name: str = "",
+) -> List[Dict[str, Any]]:
+    organizations = await fetch_linkedin_admin_organizations(access_token)
+    requested_org_id = normalize_linkedin_organization_id(organization_id)
+    if requested_org_id:
+        organizations = [item for item in organizations if item["organization_id"] == requested_org_id]
+    if not organizations and requested_org_id:
+        organizations = [
+            {
+                "organization_id": requested_org_id,
+                "organization_urn": f"urn:li:organization:{requested_org_id}",
+                "account_id": requested_org_id,
+                "account_name": organization_name.strip() or f"LinkedIn Organization {requested_org_id}",
+                "role": "ADMINISTRATOR",
+            }
+        ]
+    if not organizations:
+        raise HTTPException(
+            status_code=400,
+            detail="No administered LinkedIn organization was found for this token. Confirm the app has organization posting permissions and the member is a page admin.",
+        )
+
+    connected = []
+    for organization in organizations:
+        connected.append(
+            await upsert_social_connected_account(
+                user,
+                SOCIAL_PUBLISH_PROVIDER_LINKEDIN,
+                organization["account_id"],
+                account_name=organization["account_name"],
+                organization_id=organization["organization_id"],
+                scopes=get_linkedin_social_scopes().split(),
+                access_token=access_token,
+                refresh_token=refresh_token,
+                token_expires_at=token_expires_at,
+                metadata={"organization_urn": organization["organization_urn"], "role": organization["role"]},
+            )
+        )
+    return connected
+
+
+async def fetch_instagram_business_accounts(access_token: str) -> List[Dict[str, Any]]:
+    response = meta_graph_request(
+        "GET",
+        "/me/accounts",
+        access_token,
+        params={
+            "fields": "id,name,instagram_business_account{id,username,profile_picture_url}",
+            "limit": 25,
+        },
+    )
+    accounts = []
+    for page in response.json().get("data", []) or []:
+        instagram = page.get("instagram_business_account") or {}
+        if not instagram.get("id"):
+            continue
+        accounts.append(
+            {
+                "account_id": str(instagram["id"]),
+                "username": (instagram.get("username") or "").strip(),
+                "account_name": (instagram.get("username") or page.get("name") or "Instagram Account").strip(),
+                "page_id": str(page.get("id") or "").strip(),
+                "page_name": (page.get("name") or "").strip(),
+                "profile_picture_url": (instagram.get("profile_picture_url") or "").strip(),
+            }
+        )
+    return accounts
+
+
+async def connect_instagram_social_accounts(
+    user: Dict[str, Any],
+    access_token: str,
+    *,
+    refresh_token: str = "",
+    token_expires_at: str = "",
+    page_id: str = "",
+    instagram_account_id: str = "",
+    account_name: str = "",
+) -> List[Dict[str, Any]]:
+    accounts = await fetch_instagram_business_accounts(access_token)
+    requested_account_id = str(instagram_account_id or "").strip()
+    if requested_account_id:
+        accounts = [item for item in accounts if item["account_id"] == requested_account_id]
+    if not accounts and requested_account_id:
+        accounts = [
+            {
+                "account_id": requested_account_id,
+                "username": "",
+                "account_name": account_name.strip() or "Instagram Professional Account",
+                "page_id": str(page_id or "").strip(),
+                "page_name": "",
+                "profile_picture_url": "",
+            }
+        ]
+    if not accounts:
+        raise HTTPException(
+            status_code=400,
+            detail="No Instagram Professional account linked to a Facebook Page was found for this token.",
+        )
+
+    connected = []
+    for account in accounts:
+        connected.append(
+            await upsert_social_connected_account(
+                user,
+                SOCIAL_PUBLISH_PROVIDER_INSTAGRAM,
+                account["account_id"],
+                account_name=account["account_name"],
+                username=account["username"],
+                page_id=account["page_id"],
+                scopes=get_instagram_social_scopes().split(","),
+                access_token=access_token,
+                refresh_token=refresh_token,
+                token_expires_at=token_expires_at,
+                metadata={
+                    "page_name": account["page_name"],
+                    "profile_picture_url": account["profile_picture_url"],
+                },
+            )
+        )
+    return connected
+
+
+async def publish_linkedin_social_post(post: Dict[str, Any], account: Dict[str, Any]) -> Dict[str, Any]:
+    access_token = decrypt_social_token(account.get("access_token", ""))
+    if not access_token:
+        raise HTTPException(status_code=400, detail="LinkedIn access token is missing")
+    organization_id = normalize_linkedin_organization_id(account.get("organization_id") or account.get("account_id"))
+    if not organization_id:
+        raise HTTPException(status_code=400, detail="LinkedIn organization id is missing")
+    payload = {
+        "author": f"urn:li:organization:{organization_id}",
+        "commentary": compose_social_post_text(post, max_length=2800),
+        "visibility": "PUBLIC",
+        "distribution": {
+            "feedDistribution": "MAIN_FEED",
+            "targetEntities": [],
+            "thirdPartyDistributionChannels": [],
+        },
+        "lifecycleState": "PUBLISHED",
+        "isReshareDisabledByAuthor": False,
+    }
+    response = linkedin_rest_request("POST", "/posts", access_token, json=payload)
+    response_json = response.json() if response.content else {}
+    external_post_id = response_json.get("id") or response.headers.get("x-restli-id", "")
+    return {
+        "external_post_id": external_post_id,
+        "provider_response": response_json,
+    }
+
+
+async def publish_instagram_social_post(post: Dict[str, Any], account: Dict[str, Any]) -> Dict[str, Any]:
+    access_token = decrypt_social_token(account.get("access_token", ""))
+    if not access_token:
+        raise HTTPException(status_code=400, detail="Instagram access token is missing")
+    account_id = str(account.get("account_id") or "").strip()
+    if not account_id:
+        raise HTTPException(status_code=400, detail="Instagram account id is missing")
+    image_url = (post.get("asset_url") or "").strip()
+    if not image_url and post.get("use_generated_card", True):
+        image_url = build_social_post_card_url(post["id"])
+    if not image_url:
+        raise HTTPException(status_code=400, detail="Instagram publishing requires a public image URL")
+
+    create_container = meta_graph_request(
+        "POST",
+        f"/{account_id}/media",
+        access_token,
+        params={
+            "image_url": image_url,
+            "caption": compose_social_post_text(post, max_length=2200),
+        },
+    ).json()
+    creation_id = create_container.get("id")
+    if not creation_id:
+        raise HTTPException(status_code=502, detail="Instagram media container could not be created")
+
+    publish_response = meta_graph_request(
+        "POST",
+        f"/{account_id}/media_publish",
+        access_token,
+        params={"creation_id": creation_id},
+    ).json()
+    return {
+        "external_post_id": publish_response.get("id", ""),
+        "provider_response": {
+            "container": create_container,
+            "publish": publish_response,
+        },
+    }
+
+
+async def publish_social_post_record(post_id: str, *, user: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    query = {"id": post_id}
+    if user is not None:
+        query["user_id"] = user_id_str(user)
+    post = await db.social_posts.find_one(query)
+    if not post:
+        raise HTTPException(status_code=404, detail="Social post not found")
+
+    account = await db.social_connected_accounts.find_one(
+        {"id": post["social_account_id"], "user_id": post["user_id"]}
+    )
+    if not account:
+        raise HTTPException(status_code=400, detail="Connected social account is missing for this post")
+
+    await db.social_posts.update_one(
+        {"id": post_id},
+        {
+            "$set": {
+                "status": SOCIAL_POST_STATUS_PUBLISHING,
+                "last_attempt_at": now_iso(),
+                "updated_at": now_iso(),
+                "failure_reason": "",
+            },
+            "$inc": {"attempt_count": 1},
+        },
+    )
+
+    try:
+        if account["provider"] == SOCIAL_PUBLISH_PROVIDER_LINKEDIN:
+            publish_result = await publish_linkedin_social_post(post, account)
+        elif account["provider"] == SOCIAL_PUBLISH_PROVIDER_INSTAGRAM:
+            publish_result = await publish_instagram_social_post(post, account)
+        else:
+            raise HTTPException(status_code=400, detail="Unsupported social publishing provider")
+
+        await db.social_posts.update_one(
+            {"id": post_id},
+            {
+                "$set": {
+                    "status": SOCIAL_POST_STATUS_PUBLISHED,
+                    "published_at": now_iso(),
+                    "updated_at": now_iso(),
+                    "external_post_id": publish_result.get("external_post_id", ""),
+                    "provider_response": publish_result.get("provider_response", {}),
+                    "failure_reason": "",
+                }
+            },
+        )
+        await db.social_connected_accounts.update_one(
+            {"id": account["id"]},
+            {"$set": {"last_published_at": now_iso(), "updated_at": now_iso()}},
+        )
+    except HTTPException as exc:
+        await db.social_posts.update_one(
+            {"id": post_id},
+            {"$set": {"status": SOCIAL_POST_STATUS_FAILED, "updated_at": now_iso(), "failure_reason": exc.detail}},
+        )
+        raise
+    except Exception as exc:
+        await db.social_posts.update_one(
+            {"id": post_id},
+            {
+                "$set": {
+                    "status": SOCIAL_POST_STATUS_FAILED,
+                    "updated_at": now_iso(),
+                    "failure_reason": str(exc),
+                }
+            },
+        )
+        raise HTTPException(status_code=500, detail=f"Social publish failed: {exc}")
+
+    updated = await db.social_posts.find_one({"id": post_id})
+    return sanitize_social_post(updated)
+
+
+async def process_due_social_posts(limit: int = SOCIAL_QUEUE_BATCH_SIZE) -> List[Dict[str, Any]]:
+    global social_queue_lock
+    if social_queue_lock is None:
+        social_queue_lock = asyncio.Lock()
+    if social_queue_lock.locked():
+        return []
+
+    async with social_queue_lock:
+        queued = await db.social_posts.find({"status": SOCIAL_POST_STATUS_QUEUED}).sort("scheduled_at", 1).limit(max(5, limit * 3)).to_list(max(5, limit * 3))
+        now_dt = datetime.now(timezone.utc)
+        due_posts = []
+        for post in queued:
+            scheduled_at = parse_iso_datetime(post.get("scheduled_at"))
+            if scheduled_at is None or scheduled_at <= now_dt:
+                due_posts.append(post)
+            if len(due_posts) >= limit:
+                break
+
+        results = []
+        for post in due_posts:
+            try:
+                results.append(await publish_social_post_record(post["id"]))
+            except Exception as exc:
+                logger.error(f"Queued social publish failed for {post['id']}: {exc}")
+        return results
+
+
+async def social_queue_daemon():
+    while True:
+        try:
+            await process_due_social_posts()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.error(f"Social queue daemon error: {exc}")
+        await asyncio.sleep(SOCIAL_QUEUE_POLL_SECONDS)
+
+
+async def build_social_analytics(user: Dict[str, Any]) -> Dict[str, Any]:
+    accounts = await db.social_connected_accounts.find({"user_id": user_id_str(user)}).to_list(50)
+    posts = await db.social_posts.find({"user_id": user_id_str(user)}).sort("created_at", -1).to_list(200)
+    by_provider: Dict[str, Dict[str, Any]] = {}
+    for provider in SUPPORTED_SOCIAL_PUBLISH_PROVIDERS:
+        provider_accounts = [account for account in accounts if account.get("provider") == provider]
+        provider_posts = [post for post in posts if post.get("provider") == provider]
+        by_provider[provider] = {
+            "connected_accounts": len(provider_accounts),
+            "queued": len([post for post in provider_posts if post.get("status") == SOCIAL_POST_STATUS_QUEUED]),
+            "published": len([post for post in provider_posts if post.get("status") == SOCIAL_POST_STATUS_PUBLISHED]),
+            "failed": len([post for post in provider_posts if post.get("status") == SOCIAL_POST_STATUS_FAILED]),
+            "latest_post_at": next((post.get("published_at") or post.get("created_at") for post in provider_posts if post.get("published_at") or post.get("created_at")), ""),
+        }
+
+    published_posts = [post for post in posts if post.get("status") == SOCIAL_POST_STATUS_PUBLISHED]
+    queued_posts = [post for post in posts if post.get("status") == SOCIAL_POST_STATUS_QUEUED]
+    failed_posts = [post for post in posts if post.get("status") == SOCIAL_POST_STATUS_FAILED]
+
+    return {
+        "overview": {
+            "connected_accounts": len(accounts),
+            "published_posts": len(published_posts),
+            "queued_posts": len(queued_posts),
+            "failed_posts": len(failed_posts),
+            "recent_success_rate": round((len(published_posts) / max(1, len(published_posts) + len(failed_posts))) * 100, 1),
+        },
+        "by_provider": by_provider,
+        "recent_posts": [sanitize_social_post(post) for post in posts[:12]],
+        "connected_accounts_detail": [sanitize_social_account(account) for account in accounts],
+    }
 
 
 def parse_rss_datetime(value: Optional[str]) -> Optional[str]:
@@ -5583,6 +6495,33 @@ class EpisodeAssistantRequest(BaseModel):
     question: str
 
 
+class ManualSocialConnectRequest(BaseModel):
+    provider: Literal["linkedin", "instagram"]
+    access_token: str
+    refresh_token: Optional[str] = ""
+    organization_id: Optional[str] = ""
+    organization_name: Optional[str] = ""
+    page_id: Optional[str] = ""
+    instagram_account_id: Optional[str] = ""
+    account_name: Optional[str] = ""
+
+
+class SocialPostCreateRequest(BaseModel):
+    provider: Literal["linkedin", "instagram"]
+    social_account_id: str
+    headline: str
+    caption: Optional[str] = ""
+    cta: Optional[str] = ""
+    link_url: Optional[str] = ""
+    hashtags: Optional[List[str]] = []
+    scheduled_at: Optional[str] = ""
+    asset_url: Optional[str] = ""
+    use_generated_card: bool = True
+    source: Optional[str] = "manual"
+    status: Optional[str] = SOCIAL_POST_STATUS_DRAFT
+    publish_now: bool = False
+
+
 class RssImportRequest(BaseModel):
     feed_url: str
     show_id: Optional[str] = ""
@@ -5722,6 +6661,12 @@ async def startup():
     await db.ai_studio_projects.create_index([("podcaster_id", 1), ("show_id", 1), ("updated_at", -1)])
     await db.ai_studio_render_jobs.create_index("id", unique=True)
     await db.ai_studio_render_jobs.create_index([("podcaster_id", 1), ("project_id", 1), ("created_at", -1)])
+    await db.social_connected_accounts.create_index("id", unique=True)
+    await db.social_connected_accounts.create_index([("user_id", 1), ("provider", 1), ("account_id", 1)], unique=True)
+    await db.social_connected_accounts.create_index([("user_id", 1), ("provider", 1)])
+    await db.social_posts.create_index("id", unique=True)
+    await db.social_posts.create_index([("user_id", 1), ("status", 1), ("scheduled_at", 1)])
+    await db.social_posts.create_index([("user_id", 1), ("provider", 1), ("created_at", -1)])
 
     admin_email = os.environ.get("ADMIN_EMAIL", "admin@audioraq.com")
     admin_password = os.environ.get("ADMIN_PASSWORD", "admin123")
@@ -5747,6 +6692,18 @@ async def startup():
         await db.users.update_one({"email": admin_email}, {"$set": {"password_hash": hash_password(admin_password)}})
 
     await migrate_existing_shows()
+    app.state.social_queue_task = asyncio.create_task(social_queue_daemon())
+
+
+@app.on_event("shutdown")
+async def shutdown():
+    task = getattr(app.state, "social_queue_task", None)
+    if task:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
 
     try:
         init_storage()
@@ -6319,6 +7276,206 @@ async def update_podcast_description(req: UpdatePodcastDescriptionRequest, reque
             {"$set": {"description": req.podcast_description, "keywords": keywords, "updated_at": now_iso()}},
         )
     return {"message": "Description updated", "keywords": keywords}
+
+
+@api_router.get("/social/providers")
+async def get_social_publish_providers():
+    return {
+        "linkedin": {
+            "configured": is_linkedin_social_configured(),
+            "oauth_supported": is_linkedin_social_configured(),
+            "scopes": get_linkedin_social_scopes().split(),
+        },
+        "instagram": {
+            "configured": is_instagram_social_configured(),
+            "oauth_supported": is_instagram_social_configured(),
+            "scopes": get_instagram_social_scopes().split(","),
+        },
+    }
+
+
+@api_router.get("/social/accounts")
+async def get_social_accounts(request: Request):
+    user = await get_current_user(request)
+    ensure_social_publishing_access(user)
+    return {"accounts": await fetch_user_social_accounts(user)}
+
+
+@api_router.get("/social/oauth/{provider}/start")
+async def start_social_publish_connect(provider: str, request: Request, return_origin: Optional[str] = None):
+    user = await get_current_user(request)
+    ensure_social_publishing_access(user)
+    if provider not in SUPPORTED_SOCIAL_PUBLISH_PROVIDERS:
+        raise HTTPException(status_code=404, detail="Unsupported social publishing provider")
+    if not is_social_publish_provider_configured(provider):
+        raise HTTPException(status_code=400, detail=f"{provider.title()} publishing is not configured on the server yet")
+
+    resolved_return_origin = sanitize_return_origin(return_origin, request)
+    state = build_social_publish_state(provider, user_id_str(user), resolved_return_origin)
+    if provider == SOCIAL_PUBLISH_PROVIDER_LINKEDIN:
+        return RedirectResponse(build_linkedin_social_authorize_url(request, state), status_code=302)
+    if provider == SOCIAL_PUBLISH_PROVIDER_INSTAGRAM:
+        return RedirectResponse(build_instagram_social_authorize_url(request, state), status_code=302)
+    raise HTTPException(status_code=404, detail="Unsupported social publishing provider")
+
+
+@api_router.get("/social/oauth/{provider}/callback")
+async def social_publish_connect_callback(provider: str, request: Request, code: Optional[str] = None, state: Optional[str] = None, error: Optional[str] = None):
+    if provider not in SUPPORTED_SOCIAL_PUBLISH_PROVIDERS:
+        raise HTTPException(status_code=404, detail="Unsupported social publishing provider")
+    if not state:
+        raise HTTPException(status_code=400, detail="Missing social publishing state")
+    decoded = decode_social_publish_state(state, provider)
+    return_origin = decoded.get("return_origin") or get_public_app_origin(request)
+    if error:
+        return social_publish_redirect(request, return_origin, {"social_error": error[:180]})
+    if not code:
+        return social_publish_redirect(request, return_origin, {"social_error": "Provider did not return an authorization code"})
+
+    user = await db.users.find_one({"_id": ObjectId(decoded["sub"])})
+    if not user:
+        return social_publish_redirect(request, return_origin, {"social_error": "User session expired before provider connection completed"})
+    user["_id"] = str(user["_id"])
+    user.pop("password_hash", None)
+
+    try:
+        if provider == SOCIAL_PUBLISH_PROVIDER_LINKEDIN:
+            tokens = exchange_linkedin_social_code(request, code)
+            connected = await connect_linkedin_social_accounts(
+                user,
+                tokens["access_token"],
+                refresh_token=tokens.get("refresh_token", ""),
+                token_expires_at=tokens.get("token_expires_at", ""),
+            )
+        else:
+            tokens = exchange_instagram_social_code(request, code)
+            connected = await connect_instagram_social_accounts(
+                user,
+                tokens["access_token"],
+                token_expires_at=tokens.get("token_expires_at", ""),
+            )
+    except HTTPException as exc:
+        return social_publish_redirect(request, return_origin, {"social_error": str(exc.detail)[:180]})
+    except Exception as exc:
+        logger.error(f"Social publish OAuth callback failed for {provider}: {exc}")
+        return social_publish_redirect(request, return_origin, {"social_error": f"{provider.title()} connection could not be completed"})
+
+    success_message = f"{provider.title()} connected"
+    if len(connected) > 1:
+        success_message = f"{provider.title()} connected with {len(connected)} accounts"
+    return social_publish_redirect(request, return_origin, {"social_success": success_message[:180]})
+
+
+@api_router.post("/social/connect/manual")
+async def manual_social_publish_connect(req: ManualSocialConnectRequest, request: Request):
+    user = await get_current_user(request)
+    ensure_social_publishing_access(user)
+    access_token = (req.access_token or "").strip()
+    if not access_token:
+        raise HTTPException(status_code=400, detail="Access token is required")
+
+    if req.provider == SOCIAL_PUBLISH_PROVIDER_LINKEDIN:
+        connected = await connect_linkedin_social_accounts(
+            user,
+            access_token,
+            refresh_token=(req.refresh_token or "").strip(),
+            organization_id=req.organization_id or "",
+            organization_name=req.organization_name or "",
+        )
+    elif req.provider == SOCIAL_PUBLISH_PROVIDER_INSTAGRAM:
+        connected = await connect_instagram_social_accounts(
+            user,
+            access_token,
+            refresh_token=(req.refresh_token or "").strip(),
+            page_id=req.page_id or "",
+            instagram_account_id=req.instagram_account_id or "",
+            account_name=req.account_name or "",
+        )
+    else:
+        raise HTTPException(status_code=404, detail="Unsupported social publishing provider")
+    return {"accounts": connected}
+
+
+@api_router.delete("/social/accounts/{social_account_id}")
+async def disconnect_social_account(social_account_id: str, request: Request):
+    user = await get_current_user(request)
+    ensure_social_publishing_access(user)
+    await db.social_connected_accounts.delete_one({"id": social_account_id, "user_id": user_id_str(user)})
+    await db.social_posts.update_many(
+        {"social_account_id": social_account_id, "user_id": user_id_str(user), "status": {"$in": [SOCIAL_POST_STATUS_DRAFT, SOCIAL_POST_STATUS_QUEUED]}},
+        {"$set": {"status": SOCIAL_POST_STATUS_FAILED, "failure_reason": "Connected account was removed", "updated_at": now_iso()}},
+    )
+    return {"message": "Connected social account removed"}
+
+
+@api_router.get("/social/posts")
+async def get_social_posts(request: Request, provider: Optional[str] = None, status: Optional[str] = None, limit: int = 40):
+    user = await get_current_user(request)
+    ensure_social_publishing_access(user)
+    query = {"user_id": user_id_str(user)}
+    if provider:
+        query["provider"] = provider
+    normalized_status = normalize_social_post_status(status)
+    if status:
+        query["status"] = normalized_status
+    posts = await db.social_posts.find(query).sort("created_at", -1).limit(max(1, min(limit, 100))).to_list(max(1, min(limit, 100)))
+    return {"posts": [sanitize_social_post(post) for post in posts]}
+
+
+@api_router.post("/social/posts")
+async def create_social_post(req: SocialPostCreateRequest, request: Request):
+    user = await get_current_user(request)
+    ensure_social_publishing_access(user)
+    await get_social_connected_account(user, req.social_account_id)
+
+    payload = req.model_dump()
+    if payload.get("scheduled_at"):
+        scheduled = parse_iso_datetime(payload["scheduled_at"])
+        if scheduled is None:
+            raise HTTPException(status_code=400, detail="scheduled_at must be a valid ISO timestamp")
+        payload["scheduled_at"] = scheduled.astimezone(timezone.utc).isoformat()
+    post = await create_social_post_record(user, payload, publish_now=bool(req.publish_now))
+    return post
+
+
+@api_router.post("/social/posts/{post_id}/publish")
+async def publish_social_post_endpoint(post_id: str, request: Request):
+    user = await get_current_user(request)
+    ensure_social_publishing_access(user)
+    return await publish_social_post_record(post_id, user=user)
+
+
+@api_router.delete("/social/posts/{post_id}")
+async def delete_social_post(post_id: str, request: Request):
+    user = await get_current_user(request)
+    ensure_social_publishing_access(user)
+    await db.social_posts.delete_one({"id": post_id, "user_id": user_id_str(user)})
+    return {"message": "Social post removed"}
+
+
+@api_router.post("/social/queue/process")
+async def process_social_queue_endpoint(request: Request):
+    user = await get_current_user(request)
+    ensure_social_publishing_access(user)
+    results = await process_due_social_posts()
+    owned_results = [post for post in results if post.get("user_id") == user_id_str(user) or not post.get("user_id")]
+    return {"processed_count": len(results), "posts": owned_results}
+
+
+@api_router.get("/social/analytics")
+async def get_social_analytics(request: Request):
+    user = await get_current_user(request)
+    ensure_social_publishing_access(user)
+    return await build_social_analytics(user)
+
+
+@api_router.get("/social/posts/{post_id}/card.png")
+async def get_social_post_card(post_id: str):
+    post = await db.social_posts.find_one({"id": post_id})
+    if not post:
+        raise HTTPException(status_code=404, detail="Social post not found")
+    image_bytes = generate_social_card_image(post)
+    return StreamingResponse(io.BytesIO(image_bytes), media_type="image/png")
 
 
 @api_router.get("/shows")
