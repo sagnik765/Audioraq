@@ -169,6 +169,12 @@ export default function PodcastCard({ podcast, onHide, onSaveChange }) {
         {podcast.recommendation_reason && (
           <p className="text-xs text-[#F5A623] mb-2 line-clamp-2">{podcast.recommendation_reason}</p>
         )}
+        {podcast.listener_brief?.why_now && (
+          <div className="mb-2">
+            <p className="text-[10px] uppercase tracking-[0.18em] text-[#8A8A93] mb-1">AI brief</p>
+            <p className="text-xs text-[#C7C7D1] line-clamp-2 leading-relaxed">{podcast.listener_brief.why_now}</p>
+          </div>
+        )}
         {podcast.description && (
           <p className="text-xs text-[#8A8A93] line-clamp-2 mb-3 leading-relaxed">{podcast.description}</p>
         )}

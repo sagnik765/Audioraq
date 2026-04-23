@@ -133,6 +133,7 @@ export default function AIPodcastCreator({
   onSelectShow,
   activeShow,
   onApplyDraft,
+  seedBrief,
 }) {
   const [brief, setBrief] = useState(() => buildInitialBrief(activeShow));
   const [stepIndex, setStepIndex] = useState(0);
@@ -155,6 +156,15 @@ export default function AIPodcastCreator({
       },
     }));
   }, [activeShow?.category, activeShow?.title]);
+
+  useEffect(() => {
+    if (!seedBrief || typeof seedBrief !== 'object') return;
+    setBrief(seedBrief);
+    setGeneratedDraft(null);
+    setActiveProject(null);
+    setStepIndex(0);
+    toast.success('Loaded an AI Strategist idea into the brief.');
+  }, [seedBrief]);
 
   const steps = useMemo(() => {
     const nicheSuggestions = uniqueSuggestions([

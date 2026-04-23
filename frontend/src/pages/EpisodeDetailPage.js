@@ -31,6 +31,9 @@ export default function EpisodeDetailPage() {
   const [related, setRelated] = useState([]);
   const [loading, setLoading] = useState(true);
   const [accessRestricted, setAccessRestricted] = useState(false);
+  const [assistantQuestion, setAssistantQuestion] = useState('');
+  const [assistantReply, setAssistantReply] = useState(null);
+  const [assistantLoading, setAssistantLoading] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -46,12 +49,15 @@ export default function EpisodeDetailPage() {
           setAccessRestricted(false);
           setEpisode(episodeRes.data);
           setRelated(relatedRes.data.podcasts || []);
+          setAssistantQuestion('');
+          setAssistantReply(null);
         }
       } catch (error) {
         if (!cancelled) {
           setAccessRestricted(error.response?.status === 403);
           setEpisode(false);
           setRelated([]);
+          setAssistantReply(null);
         }
       } finally {
         if (!cancelled) setLoading(false);
@@ -205,6 +211,29 @@ export default function EpisodeDetailPage() {
     }
   };
 
+  const handleAskAssistant = async (questionOverride = '') => {
+    const nextQuestion = String(questionOverride || assistantQuestion || '').trim();
+    if (!nextQuestion) {
+      toast.error('Ask a question first');
+      return;
+    }
+
+    setAssistantLoading(true);
+    setAssistantQuestion(nextQuestion);
+    try {
+      const { data } = await axios.post(
+        `${API}/podcasts/${episode.id}/assistant`,
+        { question: nextQuestion },
+        authRequest,
+      );
+      setAssistantReply(data);
+    } catch (error) {
+      toast.error(error.response?.data?.detail || 'Could not answer that question');
+    } finally {
+      setAssistantLoading(false);
+    }
+  };
+
   return (
     <div className={`min-h-screen bg-[#0A0A0B] ${currentPodcast ? 'has-player' : ''}`} data-testid="episode-detail-page">
       <Navbar />
@@ -263,6 +292,39 @@ export default function EpisodeDetailPage() {
               <div className="bg-[#0A0A0B] border border-[#27272A] rounded-2xl px-4 py-3 mb-6">
                 <p className="text-xs uppercase tracking-[0.2em] font-semibold text-[#8A8A93] mb-1">Why this is here</p>
                 <p className="text-sm text-white">{episode.recommendation_reason}</p>
+              </div>
+            )}
+
+            {episode.listener_brief && (
+              <div className="bg-[#0A0A0B] border border-[#27272A] rounded-2xl px-4 py-4 mb-6">
+                <div className="flex items-center justify-between gap-4 mb-4">
+                  <div>
+                    <p className="text-xs uppercase tracking-[0.2em] font-semibold text-[#F5A623] mb-1">AI Listener Brief</p>
+                    <p className="text-sm text-white">{episode.listener_brief.why_now}</p>
+                  </div>
+                  <span className="text-[11px] uppercase tracking-[0.16em] text-[#8A8A93]">
+                    {episode.listener_brief.provider || 'deterministic'}
+                  </span>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                  <div className="rounded-xl border border-[#1F1F24] bg-[#141417] px-3 py-3">
+                    <p className="text-[11px] uppercase tracking-[0.18em] text-[#8A8A93] mb-1">Best for</p>
+                    <p className="text-sm text-[#D8D8DE]">{episode.listener_brief.best_for}</p>
+                  </div>
+                  <div className="rounded-xl border border-[#1F1F24] bg-[#141417] px-3 py-3">
+                    <p className="text-[11px] uppercase tracking-[0.18em] text-[#8A8A93] mb-1">What you should leave with</p>
+                    <p className="text-sm text-[#D8D8DE]">{episode.listener_brief.takeaway}</p>
+                  </div>
+                  <div className="rounded-xl border border-[#1F1F24] bg-[#141417] px-3 py-3">
+                    <p className="text-[11px] uppercase tracking-[0.18em] text-[#8A8A93] mb-1">Difficulty</p>
+                    <p className="text-sm text-[#D8D8DE]">{episode.listener_brief.difficulty}</p>
+                  </div>
+                  <div className="rounded-xl border border-[#1F1F24] bg-[#141417] px-3 py-3">
+                    <p className="text-[11px] uppercase tracking-[0.18em] text-[#8A8A93] mb-1">Tone and listen mode</p>
+                    <p className="text-sm text-[#D8D8DE]">{episode.listener_brief.tone} · {episode.listener_brief.listen_mode}</p>
+                  </div>
+                </div>
               </div>
             )}
 
@@ -474,6 +536,78 @@ export default function EpisodeDetailPage() {
                 ))}
               </div>
             )}
+
+            <div className="bg-[#0A0A0B] border border-[#27272A] rounded-2xl px-4 py-4 mt-8">
+              <div className="flex flex-col md:flex-row md:items-end md:justify-between gap-4 mb-4">
+                <div>
+                  <p className="text-xs uppercase tracking-[0.2em] font-semibold text-[#F5A623] mb-1">Ask this episode</p>
+                  <p className="text-sm text-[#C7C7D1]">
+                    Ask Audioraq what this episode is really about before you commit your time. Answers are grounded in episode metadata and available excerpts.
+                  </p>
+                </div>
+                <span className="text-[11px] uppercase tracking-[0.16em] text-[#8A8A93]">
+                  Grounded assistant
+                </span>
+              </div>
+
+              <div className="flex flex-wrap gap-2 mb-4">
+                {(episode.assistant_prompts || []).map((prompt) => (
+                  <button
+                    key={prompt}
+                    type="button"
+                    onClick={() => handleAskAssistant(prompt)}
+                    className="px-3 py-1.5 rounded-full bg-[#141417] border border-[#27272A] text-xs text-white hover:border-[#F5A623] transition-colors"
+                  >
+                    {prompt}
+                  </button>
+                ))}
+              </div>
+
+              <div className="flex flex-col md:flex-row gap-3 mb-4">
+                <input
+                  type="text"
+                  value={assistantQuestion}
+                  onChange={(event) => setAssistantQuestion(event.target.value)}
+                  placeholder="What will I get out of this episode?"
+                  className="flex-1 bg-[#141417] border border-[#27272A] rounded-xl text-white px-4 py-3 outline-none"
+                />
+                <button
+                  type="button"
+                  onClick={() => handleAskAssistant()}
+                  disabled={assistantLoading}
+                  className="bg-[#F5A623] hover:bg-[#F7B84B] text-[#0A0A0B] font-bold rounded-full px-6 py-3 transition-colors disabled:opacity-50"
+                >
+                  {assistantLoading ? 'Thinking...' : 'Ask Audioraq'}
+                </button>
+              </div>
+
+              {assistantReply && (
+                <div className="rounded-2xl border border-[#1F1F24] bg-[#141417] px-4 py-4">
+                  <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
+                    <p className="text-xs uppercase tracking-[0.18em] text-[#8A8A93]">Answer</p>
+                    <p className="text-[11px] uppercase tracking-[0.16em] text-[#8A8A93]">
+                      {assistantReply.confidence || 'medium'} confidence · {assistantReply.provider || 'deterministic'}
+                    </p>
+                  </div>
+                  <p className="text-sm text-white leading-relaxed mb-3">{assistantReply.answer}</p>
+                  <p className="text-xs text-[#8A8A93] mb-3">Grounding: {assistantReply.grounding}</p>
+                  {assistantReply.follow_up_questions?.length > 0 && (
+                    <div className="flex flex-wrap gap-2">
+                      {assistantReply.follow_up_questions.map((followUp) => (
+                        <button
+                          key={followUp}
+                          type="button"
+                          onClick={() => handleAskAssistant(followUp)}
+                          className="px-3 py-1.5 rounded-full bg-[#0A0A0B] border border-[#27272A] text-xs text-[#C7C7D1] hover:text-white hover:border-[#F5A623] transition-colors"
+                        >
+                          {followUp}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
           </div>
         </section>
 

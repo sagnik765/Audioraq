@@ -31,6 +31,10 @@ export default function PodcasterDashboard() {
   const [uploading, setUploading] = useState(false);
   const [savingShow, setSavingShow] = useState(false);
   const [rssImporting, setRssImporting] = useState(false);
+  const [strategyLoading, setStrategyLoading] = useState(false);
+  const [strategyRefreshing, setStrategyRefreshing] = useState(false);
+  const [showStrategy, setShowStrategy] = useState(null);
+  const [aiSeedBrief, setAiSeedBrief] = useState(null);
 
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
@@ -82,6 +86,43 @@ export default function PodcasterDashboard() {
   const activeShow = shows.find((show) => show.id === selectedShowId) || shows[0] || null;
 
   const totalPlays = episodes.reduce((sum, episode) => sum + (episode.play_count || 0), 0);
+
+  const fetchShowStrategy = useCallback(async (showId, { refresh = false } = {}) => {
+    if (!showId) {
+      setShowStrategy(null);
+      return;
+    }
+
+    if (refresh) {
+      setStrategyRefreshing(true);
+    } else {
+      setStrategyLoading(true);
+    }
+
+    try {
+      const { data } = await axios.get(`${API}/shows/${showId}/ai-strategy${refresh ? '?refresh=true' : ''}`, {
+        withCredentials: true,
+      });
+      setShowStrategy(data || null);
+    } catch (error) {
+      if (refresh) {
+        toast.error(error.response?.data?.detail || 'Could not refresh show strategy');
+      } else {
+        setShowStrategy(null);
+      }
+    } finally {
+      setStrategyLoading(false);
+      setStrategyRefreshing(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!selectedShowId) {
+      setShowStrategy(null);
+      return;
+    }
+    fetchShowStrategy(selectedShowId);
+  }, [fetchShowStrategy, selectedShowId]);
 
   const resetUploadForm = () => {
     setTitle('');
@@ -312,6 +353,15 @@ export default function PodcasterDashboard() {
     }
   };
 
+  const handleUseStrategyIdea = (idea) => {
+    if (!idea?.ai_seed) {
+      toast.error('That idea is missing an AI Studio seed.');
+      return;
+    }
+    setAiSeedBrief(JSON.parse(JSON.stringify(idea.ai_seed)));
+    setShowAICreator(true);
+  };
+
   return (
     <div className={`min-h-screen bg-[#0A0A0B] ${currentPodcast ? 'has-player' : ''}`} data-testid="podcaster-dashboard">
       <Navbar />
@@ -326,7 +376,10 @@ export default function PodcasterDashboard() {
           </div>
           <div className="flex flex-wrap gap-3">
             <button
-              onClick={() => setShowAICreator(true)}
+              onClick={() => {
+                setAiSeedBrief(null);
+                setShowAICreator(true);
+              }}
               className="bg-[#141417] hover:bg-[#27272A] border border-[#27272A] text-white rounded-full px-5 py-3 transition-colors inline-flex items-center gap-2"
               data-testid="ai-toggle-btn"
             >
@@ -461,6 +514,151 @@ export default function PodcasterDashboard() {
           )}
         </section>
 
+        <section className="bg-[#141417] border border-[#27272A] rounded-3xl p-8 mb-10">
+          <div className="flex flex-col lg:flex-row lg:items-start lg:justify-between gap-5 mb-6">
+            <div>
+              <p className="text-xs uppercase tracking-[0.2em] font-semibold text-[#F5A623] mb-2">AI Strategist</p>
+              <h2 className="font-['Outfit'] text-2xl font-semibold text-white mb-2">What this show should publish next</h2>
+              <p className="text-sm text-[#8A8A93] max-w-3xl">
+                This is the creator-side AI layer that actually matters: it reads the show, recent episodes, and listener signals, then turns that into concrete next-episode moves you can send straight into AI Studio.
+              </p>
+            </div>
+            <div className="flex flex-wrap gap-3">
+              <button
+                type="button"
+                onClick={() => {
+                  setAiSeedBrief(null);
+                  setShowAICreator(true);
+                }}
+                disabled={!activeShow}
+                className="bg-[#0A0A0B] hover:bg-[#27272A] border border-[#27272A] text-white rounded-full px-5 py-3 transition-colors disabled:opacity-40"
+              >
+                Open AI Studio
+              </button>
+              <button
+                type="button"
+                onClick={() => fetchShowStrategy(selectedShowId, { refresh: true })}
+                disabled={!selectedShowId || strategyRefreshing}
+                className="bg-[#141417] hover:bg-[#27272A] border border-[#27272A] text-white rounded-full px-5 py-3 transition-colors disabled:opacity-40"
+              >
+                {strategyRefreshing ? 'Refreshing...' : 'Refresh Strategy'}
+              </button>
+            </div>
+          </div>
+
+          {!activeShow ? (
+            <div className="bg-[#0A0A0B] border border-[#27272A] rounded-2xl p-6 text-center">
+              <p className="text-sm text-[#8A8A93]">Select or create a show first so Audioraq can generate a strategy that is specific to a real catalog.</p>
+            </div>
+          ) : strategyLoading && !showStrategy ? (
+            <div className="bg-[#0A0A0B] border border-[#27272A] rounded-2xl p-6">
+              <p className="text-sm text-[#8A8A93]">Reading the show, recent episodes, and listener signals...</p>
+            </div>
+          ) : showStrategy ? (
+            <>
+              <div className="grid grid-cols-1 xl:grid-cols-[0.92fr_1.08fr] gap-6 mb-6">
+                <div className="space-y-4">
+                  <div className="bg-[#0A0A0B] border border-[#27272A] rounded-2xl p-5">
+                    <p className="text-xs uppercase tracking-[0.18em] text-[#8A8A93] mb-2">Positioning</p>
+                    <p className="text-sm text-white leading-relaxed">{showStrategy.positioning}</p>
+                  </div>
+                  <div className="bg-[#0A0A0B] border border-[#27272A] rounded-2xl p-5">
+                    <p className="text-xs uppercase tracking-[0.18em] text-[#8A8A93] mb-2">Audience promise</p>
+                    <p className="text-sm text-[#C7C7D1] leading-relaxed">{showStrategy.audience_promise}</p>
+                  </div>
+                  <div className="bg-[#0A0A0B] border border-[#27272A] rounded-2xl p-5">
+                    <p className="text-xs uppercase tracking-[0.18em] text-[#8A8A93] mb-3">Title starters</p>
+                    <div className="flex flex-wrap gap-2">
+                      {(showStrategy.title_starters || []).map((titleStarter) => (
+                        <span key={titleStarter} className="bg-[#141417] border border-[#27272A] rounded-full px-3 py-1.5 text-xs text-white">
+                          {titleStarter}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <div className="bg-[#0A0A0B] border border-[#27272A] rounded-2xl p-5">
+                    <p className="text-xs uppercase tracking-[0.18em] text-[#8A8A93] mb-3">What is working</p>
+                    <div className="space-y-3">
+                      {(showStrategy.what_is_working || []).map((item) => (
+                        <div key={item} className="border border-[#27272A] rounded-xl px-3 py-3">
+                          <p className="text-sm text-white leading-relaxed">{item}</p>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div className="bg-[#0A0A0B] border border-[#27272A] rounded-2xl p-5">
+                    <p className="text-xs uppercase tracking-[0.18em] text-[#8A8A93] mb-3">Underused angles</p>
+                    <div className="space-y-3">
+                      {(showStrategy.underused_angles || []).map((item) => (
+                        <div key={item} className="border border-[#27272A] rounded-xl px-3 py-3">
+                          <p className="text-sm text-[#C7C7D1] leading-relaxed">{item}</p>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div className="bg-[#0A0A0B] border border-[#27272A] rounded-2xl p-5 mb-6">
+                <div className="flex items-center justify-between gap-4 mb-4">
+                  <div>
+                    <p className="text-xs uppercase tracking-[0.18em] text-[#8A8A93] mb-1">Next AI-ready ideas</p>
+                    <h3 className="font-['Outfit'] text-xl font-semibold text-white">High-leverage episodes to create next</h3>
+                  </div>
+                  <p className="text-xs uppercase tracking-[0.18em] text-[#8A8A93]">
+                    Provider: {showStrategy.provider || 'deterministic'}
+                  </p>
+                </div>
+
+                <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+                  {(showStrategy.next_episode_ideas || []).map((idea) => (
+                    <div key={`${idea.title}-${idea.format}`} className="bg-[#141417] border border-[#27272A] rounded-2xl p-5">
+                      <div className="flex items-start justify-between gap-4 mb-3">
+                        <div>
+                          <h4 className="font-['Outfit'] text-lg font-semibold text-white mb-1">{idea.title}</h4>
+                          <p className="text-xs uppercase tracking-[0.18em] text-[#F5A623]">{idea.format} · optimize for {idea.optimize_for}</p>
+                        </div>
+                      </div>
+                      <p className="text-sm text-white leading-relaxed mb-3">{idea.angle}</p>
+                      <p className="text-sm text-[#8A8A93] leading-relaxed mb-3">{idea.why_now}</p>
+                      <div className="bg-[#0A0A0B] border border-[#27272A] rounded-xl px-3 py-3 mb-4">
+                        <p className="text-[11px] uppercase tracking-[0.18em] text-[#8A8A93] mb-1">Desired outcome</p>
+                        <p className="text-sm text-[#C7C7D1]">{idea.desired_outcome}</p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => handleUseStrategyIdea(idea)}
+                        className="bg-[#F5A623] hover:bg-[#F7B84B] text-[#0A0A0B] font-bold rounded-full px-5 py-3 transition-colors"
+                      >
+                        Use in Create with AI
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              <div className="bg-[#0A0A0B] border border-[#27272A] rounded-2xl p-5">
+                <p className="text-xs uppercase tracking-[0.18em] text-[#8A8A93] mb-3">Growth moves</p>
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                  {(showStrategy.growth_moves || []).map((move) => (
+                    <div key={move} className="bg-[#141417] border border-[#27272A] rounded-2xl p-4">
+                      <p className="text-sm text-[#C7C7D1] leading-relaxed">{move}</p>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </>
+          ) : (
+            <div className="bg-[#0A0A0B] border border-[#27272A] rounded-2xl p-6 text-center">
+              <p className="text-sm text-[#8A8A93]">Audioraq could not generate a strategy for this show yet. Try refreshing once the show has a title, description, and at least one episode.</p>
+            </div>
+          )}
+        </section>
+
         <Dialog open={showAICreator} onOpenChange={setShowAICreator}>
           <DialogContent className="max-w-6xl bg-[#0A0A0B] border border-[#27272A] text-white p-0 overflow-hidden">
             <div className="max-h-[86vh] overflow-y-auto px-6 py-6 md:px-8">
@@ -470,6 +668,7 @@ export default function PodcasterDashboard() {
                 onSelectShow={setSelectedShowId}
                 activeShow={activeShow}
                 onApplyDraft={handleApplyAIDraft}
+                seedBrief={aiSeedBrief}
               />
             </div>
           </DialogContent>

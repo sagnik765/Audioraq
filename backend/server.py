@@ -4155,6 +4155,315 @@ def build_recommendation_reason(episode, user_interests, viewed_keywords, method
     return "Trending on Audioraq right now" if method == "popular" else "Picked for your home feed"
 
 
+def clip_text(value: Any, limit: int = 220) -> str:
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    if len(text) <= limit:
+        return text
+    trimmed = text[: max(0, limit - 1)].rsplit(" ", 1)[0].strip()
+    return f"{trimmed or text[:limit].strip()}…"
+
+
+def first_meaningful_sentence(value: Any, limit: int = 220) -> str:
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    if not text:
+        return ""
+    for sentence in re.split(r"(?<=[.!?])\s+", text):
+        cleaned = sentence.strip()
+        if cleaned:
+            return clip_text(cleaned, limit=limit)
+    return clip_text(text, limit=limit)
+
+
+def infer_episode_difficulty(episode: Dict[str, Any], show: Optional[Dict[str, Any]] = None) -> str:
+    combined = " ".join(
+        [
+            str(episode.get("title") or ""),
+            str(episode.get("description") or ""),
+            str((show or {}).get("description") or ""),
+            " ".join(episode.get("keywords") or []),
+        ]
+    ).lower()
+    category = normalize_topic_name(episode.get("category") or (show or {}).get("category"))
+    if any(term in combined for term in ["beginner", "intro", "basics", "plain english", "explained simply", "starter"]):
+        return "Beginner-friendly"
+    if any(term in combined for term in ["deep dive", "advanced", "regulatory", "litigation", "macro", "technical breakdown", "astrophysics"]):
+        return "Deep dive"
+    if category in {"law", "finance", "emerging markets", "astrophysics", "current affairs"}:
+        return "Intermediate"
+    return "Easy to follow"
+
+
+def infer_episode_tone(episode: Dict[str, Any], show: Optional[Dict[str, Any]] = None) -> str:
+    combined = " ".join(
+        [
+            str(episode.get("title") or ""),
+            str(episode.get("description") or ""),
+            str((show or {}).get("description") or ""),
+        ]
+    ).lower()
+    category = normalize_topic_name(episode.get("category") or (show or {}).get("category"))
+    if any(term in combined for term in ["story", "storytelling", "behind the scenes", "journey"]):
+        return "Story-led"
+    if category in {"mental health", "physical health"}:
+        return "Calm and supportive"
+    if category in {"law", "finance", "business", "current affairs", "science", "astrophysics"}:
+        return "Clear and analytical"
+    if category in {"entertainment", "music", "comedy", "sports"}:
+        return "Lively and conversational"
+    return "Warm and informative"
+
+
+def infer_listen_mode(episode: Dict[str, Any], show: Optional[Dict[str, Any]] = None) -> str:
+    category = normalize_topic_name(episode.get("category") or (show or {}).get("category"))
+    title = str(episode.get("title") or "").lower()
+    description = str(episode.get("description") or "").lower()
+    if episode.get("progress_percent") and not episode.get("is_completed"):
+        return "Easy to resume in short bursts"
+    if category == "current affairs":
+        return "Good for a fast catch-up"
+    if any(term in f"{title} {description}" for term in ["story", "narrative", "interview"]):
+        return "Best when you can listen straight through"
+    if category in {"mental health", "physical health"}:
+        return "Works well as a calm, focused listen"
+    return "Good for a focused listen"
+
+
+def build_episode_assistant_prompts(episode: Dict[str, Any]) -> List[str]:
+    title = clip_text(episode.get("title") or "this episode", limit=60)
+    category = normalize_topic_name(episode.get("category") or "").title() or "this topic"
+    return [
+        "What will I get out of this episode?",
+        "Who is this best for?",
+        f"What should I listen for in {title}?",
+        f"What is the main idea behind this {category} episode?",
+    ]
+
+
+def build_listener_brief_fallback(episode: Dict[str, Any], show: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    category = normalize_topic_name(episode.get("category") or (show or {}).get("category")) or DEFAULT_SHOW_CATEGORY
+    description_sentence = (
+        first_meaningful_sentence(episode.get("description"))
+        or first_meaningful_sentence((show or {}).get("description"))
+        or f"A focused {category} episode from Audioraq."
+    )
+    recommendation_reason = first_meaningful_sentence(episode.get("recommendation_reason"), limit=120)
+    keywords = normalize_string_list(episode.get("keywords"), limit=4)
+    keyword_phrase = ", ".join(keywords[:2]) if keywords else category
+    why_now = description_sentence
+    if recommendation_reason:
+        why_now = clip_text(f"{recommendation_reason}. {description_sentence}", limit=220)
+    best_for = f"Listeners who want a clearer take on {keyword_phrase} without digging through a full catalog first."
+    takeaway = clip_text(
+        first_meaningful_sentence(episode.get("description"), limit=200)
+        or f"You should leave with a stronger handle on {keyword_phrase}.",
+        limit=200,
+    )
+    suggested_next = (
+        f"Open {show.get('title')} for more episodes in this lane."
+        if show and show.get("episode_count", 0) > 1
+        else f"Queue another {category} episode if you want to keep the thread going."
+    )
+    return {
+        "why_now": why_now,
+        "best_for": clip_text(best_for, limit=180),
+        "takeaway": takeaway,
+        "difficulty": infer_episode_difficulty(episode, show),
+        "tone": infer_episode_tone(episode, show),
+        "listen_mode": infer_listen_mode(episode, show),
+        "suggested_next": clip_text(suggested_next, limit=180),
+        "grounding": "metadata",
+        "generated_at": now_iso(),
+        "provider": AI_TEXT_PROVIDER_DETERMINISTIC,
+    }
+
+
+def normalize_listener_brief(raw: Any, fallback: Dict[str, Any]) -> Dict[str, Any]:
+    raw = raw if isinstance(raw, dict) else {}
+    brief = {
+        "why_now": clip_text(raw.get("why_now") or fallback.get("why_now"), limit=220),
+        "best_for": clip_text(raw.get("best_for") or fallback.get("best_for"), limit=180),
+        "takeaway": clip_text(raw.get("takeaway") or fallback.get("takeaway"), limit=200),
+        "difficulty": clip_text(raw.get("difficulty") or fallback.get("difficulty"), limit=40),
+        "tone": clip_text(raw.get("tone") or fallback.get("tone"), limit=50),
+        "listen_mode": clip_text(raw.get("listen_mode") or fallback.get("listen_mode"), limit=60),
+        "suggested_next": clip_text(raw.get("suggested_next") or fallback.get("suggested_next"), limit=180),
+        "grounding": clip_text(raw.get("grounding") or fallback.get("grounding") or "metadata", limit=80),
+        "generated_at": raw.get("generated_at") or fallback.get("generated_at") or now_iso(),
+        "provider": raw.get("provider") or fallback.get("provider") or AI_TEXT_PROVIDER_DETERMINISTIC,
+    }
+    return brief
+
+
+def listener_brief_needs_refresh(cached: Any, episode: Dict[str, Any]) -> bool:
+    if not isinstance(cached, dict):
+        return True
+    required_fields = ["why_now", "best_for", "takeaway", "difficulty", "tone", "listen_mode", "suggested_next"]
+    if any(not str(cached.get(field) or "").strip() for field in required_fields):
+        return True
+    brief_time = parse_iso_datetime(cached.get("generated_at"))
+    episode_time = parse_iso_datetime(episode.get("updated_at") or episode.get("created_at"))
+    if brief_time is None:
+        return True
+    if episode_time is not None and episode_time > brief_time:
+        return True
+    return False
+
+
+def extract_episode_grounding_excerpt(episode: Dict[str, Any], show: Optional[Dict[str, Any]] = None, limit: int = 1600) -> str:
+    chunks = [
+        str(episode.get("description") or "").strip(),
+        str(episode.get("ai_audio_script") or "").strip(),
+        str((episode.get("moderation") or {}).get("media_transcript_excerpt") or "").strip(),
+        str((show or {}).get("description") or "").strip(),
+    ]
+    combined = "\n\n".join(chunk for chunk in chunks if chunk)
+    return clip_text(combined, limit=limit)
+
+
+async def ensure_listener_brief_cache(episode: Dict[str, Any], show: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    fallback = build_listener_brief_fallback(episode, show)
+    cached = clean_doc(episode.get("listener_brief_cache")) if isinstance(episode.get("listener_brief_cache"), dict) else None
+    if cached and not listener_brief_needs_refresh(cached, episode):
+        return normalize_listener_brief(cached, fallback)
+
+    context = {
+        "episode_title": episode.get("title", ""),
+        "episode_description": episode.get("description", ""),
+        "show_title": (show or {}).get("title", episode.get("show_title", "")),
+        "show_description": (show or {}).get("description", ""),
+        "category": episode.get("category", ""),
+        "keywords": normalize_string_list(episode.get("keywords"), limit=8),
+        "recommendation_reason": episode.get("recommendation_reason", ""),
+        "grounding_excerpt": extract_episode_grounding_excerpt(episode, show, limit=1200),
+    }
+    prompt = f"""Build a concise AI listener brief for this podcast episode.
+
+Context: {json.dumps(context, ensure_ascii=False)}
+
+Return JSON with exactly these keys:
+- why_now
+- best_for
+- takeaway
+- difficulty
+- tone
+- listen_mode
+- suggested_next
+- grounding
+
+Rules:
+- Stay grounded in the supplied context only.
+- Keep each field concise and practical.
+- Make the brief useful before playback, not marketing fluff.
+"""
+    result = await run_ai_json_chat(
+        "listener_brief",
+        "You create concise, trustworthy listener briefs for podcast episodes. Return only JSON and never invent details not present in the supplied context.",
+        prompt,
+        expected_type=dict,
+    )
+    brief = normalize_listener_brief(result.get("raw"), fallback)
+    brief["provider"] = result.get("provider") or brief.get("provider") or AI_TEXT_PROVIDER_DETERMINISTIC
+    if context["grounding_excerpt"]:
+        brief["grounding"] = "metadata plus episode excerpt"
+    await db.podcasts.update_one(
+        {"id": episode["id"]},
+        {"$set": {"listener_brief_cache": brief, "listener_brief_generated_at": brief["generated_at"]}},
+    )
+    return brief
+
+
+def build_episode_assistant_fallback(
+    question: str,
+    episode: Dict[str, Any],
+    show: Optional[Dict[str, Any]],
+    listener_brief: Dict[str, Any],
+) -> Dict[str, Any]:
+    question_lower = question.lower()
+    if "who" in question_lower and "for" in question_lower:
+        answer = listener_brief.get("best_for")
+    elif any(term in question_lower for term in ["takeaway", "learn", "get out of", "main idea", "main takeaway"]):
+        answer = listener_brief.get("takeaway")
+    elif "why" in question_lower and "listen" in question_lower:
+        answer = listener_brief.get("why_now")
+    elif any(term in question_lower for term in ["tone", "vibe", "feel"]):
+        answer = f"Expect a {listener_brief.get('tone', 'clear')} episode. {listener_brief.get('listen_mode', '')}".strip()
+    elif any(term in question_lower for term in ["safe", "harmful", "age", "mature"]):
+        audience_rating = normalize_content_rating(episode.get("audience_rating"))
+        moderation_status = episode.get("moderation_status") or "clear"
+        if audience_rating == MATURE_RATING:
+            answer = "This episode is marked 18+ on Audioraq."
+        else:
+            answer = f"This episode is currently marked for all ages, with moderation status set to {moderation_status}."
+    else:
+        answer = (
+            first_meaningful_sentence(episode.get("description"), limit=260)
+            or first_meaningful_sentence((show or {}).get("description"), limit=260)
+            or listener_brief.get("takeaway")
+        )
+    return {
+        "answer": clip_text(answer, limit=320),
+        "confidence": "medium",
+        "grounding": "metadata and available episode excerpt",
+        "follow_up_questions": build_episode_assistant_prompts(episode)[:3],
+        "provider": AI_TEXT_PROVIDER_DETERMINISTIC,
+    }
+
+
+def normalize_episode_assistant_reply(raw: Any, fallback: Dict[str, Any], episode: Dict[str, Any]) -> Dict[str, Any]:
+    raw = raw if isinstance(raw, dict) else {}
+    follow_ups = raw.get("follow_up_questions")
+    if not isinstance(follow_ups, list):
+        follow_ups = fallback.get("follow_up_questions") or build_episode_assistant_prompts(episode)[:3]
+    normalized = {
+        "answer": clip_text(raw.get("answer") or fallback.get("answer"), limit=360),
+        "confidence": clip_text(raw.get("confidence") or fallback.get("confidence") or "medium", limit=24).lower(),
+        "grounding": clip_text(raw.get("grounding") or fallback.get("grounding") or "metadata", limit=90),
+        "follow_up_questions": normalize_string_list(follow_ups, limit=4) or build_episode_assistant_prompts(episode)[:3],
+        "provider": raw.get("provider") or fallback.get("provider") or AI_TEXT_PROVIDER_DETERMINISTIC,
+    }
+    return normalized
+
+
+async def answer_episode_question(question: str, episode: Dict[str, Any], show: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    listener_brief = await ensure_listener_brief_cache(episode, show)
+    fallback = build_episode_assistant_fallback(question, episode, show, listener_brief)
+    context = {
+        "episode_title": episode.get("title", ""),
+        "episode_description": episode.get("description", ""),
+        "show_title": (show or {}).get("title", episode.get("show_title", "")),
+        "show_description": (show or {}).get("description", ""),
+        "category": episode.get("category", ""),
+        "keywords": normalize_string_list(episode.get("keywords"), limit=8),
+        "listener_brief": listener_brief,
+        "quality_summary": (episode.get("quality_agent") or {}).get("summary", ""),
+        "moderation_summary": (episode.get("moderation") or {}).get("summary", ""),
+        "grounding_excerpt": extract_episode_grounding_excerpt(episode, show, limit=1800),
+        "question": question,
+    }
+    prompt = f"""Answer a listener question about a podcast episode using only the supplied episode context.
+
+Context: {json.dumps(context, ensure_ascii=False)}
+
+Return JSON with exactly these keys:
+- answer
+- confidence
+- grounding
+- follow_up_questions
+
+Rules:
+- If the context is thin, say that plainly instead of guessing.
+- Keep the answer concise, useful, and listener-facing.
+- follow_up_questions should be 2 to 4 short, natural follow-ups.
+"""
+    result = await run_ai_json_chat(
+        "episode_listener_assistant",
+        "You are a grounded podcast listening assistant. Answer only from the supplied episode metadata and excerpts. If information is missing, say so clearly. Return only JSON.",
+        prompt,
+        expected_type=dict,
+    )
+    return normalize_episode_assistant_reply(result.get("raw"), fallback, episode)
+
+
 def normalize_topic_name(value: Optional[str]) -> str:
     return re.sub(r"\s+", " ", str(value or "").strip().lower())
 
@@ -4656,6 +4965,8 @@ async def enrich_episodes(episodes: List[Dict], current_user=None):
         if cleaned["progress_percent"] and not cleaned["is_completed"]:
             cleaned.setdefault("recommendation_reason", f"Resume at {int(cleaned['progress_percent'])}%")
         cleaned["quality_signals"] = build_episode_quality_signals(cleaned, show)
+        cleaned["listener_brief"] = normalize_listener_brief(cleaned.get("listener_brief_cache"), build_listener_brief_fallback(cleaned, show))
+        cleaned["assistant_prompts"] = build_episode_assistant_prompts(cleaned)
         enriched.append(cleaned)
     return enriched
 
@@ -4916,6 +5227,313 @@ async def fetch_creator_analytics(user, show_id: Optional[str] = None):
     }
 
 
+SHOW_STRATEGY_PLAYBOOK = {
+    "finance": [
+        {"title": "The framework behind smarter money decisions", "angle": "Turn one fuzzy finance habit into a repeatable decision framework.", "format": "solo", "optimize_for": "clarity"},
+        {"title": "What people miss about market headlines", "angle": "Decode a noisy finance headline into signal, risk, and real-world implications.", "format": "narrative", "optimize_for": "retention"},
+        {"title": "A founder's guide to financial tradeoffs", "angle": "Translate finance concepts into operator decisions listeners can actually use.", "format": "interview", "optimize_for": "clarity"},
+    ],
+    "law": [
+        {"title": "The law behind the headline", "angle": "Break one legal issue into stakes, precedents, and what non-lawyers should understand.", "format": "solo", "optimize_for": "clarity"},
+        {"title": "Where legal risk quietly shows up", "angle": "Explain hidden legal risk in business or everyday decisions without jargon overload.", "format": "narrative", "optimize_for": "retention"},
+        {"title": "Ask a lawyer, but make it usable", "angle": "Use question-and-answer structure so the episode feels practical, not academic.", "format": "interview", "optimize_for": "clarity"},
+    ],
+    "environment": [
+        {"title": "The climate story behind the data", "angle": "Make one environmental topic feel concrete, local, and actionable.", "format": "narrative", "optimize_for": "retention"},
+        {"title": "Where sustainability gets misunderstood", "angle": "Challenge a shallow narrative with a more nuanced, useful explanation.", "format": "solo", "optimize_for": "clarity"},
+        {"title": "What changes if this trend keeps growing", "angle": "Project a current environmental trend forward and explore realistic outcomes.", "format": "interview", "optimize_for": "retention"},
+    ],
+    "emerging markets": [
+        {"title": "The opportunity beneath the noise", "angle": "Translate broad emerging-market narratives into specific listener insight.", "format": "solo", "optimize_for": "clarity"},
+        {"title": "What the next growth map could look like", "angle": "Use one country, sector, or policy shift to anchor a bigger trend story.", "format": "narrative", "optimize_for": "retention"},
+        {"title": "How operators read emerging-market signals", "angle": "Frame the episode around practical decision-making instead of abstract geopolitics.", "format": "interview", "optimize_for": "clarity"},
+    ],
+    "upcoming technologies": [
+        {"title": "The real use case behind the hype", "angle": "Separate what is shipping now from what is still speculative.", "format": "solo", "optimize_for": "clarity"},
+        {"title": "What this new tech changes downstream", "angle": "Trace one technology into jobs, products, or behavior shifts listeners can picture.", "format": "narrative", "optimize_for": "retention"},
+        {"title": "The next adoption wave explained", "angle": "Give listeners a credible way to track whether a technology is actually maturing.", "format": "interview", "optimize_for": "clarity"},
+    ],
+    "current affairs": [
+        {"title": "The fast brief behind the story", "angle": "Turn a current event into a calm, structured update with stakes and context.", "format": "solo", "optimize_for": "clarity"},
+        {"title": "What everyone is arguing about, actually explained", "angle": "Map the competing viewpoints so listeners can follow the issue without doomscrolling.", "format": "narrative", "optimize_for": "retention"},
+        {"title": "The second-order effects worth watching", "angle": "Go beyond the headline into what might happen next.", "format": "interview", "optimize_for": "retention"},
+    ],
+    "astrophysics": [
+        {"title": "The big idea behind the observation", "angle": "Make one astrophysics concept feel legible and emotionally exciting.", "format": "solo", "optimize_for": "clarity"},
+        {"title": "What this discovery changes in our picture of the universe", "angle": "Frame the science around worldview, not only raw facts.", "format": "narrative", "optimize_for": "retention"},
+        {"title": "The question scientists still cannot answer", "angle": "Build tension around uncertainty while staying intellectually honest.", "format": "interview", "optimize_for": "retention"},
+    ],
+    "physical health": [
+        {"title": "The small habit with outsized payoff", "angle": "Turn a health topic into a specific, humane weekly practice listeners can try.", "format": "solo", "optimize_for": "clarity"},
+        {"title": "The health advice people hear but rarely understand", "angle": "Slow down and explain a familiar recommendation with more nuance.", "format": "narrative", "optimize_for": "retention"},
+        {"title": "What actually works in the real world", "angle": "Keep the episode grounded in consistency and behavior change, not hype.", "format": "interview", "optimize_for": "clarity"},
+    ],
+    "mental health": [
+        {"title": "The feeling behind the habit", "angle": "Explore one emotional or mental pattern with warmth and practical usefulness.", "format": "solo", "optimize_for": "retention"},
+        {"title": "What helps when advice feels too generic", "angle": "Translate vague wellness language into specific, safer next steps.", "format": "narrative", "optimize_for": "clarity"},
+        {"title": "How to talk about this without making it heavier", "angle": "Use conversation design that feels emotionally safe and non-performative.", "format": "interview", "optimize_for": "retention"},
+    ],
+    "technology": [
+        {"title": "The product shift hiding in plain sight", "angle": "Make one product or platform shift feel meaningful and concrete.", "format": "solo", "optimize_for": "clarity"},
+        {"title": "Why this technology is starting to matter now", "angle": "Tie the episode to timing, adoption, and user behavior instead of abstract trend language.", "format": "narrative", "optimize_for": "retention"},
+        {"title": "What builders should pay attention to next", "angle": "Aim the episode at operators who want signal more than hype.", "format": "interview", "optimize_for": "clarity"},
+    ],
+    "business": [
+        {"title": "The operating principle that changes execution", "angle": "Take one business principle and show how it changes real decisions.", "format": "solo", "optimize_for": "clarity"},
+        {"title": "What strong operators notice early", "angle": "Use concrete examples to make business intuition teachable.", "format": "narrative", "optimize_for": "retention"},
+        {"title": "The tradeoff behind the growth story", "angle": "Make the episode feel like a producer-led breakdown, not a generic business monologue.", "format": "interview", "optimize_for": "retention"},
+    ],
+}
+
+
+def build_show_strategy_seed(
+    show: Dict[str, Any],
+    title: str,
+    angle: str,
+    why_now: str,
+    format_name: str,
+    desired_outcome: str,
+    optimize_for: str,
+) -> Dict[str, Any]:
+    category = normalize_topic_name(show.get("category")) or DEFAULT_SHOW_CATEGORY
+    tone = "storytelling" if format_name == "narrative" else "professional"
+    return {
+        "identity": {
+            "podcastName": show.get("title", ""),
+            "niche": category,
+            "targetAudience": f"listeners who care about {category} and want sharper signal fast",
+        },
+        "episodeIntent": {
+            "episodeGoal": "interview" if format_name == "interview" else "educate",
+            "desiredOutcome": desired_outcome,
+        },
+        "contentInput": {
+            "topic": title,
+            "keyPoints": normalize_string_list([angle, why_now, desired_outcome], limit=5),
+            "references": [],
+        },
+        "toneStyle": {
+            "tone": tone,
+            "format": format_name if format_name in {"solo", "interview", "narrative"} else "solo",
+            "lengthPreference": "medium",
+        },
+        "growthOptimization": {
+            "optimizeFor": optimize_for if optimize_for in {"retention", "virality", "clarity"} else "clarity",
+            "includeHook": True,
+            "knownIssues": "Avoid generic filler. Keep the structure specific and podcast-first.",
+        },
+    }
+
+
+def build_show_strategy_snapshot(show: Dict[str, Any], analytics: Dict[str, Any], recent_episodes: List[Dict[str, Any]]) -> Dict[str, Any]:
+    return {
+        "show_updated_at": show.get("updated_at") or show.get("created_at") or "",
+        "episode_count": int((analytics.get("overview") or {}).get("episode_count", 0) or 0),
+        "listener_interests": [item.get("interest") for item in (analytics.get("listener_interests") or [])[:4]],
+        "recent_titles": [episode.get("title", "") for episode in recent_episodes[:4]],
+    }
+
+
+def show_strategy_needs_refresh(cached: Any, snapshot: Dict[str, Any]) -> bool:
+    if not isinstance(cached, dict):
+        return True
+    required = ["positioning", "audience_promise", "what_is_working", "underused_angles", "next_episode_ideas", "growth_moves"]
+    if any(field not in cached or cached.get(field) in [None, "", []] for field in required):
+        return True
+    cached_snapshot = cached.get("snapshot") or {}
+    return cached_snapshot != snapshot
+
+
+def build_show_strategy_fallback(show: Dict[str, Any], analytics: Dict[str, Any], recent_episodes: List[Dict[str, Any]]) -> Dict[str, Any]:
+    category = normalize_topic_name(show.get("category")) or DEFAULT_SHOW_CATEGORY
+    playbook = SHOW_STRATEGY_PLAYBOOK.get(category, SHOW_STRATEGY_PLAYBOOK.get("technology", []))
+    recent_titles = [episode.get("title", "") for episode in recent_episodes if episode.get("title")]
+    listener_interests = [item.get("interest") for item in (analytics.get("listener_interests") or []) if item.get("interest")]
+    overview = analytics.get("overview") or {}
+    show_title = show.get("title", "This show")
+    episode_count = int(overview.get("episode_count", 0) or 0)
+    avg_completion = float(overview.get("avg_completion_rate", 0) or 0)
+    total_plays = int(overview.get("total_plays", 0) or 0)
+    total_saves = int(overview.get("saved_count", 0) or 0)
+
+    what_is_working = []
+    if episode_count:
+        what_is_working.append(f"{show_title} already has {episode_count} published episode{'s' if episode_count != 1 else ''}, so listeners can see a real catalog instead of a one-off upload.")
+    if recent_titles:
+        what_is_working.append(f"Recent publishing momentum exists around {', '.join(recent_titles[:2])}.")
+    if avg_completion >= 45:
+        what_is_working.append(f"Average completion is {round(avg_completion, 1)}%, which suggests listeners are staying with the material once they start.")
+    elif episode_count:
+        what_is_working.append("The show has a foundation, but sharper hooks and clearer episode promises should improve completion.")
+    if total_saves > 0 or total_plays > 0:
+        what_is_working.append(f"The catalog has already generated {total_plays} plays and {total_saves} saves, which is enough signal to iterate intentionally.")
+    if listener_interests:
+        what_is_working.append(f"Current listeners cluster around {', '.join(listener_interests[:2])}, which gives the show a clearer demand signal.")
+    if not what_is_working:
+        what_is_working.append("The strongest opportunity right now is defining a repeatable angle so the show feels more like a series than a pile of uploads.")
+
+    underused_angles = []
+    if category == "current affairs":
+        underused_angles.extend(["second-order effects instead of headline summary", "calmer explainers for listeners who want signal without outrage"])
+    elif category == "finance":
+        underused_angles.extend(["decision frameworks instead of only commentary", "finance explained through operator tradeoffs"])
+    elif category == "mental health":
+        underused_angles.extend(["emotionally safe practical routines", "language that feels human instead of therapeutic cliches"])
+    else:
+        underused_angles.extend(["stronger opinionated framing", "episode arcs that build from confusion to clarity"])
+    if listener_interests:
+        underused_angles.append(f"crossing {category} with listener demand around {listener_interests[0]}")
+
+    next_episode_ideas = []
+    for seed in playbook[:5]:
+        desired_outcome = f"Leave with a more usable view of {category} and one concrete angle worth following next."
+        idea = {
+            "title": seed["title"],
+            "angle": seed["angle"],
+            "why_now": f"It strengthens {show_title}'s position by making {category} feel immediately useful instead of abstract.",
+            "format": seed.get("format", "solo"),
+            "desired_outcome": desired_outcome,
+            "optimize_for": seed.get("optimize_for", "clarity"),
+        }
+        idea["ai_seed"] = build_show_strategy_seed(
+            show,
+            idea["title"],
+            idea["angle"],
+            idea["why_now"],
+            idea["format"],
+            idea["desired_outcome"],
+            idea["optimize_for"],
+        )
+        next_episode_ideas.append(idea)
+
+    title_starters = [idea["title"] for idea in next_episode_ideas[:4]]
+    growth_moves = [
+        "Keep each new episode promise specific enough that a listener can decide in five seconds whether it is for them.",
+        "Build follow-up episodes as a sequence, so each release pulls the listener deeper into the show rather than restarting from zero.",
+        "Use the AI Studio brief to lock audience, outcome, and format before generation so the podcast sounds intentional instead of generic.",
+    ]
+    snapshot = build_show_strategy_snapshot(show, analytics, recent_episodes)
+    return {
+        "positioning": f"{show_title} should feel like a trusted {category} show with a clear point of view, not just another upload surface.",
+        "audience_promise": f"Listeners should leave each episode with clearer signal on {category} and a stronger sense of what matters next.",
+        "what_is_working": what_is_working[:4],
+        "underused_angles": underused_angles[:4],
+        "next_episode_ideas": next_episode_ideas,
+        "title_starters": title_starters,
+        "growth_moves": growth_moves,
+        "snapshot": snapshot,
+        "generated_at": now_iso(),
+        "provider": AI_TEXT_PROVIDER_DETERMINISTIC,
+    }
+
+
+def normalize_show_strategy(raw: Any, fallback: Dict[str, Any], show: Dict[str, Any]) -> Dict[str, Any]:
+    raw = raw if isinstance(raw, dict) else {}
+    normalized = {
+        "positioning": clip_text(raw.get("positioning") or fallback.get("positioning"), limit=220),
+        "audience_promise": clip_text(raw.get("audience_promise") or fallback.get("audience_promise"), limit=220),
+        "what_is_working": normalize_string_list(raw.get("what_is_working"), limit=4) or fallback.get("what_is_working", []),
+        "underused_angles": normalize_string_list(raw.get("underused_angles"), limit=4) or fallback.get("underused_angles", []),
+        "title_starters": normalize_string_list(raw.get("title_starters"), limit=5) or fallback.get("title_starters", []),
+        "growth_moves": normalize_string_list(raw.get("growth_moves"), limit=4) or fallback.get("growth_moves", []),
+        "snapshot": raw.get("snapshot") if isinstance(raw.get("snapshot"), dict) else fallback.get("snapshot", {}),
+        "generated_at": raw.get("generated_at") or fallback.get("generated_at") or now_iso(),
+        "provider": raw.get("provider") or fallback.get("provider") or AI_TEXT_PROVIDER_DETERMINISTIC,
+    }
+
+    raw_ideas = raw.get("next_episode_ideas")
+    ideas = []
+    if isinstance(raw_ideas, list):
+        for item in raw_ideas[:5]:
+            if not isinstance(item, dict):
+                continue
+            title = clip_text(item.get("title"), limit=120)
+            angle = clip_text(item.get("angle"), limit=180)
+            why_now = clip_text(item.get("why_now"), limit=180)
+            format_name = str(item.get("format") or "solo").strip().lower()
+            desired_outcome = clip_text(item.get("desired_outcome"), limit=180)
+            optimize_for = str(item.get("optimize_for") or "clarity").strip().lower()
+            if not title or not angle:
+                continue
+            idea = {
+                "title": title,
+                "angle": angle,
+                "why_now": why_now or fallback["next_episode_ideas"][0]["why_now"],
+                "format": format_name if format_name in {"solo", "interview", "narrative"} else "solo",
+                "desired_outcome": desired_outcome or fallback["next_episode_ideas"][0]["desired_outcome"],
+                "optimize_for": optimize_for if optimize_for in {"retention", "virality", "clarity"} else "clarity",
+            }
+            idea["ai_seed"] = build_show_strategy_seed(
+                show,
+                idea["title"],
+                idea["angle"],
+                idea["why_now"],
+                idea["format"],
+                idea["desired_outcome"],
+                idea["optimize_for"],
+            )
+            ideas.append(idea)
+    normalized["next_episode_ideas"] = ideas or fallback.get("next_episode_ideas", [])
+    return normalized
+
+
+async def ensure_show_ai_strategy(
+    show: Dict[str, Any],
+    analytics: Dict[str, Any],
+    recent_episodes: List[Dict[str, Any]],
+    refresh: bool = False,
+) -> Dict[str, Any]:
+    snapshot = build_show_strategy_snapshot(show, analytics, recent_episodes)
+    cached = clean_doc(show.get("ai_strategy")) if isinstance(show.get("ai_strategy"), dict) else None
+    if cached and not refresh and not show_strategy_needs_refresh(cached, snapshot):
+        return normalize_show_strategy(cached, build_show_strategy_fallback(show, analytics, recent_episodes), show)
+
+    fallback = build_show_strategy_fallback(show, analytics, recent_episodes)
+    context = {
+        "show_title": show.get("title", ""),
+        "show_description": show.get("description", ""),
+        "category": show.get("category", DEFAULT_SHOW_CATEGORY),
+        "recent_episode_titles": [episode.get("title", "") for episode in recent_episodes[:6]],
+        "analytics": {
+            "overview": analytics.get("overview", {}),
+            "listener_interests": analytics.get("listener_interests", []),
+            "top_episode_titles": [episode.get("title", "") for episode in (analytics.get("episodes") or [])[:5]],
+        },
+    }
+    prompt = f"""Create a concise AI strategy memo for a podcast creator.
+
+Context: {json.dumps(context, ensure_ascii=False)}
+
+Return JSON with exactly these keys:
+- positioning
+- audience_promise
+- what_is_working
+- underused_angles
+- next_episode_ideas
+- title_starters
+- growth_moves
+
+Rules:
+- Be concrete and podcast-specific, not generic startup advice.
+- next_episode_ideas should be an array of objects with title, angle, why_now, format, desired_outcome, optimize_for.
+- Keep the advice realistic for the existing show state.
+"""
+    result = await run_ai_json_chat(
+        "show_ai_strategy",
+        "You are a strong podcast strategist for creators. Give concrete, useful guidance that improves listener retention and show clarity. Return only JSON.",
+        prompt,
+        expected_type=dict,
+    )
+    strategy = normalize_show_strategy(result.get("raw"), fallback, show)
+    strategy["snapshot"] = snapshot
+    strategy["provider"] = result.get("provider") or strategy.get("provider") or AI_TEXT_PROVIDER_DETERMINISTIC
+    await db.shows.update_one(
+        {"id": show["id"]},
+        {"$set": {"ai_strategy": strategy, "ai_strategy_generated_at": strategy["generated_at"]}},
+    )
+    return strategy
+
+
 class RegisterRequest(BaseModel):
     email: str
     password: str
@@ -4959,6 +5577,10 @@ class UpdatePlaybackProgressRequest(BaseModel):
 
 class UpdatePodcastRatingRequest(BaseModel):
     rating: int
+
+
+class EpisodeAssistantRequest(BaseModel):
+    question: str
 
 
 class RssImportRequest(BaseModel):
@@ -6340,6 +6962,26 @@ async def get_show(show_id: str, request: Request):
     return enriched[0]
 
 
+@api_router.get("/shows/{show_id}/ai-strategy")
+async def get_show_ai_strategy(show_id: str, request: Request, refresh: bool = False):
+    user = await get_current_user(request)
+    if user["role"] not in {"podcaster", "admin"}:
+        raise HTTPException(status_code=403, detail="Only creators can view show strategy")
+
+    show_query = {"id": show_id, "is_deleted": False}
+    if user["role"] != "admin":
+        show_query["podcaster_id"] = user["_id"]
+    show = await db.shows.find_one(show_query)
+    if not show:
+        raise HTTPException(status_code=404, detail="Show not found")
+
+    analytics_user = {"_id": show["podcaster_id"]}
+    analytics = await fetch_creator_analytics(analytics_user, show_id=show_id)
+    recent_episodes = await db.podcasts.find({"show_id": show_id, "is_deleted": False}).sort("created_at", -1).limit(12).to_list(12)
+    strategy = await ensure_show_ai_strategy(show, analytics, recent_episodes, refresh=refresh)
+    return strategy
+
+
 @api_router.post("/shows/{show_id}/follow")
 async def follow_show(show_id: str, request: Request):
     user = await get_current_user(request)
@@ -6959,8 +7601,34 @@ async def get_podcast(podcast_id: str, request: Request):
         raise HTTPException(status_code=404, detail="Episode not found")
     if not can_access_episode(current_user, podcast):
         raise HTTPException(status_code=403, detail="This episode is restricted for your account")
+    show = None
+    if podcast.get("show_id"):
+        show = await db.shows.find_one({"id": podcast["show_id"], "is_deleted": False})
+    if listener_brief_needs_refresh(podcast.get("listener_brief_cache"), podcast):
+        podcast["listener_brief_cache"] = await ensure_listener_brief_cache(podcast, show)
     enriched = await enrich_episodes([podcast], current_user=current_user)
     return enriched[0]
+
+
+@api_router.post("/podcasts/{podcast_id}/assistant")
+async def ask_episode_assistant(podcast_id: str, req: EpisodeAssistantRequest, request: Request):
+    current_user = await try_get_current_user(request)
+    question = str(req.question or "").strip()
+    if not question:
+        raise HTTPException(status_code=400, detail="Ask a question first")
+
+    podcast = await db.podcasts.find_one({"id": podcast_id, "is_deleted": False})
+    if not podcast:
+        raise HTTPException(status_code=404, detail="Episode not found")
+    if not can_access_episode(current_user, podcast):
+        raise HTTPException(status_code=403, detail="This episode is restricted for your account")
+
+    show = None
+    if podcast.get("show_id"):
+        show = await db.shows.find_one({"id": podcast["show_id"], "is_deleted": False})
+    answer = await answer_episode_question(question, podcast, show)
+    answer["question"] = question
+    return answer
 
 
 @api_router.post("/podcasts/{podcast_id}/save")
