@@ -15,6 +15,7 @@ export default function PodcastCard({ podcast, onHide, onSaveChange }) {
   const isPlayable = podcast.is_playable !== false;
   const showListenerActions = user?.role === 'user' && podcast.publication_status !== 'draft';
   const requiresSignup = !user && isPlayable;
+  const listenerBrief = podcast.listener_brief || podcast.listener_brief_teaser;
   const [isSaved, setIsSaved] = useState(Boolean(podcast.is_saved));
   const [isHidden, setIsHidden] = useState(Boolean(podcast.is_hidden));
 
@@ -180,13 +181,13 @@ export default function PodcastCard({ podcast, onHide, onSaveChange }) {
         {podcast.recommendation_reason && (
           <p className="text-xs text-[#F5A623] mb-2 line-clamp-2">{podcast.recommendation_reason}</p>
         )}
-        {podcast.listener_brief?.why_now && (
+        {listenerBrief?.why_now && (
           <div className="mb-2">
             <p className="text-[10px] uppercase tracking-[0.18em] text-[#8A8A93] mb-1">
               {user ? 'AI brief' : 'Member AI brief'}
             </p>
             <p className="text-xs text-[#C7C7D1] line-clamp-2 leading-relaxed">
-              {user ? podcast.listener_brief.why_now : 'Sign up to see why this episode fits your interests before you press play.'}
+              {user ? listenerBrief.why_now : listenerBrief.unlock_message || 'Sign up to see why this episode fits your interests before you press play.'}
             </p>
           </div>
         )}

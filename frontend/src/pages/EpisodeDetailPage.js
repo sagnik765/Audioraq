@@ -104,6 +104,7 @@ export default function EpisodeDetailPage() {
   const canEngage = user?.role === 'user' && episode.publication_status !== 'draft';
   const canPlayEpisode = episode.is_playable !== false;
   const canUseListenerAI = Boolean(user);
+  const listenerBrief = episode.listener_brief || episode.listener_brief_teaser;
 
   const requireSignup = (message = 'Create a free account to unlock this listening feature.') => {
     toast.message(message);
@@ -338,10 +339,13 @@ export default function EpisodeDetailPage() {
               </div>
             )}
 
-            {episode.listener_brief && !canUseListenerAI && (
+            {listenerBrief && !canUseListenerAI && (
               <div className="bg-[#0A0A0B] border border-[#27272A] rounded-2xl px-4 py-4 mb-6">
                 <p className="text-xs uppercase tracking-[0.2em] font-semibold text-[#F5A623] mb-2">Member AI Listener Brief</p>
-                <p className="text-sm text-white mb-3">Create an account to see the full AI brief, difficulty level, best-fit listener profile, and takeaway before you invest your time.</p>
+                {listenerBrief.why_now && (
+                  <p className="text-sm text-[#D8D8DE] mb-2">{listenerBrief.why_now}</p>
+                )}
+                <p className="text-sm text-white mb-3">{listenerBrief.unlock_message || 'Create an account to see the full AI brief, difficulty level, best-fit listener profile, and takeaway before you invest your time.'}</p>
                 <button
                   type="button"
                   onClick={() => navigate('/register')}

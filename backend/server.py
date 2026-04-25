@@ -5966,6 +5966,18 @@ async def enrich_episodes(episodes: List[Dict], current_user=None):
         cleaned["quality_signals"] = build_episode_quality_signals(cleaned, show)
         cleaned["listener_brief"] = normalize_listener_brief(cleaned.get("listener_brief_cache"), build_listener_brief_fallback(cleaned, show))
         cleaned["assistant_prompts"] = build_episode_assistant_prompts(cleaned)
+        if current_user is None:
+            cleaned["listener_brief_teaser"] = {
+                "why_now": cleaned["listener_brief"].get("why_now", ""),
+                "unlock_message": "Sign up to see the full AI listener brief, ask this episode questions, and build a personal queue.",
+            }
+            cleaned["listener_brief"] = None
+            cleaned["assistant_prompts"] = []
+            cleaned["media_transcript_excerpt"] = ""
+            cleaned.pop("media_path", None)
+            cleaned.pop("external_media_url", None)
+            if isinstance(cleaned.get("moderation"), dict):
+                cleaned["moderation"].pop("media_transcript_excerpt", None)
         enriched.append(cleaned)
     return enriched
 
