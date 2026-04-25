@@ -14,6 +14,7 @@ export default function PodcastCard({ podcast, onHide, onSaveChange }) {
   const isActive = currentPodcast?.id === podcast.id;
   const isPlayable = podcast.is_playable !== false;
   const showListenerActions = user?.role === 'user' && podcast.publication_status !== 'draft';
+  const requiresSignup = !user && isPlayable;
   const [isSaved, setIsSaved] = useState(Boolean(podcast.is_saved));
   const [isHidden, setIsHidden] = useState(Boolean(podcast.is_hidden));
 
@@ -90,6 +91,11 @@ export default function PodcastCard({ podcast, onHide, onSaveChange }) {
 
   const handleQueue = (event, mode) => {
     event.stopPropagation();
+    if (!user) {
+      toast.message('Create an account to build a queue, resume episodes, and get a personal feed.');
+      navigate('/register');
+      return;
+    }
     if (mode === 'next') {
       playNext(podcast);
       toast.success('Added to play next');
@@ -126,6 +132,11 @@ export default function PodcastCard({ podcast, onHide, onSaveChange }) {
               type="button"
               onClick={(e) => {
                 e.stopPropagation();
+                if (!user) {
+                  toast.message('Create a free account to play full episodes and keep your listening history.');
+                  navigate('/register');
+                  return;
+                }
                 playPodcast(podcast, {
                   startTime: podcast.resume_position_seconds || podcast.progress_seconds || 0,
                 });
@@ -171,8 +182,12 @@ export default function PodcastCard({ podcast, onHide, onSaveChange }) {
         )}
         {podcast.listener_brief?.why_now && (
           <div className="mb-2">
-            <p className="text-[10px] uppercase tracking-[0.18em] text-[#8A8A93] mb-1">AI brief</p>
-            <p className="text-xs text-[#C7C7D1] line-clamp-2 leading-relaxed">{podcast.listener_brief.why_now}</p>
+            <p className="text-[10px] uppercase tracking-[0.18em] text-[#8A8A93] mb-1">
+              {user ? 'AI brief' : 'Member AI brief'}
+            </p>
+            <p className="text-xs text-[#C7C7D1] line-clamp-2 leading-relaxed">
+              {user ? podcast.listener_brief.why_now : 'Sign up to see why this episode fits your interests before you press play.'}
+            </p>
           </div>
         )}
         {podcast.description && (
@@ -222,6 +237,19 @@ export default function PodcastCard({ podcast, onHide, onSaveChange }) {
         </div>
         {isPlayable && (
           <div className="flex items-center gap-2 mt-4 flex-wrap">
+            {requiresSignup && (
+              <button
+                type="button"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  navigate('/register');
+                }}
+                className="rounded-full px-3 py-1.5 text-[11px] font-bold uppercase tracking-[0.16em] bg-[#F5A623] text-[#0A0A0B] hover:bg-[#F7B84B] transition-colors"
+                data-testid={`podcast-signup-${podcast.id}`}
+              >
+                Sign up to play
+              </button>
+            )}
             <button
               type="button"
               onClick={(event) => handleQueue(event, 'next')}

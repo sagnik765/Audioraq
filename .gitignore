@@ -23,6 +23,11 @@ qa/podcast-improvement-agent/
 qa/published-improved-podcasts/
 qa/avatar-video-agent/
 qa/audioraq-seed-catalog-agent/
+qa/audioraq-feedback-agent/
+qa/audioraq-gtm-agent/
+qa/audioraq-business-analyst-agent/
+qa/audioraq-standup-agent/
+qa/audioraq-marketing-agent/
 
 # Next.js
 /.next/

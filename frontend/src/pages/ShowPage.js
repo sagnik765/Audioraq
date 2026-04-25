@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Link, useParams } from 'react-router-dom';
+import { Link, useNavigate, useParams } from 'react-router-dom';
 import axios from 'axios';
 import { toast } from 'sonner';
 import { ArrowLeft, Broadcast, Play, UsersThree } from '@phosphor-icons/react';
@@ -13,6 +13,7 @@ import { followShow, unfollowShow, authRequest } from '../lib/library';
 export default function ShowPage() {
   const { showId } = useParams();
   const { user } = useAuth();
+  const navigate = useNavigate();
   const { currentPodcast, playCollection } = usePlayer();
   const [show, setShow] = useState(null);
   const [episodes, setEpisodes] = useState([]);
@@ -100,7 +101,12 @@ export default function ShowPage() {
   });
 
   const handleFollowToggle = async () => {
-    if (!user || isOwnShow) return;
+    if (!user) {
+      toast.message('Create an account to follow shows and build a personal listening home.');
+      navigate('/register');
+      return;
+    }
+    if (isOwnShow) return;
     const nextFollowing = !show.is_following;
     setShow((prev) => ({
       ...prev,
@@ -192,34 +198,48 @@ export default function ShowPage() {
             <div className="flex flex-wrap gap-3">
               {latestEpisode && (
                 <button
-                  onClick={() => playCollection(episodes, 0, {
-                    startTime: latestEpisode.resume_position_seconds || latestEpisode.progress_seconds || 0,
-                  })}
+                  onClick={() => {
+                    if (!user) {
+                      toast.message('Create a free account to play full episodes and keep your listening history.');
+                      navigate('/register');
+                      return;
+                    }
+                    playCollection(episodes, 0, {
+                      startTime: latestEpisode.resume_position_seconds || latestEpisode.progress_seconds || 0,
+                    });
+                  }}
                   className="bg-[#F5A623] hover:bg-[#F7B84B] text-[#0A0A0B] font-bold rounded-full px-6 py-3 inline-flex items-center gap-2 transition-colors"
                   data-testid="show-play-latest-btn"
                 >
                   <Play weight="fill" className="w-5 h-5" />
-                  Play Latest Episode
+                  {user ? 'Play Latest Episode' : 'Sign up to play'}
                 </button>
               )}
-              {user && (
-                <button
-                  onClick={handleFollowToggle}
-                  className={`font-bold rounded-full px-6 py-3 inline-flex items-center gap-2 transition-colors ${
-                    isOwnShow
-                      ? 'bg-[#0A0A0B] border border-[#27272A] text-[#8A8A93]'
-                      : show.is_following
-                        ? 'bg-[#0A0A0B] border border-[#F5A623]/50 text-white hover:border-[#F5A623]'
-                        : 'bg-[#0A0A0B] border border-[#27272A] text-white hover:border-[#F5A623]'
-                  }`}
-                  disabled={isOwnShow}
-                  data-testid="show-follow-toggle"
-                >
-                  <UsersThree className="w-5 h-5" />
-                  {isOwnShow ? 'You run this show' : show.is_following ? 'Following this show' : 'Follow show'}
-                </button>
-              )}
+              <button
+                onClick={handleFollowToggle}
+                className={`font-bold rounded-full px-6 py-3 inline-flex items-center gap-2 transition-colors ${
+                  isOwnShow
+                    ? 'bg-[#0A0A0B] border border-[#27272A] text-[#8A8A93]'
+                    : show.is_following
+                      ? 'bg-[#0A0A0B] border border-[#F5A623]/50 text-white hover:border-[#F5A623]'
+                      : 'bg-[#0A0A0B] border border-[#27272A] text-white hover:border-[#F5A623]'
+                }`}
+                disabled={isOwnShow}
+                data-testid="show-follow-toggle"
+              >
+                <UsersThree className="w-5 h-5" />
+                {isOwnShow ? 'You run this show' : show.is_following ? 'Following this show' : user ? 'Follow show' : 'Sign up to follow'}
+              </button>
             </div>
+
+            {!user && (
+              <div className="mt-6 rounded-2xl border border-[#27272A] bg-[#0A0A0B] px-4 py-4">
+                <p className="text-sm text-white mb-1">Members can follow this show, play full episodes, save listens, and get new releases in Home.</p>
+                <Link to="/register" className="text-sm text-[#F5A623] hover:text-[#F7B84B] transition-colors">
+                  Create your listener account
+                </Link>
+              </div>
+            )}
           </div>
         </section>
 

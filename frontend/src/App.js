@@ -4,6 +4,7 @@ import { AuthProvider, useAuth } from "./contexts/AuthContext";
 import { PlayerProvider } from "./contexts/PlayerContext";
 import { Toaster } from "./components/ui/sonner";
 import PlayerBar from "./components/PlayerBar";
+import FeedbackWidget from "./components/FeedbackWidget";
 import LandingPage from "./pages/LandingPage";
 import LoginPage from "./pages/LoginPage";
 import RegisterPage from "./pages/RegisterPage";
@@ -69,6 +70,7 @@ function AppRoutes() {
         <Route path="/episodes/:podcastId" element={<EpisodeDetailPage />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
+      <FeedbackWidget />
       <PlayerBar />
     </>
   );

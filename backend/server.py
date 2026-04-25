@@ -1880,6 +1880,92 @@ async def build_social_analytics(user: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+FEEDBACK_PROBLEM_PATTERNS = [
+    ("signup_conversion", ["signup", "sign up", "login", "account", "register", "onboarding"]),
+    ("creator_ai_studio", ["create with ai", "ai studio", "draft", "script", "voice", "tts", "agent 2", "quality"]),
+    ("podcast_discovery", ["browse", "recommend", "search", "filter", "discover", "category", "home feed"]),
+    ("playback_reliability", ["play", "audio", "video", "buffer", "loading", "stream", "queue", "resume"]),
+    ("creator_workflow", ["upload", "publish", "show", "season", "episode", "thumbnail", "rss"]),
+    ("trust_safety", ["safety", "harmful", "hateful", "fact", "moderation", "trust", "age"]),
+    ("pricing_value", ["price", "pricing", "pay", "subscription", "cost", "free", "plan"]),
+    ("investor_signal", ["investor", "traction", "launch", "product hunt", "growth", "users"]),
+]
+
+
+def normalize_feedback_rating(value: Optional[int]) -> Optional[int]:
+    if value in [None, ""]:
+        return None
+    try:
+        rating = int(value)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="Feedback rating must be a number")
+    if rating < 1 or rating > 5:
+        raise HTTPException(status_code=400, detail="Feedback rating must be between 1 and 5")
+    return rating
+
+
+def classify_feedback_text(message: str, desired_outcome: str = "", friction_area: str = "") -> Dict[str, Any]:
+    text = f"{message} {desired_outcome} {friction_area}".lower()
+    matched = []
+    for problem_key, patterns in FEEDBACK_PROBLEM_PATTERNS:
+        if any(pattern in text for pattern in patterns):
+            matched.append(problem_key)
+    if not matched:
+        matched.append("general_product_learning")
+
+    urgency = "medium"
+    if any(term in text for term in ["broken", "cannot", "can't", "not working", "does not work", "failed", "crash"]):
+        urgency = "high"
+    elif any(term in text for term in ["nice", "wish", "maybe", "could", "confusing"]):
+        urgency = "medium"
+    elif any(term in text for term in ["love", "great", "useful", "delight"]):
+        urgency = "low"
+
+    sentiment = "neutral"
+    if any(term in text for term in ["love", "great", "amazing", "useful", "delight", "excellent"]):
+        sentiment = "positive"
+    if any(term in text for term in ["bad", "confusing", "frustrating", "broken", "slow", "not working", "hate"]):
+        sentiment = "negative"
+
+    return {
+        "problem_areas": matched[:4],
+        "urgency": urgency,
+        "sentiment": sentiment,
+        "business_analyst_rlaif": {
+            "reward_signal": "prioritize" if urgency == "high" or sentiment == "negative" else "learn",
+            "reason": "High-friction feedback should feed product prioritization before launch." if urgency == "high" else "Use this as a product-learning signal for positioning and roadmap decisions.",
+        },
+    }
+
+
+def build_feedback_summary(feedback: Dict[str, Any]) -> Dict[str, Any]:
+    analysis = feedback.get("analysis") or {}
+    problem_areas = analysis.get("problem_areas") or []
+    first_problem = problem_areas[0] if problem_areas else "general_product_learning"
+    persona = feedback.get("persona") or "visitor"
+    return {
+        "id": feedback.get("id"),
+        "persona": persona,
+        "category": feedback.get("category", "other"),
+        "rating": feedback.get("rating"),
+        "problem_area": first_problem,
+        "urgency": analysis.get("urgency", "medium"),
+        "sentiment": analysis.get("sentiment", "neutral"),
+        "message": feedback.get("message", ""),
+        "desired_outcome": feedback.get("desired_outcome", ""),
+        "created_at": feedback.get("created_at"),
+        "contact_ok": bool(feedback.get("contact_ok")),
+        "email": feedback.get("email", ""),
+    }
+
+
+def sanitize_feedback_record(feedback: Dict[str, Any], include_email: bool = False) -> Dict[str, Any]:
+    cleaned = clean_doc(feedback) or {}
+    if not include_email:
+        cleaned.pop("email", None)
+    return cleaned
+
+
 def parse_rss_datetime(value: Optional[str]) -> Optional[str]:
     if not value:
         return None
@@ -5849,7 +5935,8 @@ async def enrich_episodes(episodes: List[Dict], current_user=None):
         cleaned["rating_average"] = round(float(engagement.get("rating_average", cleaned.get("rating_average", 0)) or 0), 1)
         cleaned["view_count"] = int(cleaned.get("play_count", 0) or 0)
         cleaned["is_age_restricted"] = cleaned["audience_rating"] == MATURE_RATING
-        cleaned["viewer_can_stream"] = can_access_episode(current_user, cleaned) and cleaned["is_playable"]
+        cleaned["requires_signup_for_playback"] = current_user is None and cleaned["is_playable"]
+        cleaned["viewer_can_stream"] = bool(current_user) and can_access_episode(current_user, cleaned) and cleaned["is_playable"]
         if show:
             cleaned["show"] = {
                 "id": show["id"],
@@ -6522,6 +6609,18 @@ class SocialPostCreateRequest(BaseModel):
     publish_now: bool = False
 
 
+class FeedbackSubmissionRequest(BaseModel):
+    persona: Optional[Literal["listener", "podcaster", "visitor", "investor", "other"]] = "visitor"
+    category: Optional[Literal["bug", "confusing", "missing_feature", "delight", "pricing", "launch", "other"]] = "other"
+    rating: Optional[int] = None
+    page_url: Optional[str] = ""
+    message: str
+    desired_outcome: Optional[str] = ""
+    friction_area: Optional[str] = ""
+    email: Optional[str] = ""
+    contact_ok: bool = False
+
+
 class RssImportRequest(BaseModel):
     feed_url: str
     show_id: Optional[str] = ""
@@ -6667,6 +6766,10 @@ async def startup():
     await db.social_posts.create_index("id", unique=True)
     await db.social_posts.create_index([("user_id", 1), ("status", 1), ("scheduled_at", 1)])
     await db.social_posts.create_index([("user_id", 1), ("provider", 1), ("created_at", -1)])
+    await db.feedback_submissions.create_index("id", unique=True)
+    await db.feedback_submissions.create_index([("created_at", -1)])
+    await db.feedback_submissions.create_index([("analysis.problem_areas", 1), ("analysis.urgency", 1)])
+    await db.feedback_submissions.create_index([("user_id", 1), ("created_at", -1)])
 
     admin_email = os.environ.get("ADMIN_EMAIL", "admin@audioraq.com")
     admin_password = os.environ.get("ADMIN_PASSWORD", "admin123")
@@ -7476,6 +7579,82 @@ async def get_social_post_card(post_id: str):
         raise HTTPException(status_code=404, detail="Social post not found")
     image_bytes = generate_social_card_image(post)
     return StreamingResponse(io.BytesIO(image_bytes), media_type="image/png")
+
+
+@api_router.post("/feedback")
+async def submit_feedback(req: FeedbackSubmissionRequest, request: Request):
+    current_user = await try_get_current_user(request)
+    message = str(req.message or "").strip()
+    if len(message) < 8:
+        raise HTTPException(status_code=400, detail="Tell us a little more so the feedback is useful")
+
+    rating = normalize_feedback_rating(req.rating)
+    email = (req.email or "").lower().strip()
+    if current_user and current_user.get("email"):
+        email = current_user["email"]
+    if req.contact_ok and not email:
+        raise HTTPException(status_code=400, detail="Add an email if you want us to follow up")
+
+    desired_outcome = str(req.desired_outcome or "").strip()
+    friction_area = str(req.friction_area or "").strip()
+    analysis = classify_feedback_text(message, desired_outcome=desired_outcome, friction_area=friction_area)
+    user_role = current_user.get("role") if current_user else "guest"
+    persona = req.persona or ("podcaster" if user_role == "podcaster" else "listener" if user_role == "user" else "visitor")
+
+    feedback_doc = {
+        "id": str(uuid.uuid4()),
+        "user_id": user_id_str(current_user) if current_user else "",
+        "user_role": user_role,
+        "user_name": current_user.get("name", "") if current_user else "",
+        "email": email,
+        "persona": persona,
+        "category": req.category or "other",
+        "rating": rating,
+        "page_url": str(req.page_url or "").strip()[:500],
+        "message": message[:4000],
+        "desired_outcome": desired_outcome[:1200],
+        "friction_area": friction_area[:240],
+        "contact_ok": bool(req.contact_ok),
+        "analysis": analysis,
+        "status": "new",
+        "source": "in_app_feedback_widget",
+        "created_at": now_iso(),
+        "updated_at": now_iso(),
+    }
+    await db.feedback_submissions.insert_one(feedback_doc)
+    return {
+        "message": "Feedback received",
+        "feedback": sanitize_feedback_record(feedback_doc),
+        "analysis": analysis,
+    }
+
+
+@api_router.get("/feedback/summary")
+async def get_feedback_summary(request: Request, limit: int = 80):
+    user = await get_current_user(request)
+    if user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Only founders can view feedback summaries")
+    records = await db.feedback_submissions.find({}).sort("created_at", -1).limit(max(1, min(limit, 250))).to_list(max(1, min(limit, 250)))
+    summaries = [build_feedback_summary(record) for record in records]
+    problem_counts: Dict[str, int] = {}
+    urgency_counts: Dict[str, int] = {}
+    sentiment_counts: Dict[str, int] = {}
+    for record in records:
+        analysis = record.get("analysis") or {}
+        for problem in analysis.get("problem_areas") or ["general_product_learning"]:
+            problem_counts[problem] = problem_counts.get(problem, 0) + 1
+        urgency = analysis.get("urgency", "medium")
+        sentiment = analysis.get("sentiment", "neutral")
+        urgency_counts[urgency] = urgency_counts.get(urgency, 0) + 1
+        sentiment_counts[sentiment] = sentiment_counts.get(sentiment, 0) + 1
+
+    return {
+        "total": len(records),
+        "problem_counts": problem_counts,
+        "urgency_counts": urgency_counts,
+        "sentiment_counts": sentiment_counts,
+        "recent": summaries,
+    }
 
 
 @api_router.get("/shows")
@@ -8769,7 +8948,7 @@ async def get_podcast(podcast_id: str, request: Request):
 
 @api_router.post("/podcasts/{podcast_id}/assistant")
 async def ask_episode_assistant(podcast_id: str, req: EpisodeAssistantRequest, request: Request):
-    current_user = await try_get_current_user(request)
+    current_user = await get_current_user(request)
     question = str(req.question or "").strip()
     if not question:
         raise HTTPException(status_code=400, detail="Ask a question first")
@@ -9030,7 +9209,7 @@ async def get_related_podcasts(podcast_id: str, request: Request):
 
 @api_router.get("/podcasts/{podcast_id}/stream")
 async def stream_podcast(podcast_id: str, request: Request):
-    current_user = await try_get_current_user(request)
+    current_user = await get_current_user(request)
     podcast = await db.podcasts.find_one({"id": podcast_id, "is_deleted": False})
     if not podcast:
         raise HTTPException(status_code=404, detail="Episode not found")

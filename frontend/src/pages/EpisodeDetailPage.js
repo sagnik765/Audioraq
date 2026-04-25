@@ -103,6 +103,12 @@ export default function EpisodeDetailPage() {
   const isOwnShow = Boolean(user && episode.podcaster_id === user.id);
   const canEngage = user?.role === 'user' && episode.publication_status !== 'draft';
   const canPlayEpisode = episode.is_playable !== false;
+  const canUseListenerAI = Boolean(user);
+
+  const requireSignup = (message = 'Create a free account to unlock this listening feature.') => {
+    toast.message(message);
+    navigate('/register');
+  };
 
   const handleSaveToggle = async () => {
     if (!user) return;
@@ -213,6 +219,10 @@ export default function EpisodeDetailPage() {
 
   const handleAskAssistant = async (questionOverride = '') => {
     const nextQuestion = String(questionOverride || assistantQuestion || '').trim();
+    if (!user) {
+      requireSignup('Create an account to ask episodes questions and keep your listener memory.');
+      return;
+    }
     if (!nextQuestion) {
       toast.error('Ask a question first');
       return;
@@ -295,7 +305,7 @@ export default function EpisodeDetailPage() {
               </div>
             )}
 
-            {episode.listener_brief && (
+            {episode.listener_brief && canUseListenerAI && (
               <div className="bg-[#0A0A0B] border border-[#27272A] rounded-2xl px-4 py-4 mb-6">
                 <div className="flex items-center justify-between gap-4 mb-4">
                   <div>
@@ -325,6 +335,20 @@ export default function EpisodeDetailPage() {
                     <p className="text-sm text-[#D8D8DE]">{episode.listener_brief.tone} · {episode.listener_brief.listen_mode}</p>
                   </div>
                 </div>
+              </div>
+            )}
+
+            {episode.listener_brief && !canUseListenerAI && (
+              <div className="bg-[#0A0A0B] border border-[#27272A] rounded-2xl px-4 py-4 mb-6">
+                <p className="text-xs uppercase tracking-[0.2em] font-semibold text-[#F5A623] mb-2">Member AI Listener Brief</p>
+                <p className="text-sm text-white mb-3">Create an account to see the full AI brief, difficulty level, best-fit listener profile, and takeaway before you invest your time.</p>
+                <button
+                  type="button"
+                  onClick={() => navigate('/register')}
+                  className="bg-[#F5A623] hover:bg-[#F7B84B] text-[#0A0A0B] font-bold rounded-full px-5 py-2.5 transition-colors text-sm"
+                >
+                  Unlock listener intelligence
+                </button>
               </div>
             )}
 
@@ -399,7 +423,7 @@ export default function EpisodeDetailPage() {
             )}
 
             <div className="flex flex-wrap gap-3 mb-6">
-              {canPlayEpisode ? (
+              {canPlayEpisode && user ? (
                 <button
                   onClick={() => playPodcast(episode, {
                     startTime: episode.resume_position_seconds || episode.progress_seconds || 0,
@@ -409,6 +433,15 @@ export default function EpisodeDetailPage() {
                 >
                   <Play weight="fill" className="w-5 h-5" />
                   {episode.progress_percent > 0 && !episode.is_completed ? 'Resume Episode' : 'Play Episode'}
+                </button>
+              ) : canPlayEpisode ? (
+                <button
+                  onClick={() => requireSignup('Create a free account to play full episodes and keep your listening history.')}
+                  className="bg-[#F5A623] hover:bg-[#F7B84B] text-[#0A0A0B] font-bold rounded-full px-6 py-3 inline-flex items-center gap-2 transition-colors"
+                  data-testid="episode-signup-play-btn"
+                >
+                  <Play weight="fill" className="w-5 h-5" />
+                  Sign up to play
                 </button>
               ) : (
                 <div className="bg-[#0A0A0B] border border-[#27272A] text-white rounded-full px-6 py-3 inline-flex items-center gap-2">
@@ -423,7 +456,7 @@ export default function EpisodeDetailPage() {
                 <Broadcast className="w-5 h-5" />
                 Visit Show
               </Link>
-              {canPlayEpisode && (
+              {canPlayEpisode && user && (
                 <>
                   <button
                     onClick={() => {
@@ -484,6 +517,15 @@ export default function EpisodeDetailPage() {
                 </>
               )}
             </div>
+
+            {!user && (
+              <div className="bg-[#0A0A0B] border border-[#27272A] rounded-2xl px-4 py-4 mb-6">
+                <p className="text-sm text-white mb-2">Members can play full episodes, save for later, follow shows, rate episodes, build a queue, and use Ask this Episode.</p>
+                <Link to="/register" className="text-sm text-[#F5A623] hover:text-[#F7B84B] transition-colors">
+                  Create your free listener account
+                </Link>
+              </div>
+            )}
 
             {canEngage && (
               <div className="bg-[#0A0A0B] border border-[#27272A] rounded-2xl px-4 py-4 mb-6">
@@ -550,18 +592,24 @@ export default function EpisodeDetailPage() {
                 </span>
               </div>
 
-              <div className="flex flex-wrap gap-2 mb-4">
-                {(episode.assistant_prompts || []).map((prompt) => (
-                  <button
-                    key={prompt}
-                    type="button"
-                    onClick={() => handleAskAssistant(prompt)}
-                    className="px-3 py-1.5 rounded-full bg-[#141417] border border-[#27272A] text-xs text-white hover:border-[#F5A623] transition-colors"
-                  >
-                    {prompt}
-                  </button>
-                ))}
-              </div>
+              {user ? (
+                <div className="flex flex-wrap gap-2 mb-4">
+                  {(episode.assistant_prompts || []).map((prompt) => (
+                    <button
+                      key={prompt}
+                      type="button"
+                      onClick={() => handleAskAssistant(prompt)}
+                      className="px-3 py-1.5 rounded-full bg-[#141417] border border-[#27272A] text-xs text-white hover:border-[#F5A623] transition-colors"
+                    >
+                      {prompt}
+                    </button>
+                  ))}
+                </div>
+              ) : (
+                <div className="rounded-2xl border border-[#27272A] bg-[#141417] px-4 py-4 mb-4">
+                  <p className="text-sm text-white">Sign up to ask grounded questions like “is this worth my time?” or “what will I learn?” before listening.</p>
+                </div>
+              )}
 
               <div className="flex flex-col md:flex-row gap-3 mb-4">
                 <input
@@ -569,15 +617,16 @@ export default function EpisodeDetailPage() {
                   value={assistantQuestion}
                   onChange={(event) => setAssistantQuestion(event.target.value)}
                   placeholder="What will I get out of this episode?"
+                  disabled={!user}
                   className="flex-1 bg-[#141417] border border-[#27272A] rounded-xl text-white px-4 py-3 outline-none"
                 />
                 <button
                   type="button"
-                  onClick={() => handleAskAssistant()}
+                  onClick={() => (user ? handleAskAssistant() : requireSignup('Create an account to ask episodes questions.'))}
                   disabled={assistantLoading}
                   className="bg-[#F5A623] hover:bg-[#F7B84B] text-[#0A0A0B] font-bold rounded-full px-6 py-3 transition-colors disabled:opacity-50"
                 >
-                  {assistantLoading ? 'Thinking...' : 'Ask Audioraq'}
+                  {assistantLoading ? 'Thinking...' : user ? 'Ask Audioraq' : 'Sign up to ask'}
                 </button>
               </div>
 
