@@ -50,6 +50,8 @@ AI_AUDIO_TTS_PROVIDER=local_http,local
 AI_AUDIO_LOCAL_TTS_URL=http://127.0.0.1:8015
 AI_AUDIO_LOCAL_TTS_PROFILE=podcast-dialogue
 AI_AUDIO_REQUIRE_NEURAL_WORKER=false
+AI_AUDIO_TTS_SENTENCE_GAP_SECONDS=1.0
+AI_AUDIO_TTS_EDGE_PADDING_SECONDS=1.0
 ```
 
 When you are ready to prevent low-quality fallback publishes, change:
@@ -69,8 +71,8 @@ Request:
 {
   "script_text": "",
   "turns": [
-    {"speaker": "Host", "voice_role": "host", "text": "Welcome to the show."},
-    {"speaker": "Guest", "voice_role": "guest", "text": "Thanks for having me."}
+    {"speaker": "Host", "voice_role": "host", "voice_id": "aman-warm-analyst", "text": "Welcome to the show."},
+    {"speaker": "Guest", "voice_role": "guest", "voice_id": "samantha-warm-cohost", "text": "Thanks for having me."}
   ],
   "target_loudness_lufs": -18.5,
   "format": "wav",

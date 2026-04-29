@@ -32,7 +32,7 @@ export default function BrowsePage() {
     setLoading(true);
     try {
       const showsUrl = `${API}/shows?limit=8${nextSearch ? `&search=${encodeURIComponent(nextSearch)}` : ''}${nextCategory ? `&category=${encodeURIComponent(nextCategory)}` : ''}${nextFollowingOnly ? '&following_only=true' : ''}`;
-      const useTopicRecommendations = Boolean(user && nextCategory && !nextSearch && !nextMediaType && !nextFollowingOnly);
+      const useTopicRecommendations = Boolean(user && nextCategory && nextSort !== 'recommended' && !nextSearch && !nextMediaType && !nextFollowingOnly);
       const topicSort = ['highest_rated', 'most_viewed'].includes(nextSort) ? nextSort : 'smart';
       const episodesUrl = useTopicRecommendations
         ? `${API}/recommendations?category=${encodeURIComponent(nextCategory)}&sort=${encodeURIComponent(topicSort)}`
@@ -136,6 +136,7 @@ export default function BrowsePage() {
                 className="bg-[#0A0A0B] border border-[#27272A] rounded-full px-4 py-2 text-sm text-white outline-none"
               >
                 <option value="recent">Newest</option>
+                <option value="recommended">Recommended</option>
                 <option value="trending">Trending</option>
                 <option value="highest_rated">Highest rated</option>
                 <option value="most_viewed">Most viewed</option>
@@ -238,6 +239,8 @@ export default function BrowsePage() {
                   <h2 className="font-['Outfit'] text-xl font-semibold text-white">
                     {followingOnly
                       ? 'Episodes from shows you follow'
+                      : sort === 'recommended'
+                        ? 'Recommended Audioraq Originals'
                       : selectedCategory
                         ? `Recommended ${selectedCategory} episodes`
                         : searchQuery || mediaType
@@ -245,7 +248,9 @@ export default function BrowsePage() {
                           : 'Latest episodes'}
                   </h2>
                   <p className="text-sm text-[#8A8A93] mt-1">
-                    {selectedCategory
+                    {sort === 'recommended'
+                      ? 'A curated set of 10 polished proof-of-work episodes with strong Agent 2 quality, voice clarity, and listenability scores.'
+                      : selectedCategory
                       ? `Topic-mapped recommendations for ${selectedCategory}, using category, keywords, titles, and show context.`
                       : 'Recommendation reasons and trust cues are built in so you can make a decision quickly.'}
                   </p>

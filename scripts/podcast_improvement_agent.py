@@ -77,7 +77,7 @@ RAG_SAFETY_KB = [
 ROLE_VOICES = {
     "Host": ["Aman", "Daniel", "Alex"],
     "Co-host": ["Samantha", "Ava", "Victoria"],
-    "Guest": ["Daniel", "Oliver", "Fred"],
+    "Guest": ["Daniel", "Oliver", "Rishi"],
 }
 
 AVATAR_PROFILES = {

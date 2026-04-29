@@ -73,6 +73,10 @@ export default function SettingsPage() {
     () => socialAccounts.filter((account) => account.provider === postProvider),
     [socialAccounts, postProvider],
   );
+  const manualTokenSupported = useMemo(
+    () => Object.values(socialProviders || {}).some((details) => details?.manual_token_supported),
+    [socialProviders],
+  );
 
   const loadSocialPublishing = useCallback(async () => {
     if (!canManagePublishing) return;
@@ -431,8 +435,7 @@ export default function SettingsPage() {
                   <p className="text-xs uppercase tracking-[0.2em] font-semibold text-[#F5A623] mb-2">Social Publishing</p>
                   <h2 className="font-['Outfit'] text-2xl font-semibold text-white mb-2">Connect Audioraq to LinkedIn and Instagram</h2>
                   <p className="text-sm text-[#8A8A93] max-w-3xl">
-                    This turns the marketing agent into a real publishing system. OAuth is the cleanest path when provider app credentials are set.
-                    Manual token connect is available as a fallback when you already have a valid token and account id.
+                    This turns the marketing agent into a real publishing system. OAuth is the required production-safe path for connecting provider accounts.
                   </p>
                 </div>
                 <button
@@ -492,13 +495,15 @@ export default function SettingsPage() {
                         >
                           Connect with OAuth
                         </button>
-                        <button
-                          type="button"
-                          onClick={() => setManualProvider(provider)}
-                          className="bg-[#151518] border border-[#27272A] text-white rounded-full px-5 py-3 font-semibold"
-                        >
-                          Use Manual Token
-                        </button>
+                        {details.manual_token_supported && (
+                          <button
+                            type="button"
+                            onClick={() => setManualProvider(provider)}
+                            className="bg-[#151518] border border-[#27272A] text-white rounded-full px-5 py-3 font-semibold"
+                          >
+                            Use Manual Token
+                          </button>
+                        )}
                       </div>
                       <div className="text-xs text-[#8A8A93] leading-relaxed">
                         Required scopes:
@@ -510,6 +515,7 @@ export default function SettingsPage() {
               </div>
 
               <div className="grid lg:grid-cols-[1.1fr_0.9fr] gap-6">
+                {manualTokenSupported && (
                 <form onSubmit={handleManualConnect} className="bg-[#0A0A0B] border border-[#27272A] rounded-2xl p-6 space-y-4">
                   <div>
                     <p className="text-xs uppercase tracking-[0.2em] font-semibold text-[#F5A623] mb-2">Manual Token Connect</p>
@@ -611,6 +617,7 @@ export default function SettingsPage() {
                     {socialSubmitting ? 'Connecting...' : 'Connect Account'}
                   </button>
                 </form>
+                )}
 
                 <div className="bg-[#0A0A0B] border border-[#27272A] rounded-2xl p-6 space-y-4">
                   <div>

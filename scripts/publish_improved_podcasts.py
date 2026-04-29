@@ -37,6 +37,10 @@ def get(session: requests.Session, url: str, token: str = "") -> requests.Respon
     return response
 
 
+def auth_token(auth: Dict[str, Any]) -> str:
+    return str(auth.get("access_token") or "")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Publish improved dialogue QA podcasts.")
     parser.add_argument("--base-url", default="https://www.audioraq.com")
@@ -70,7 +74,7 @@ def main() -> None:
             f"{base_url}/api/auth/login",
             json={"email": original["email"], "password": original["password"]},
         ).json()
-        token = login["access_token"]
+        token = auth_token(login)
 
         original_episode = get(session, f"{base_url}/api/podcasts/{original['episode_id']}", token=token).json()
         media_path = Path(improved["improved_media_path"])

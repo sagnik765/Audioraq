@@ -417,6 +417,10 @@ def api_post(session: requests.Session, url: str, token: str = "", **kwargs: Any
     return response
 
 
+def auth_token(auth: Dict[str, Any]) -> str:
+    return str(auth.get("access_token") or "")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Create Audioraq AI podcast QA episodes.")
     parser.add_argument("--base-url", default=DEFAULT_BASE_URL)
@@ -477,10 +481,11 @@ def main() -> None:
                 "show_title": spec.podcast_name,
             }
             register_res = api_post(session, f"{base_url}/api/auth/register", json=register_payload).json()
-            token = register_res["access_token"]
+            token = auth_token(register_res)
             show_id = (register_res.get("primary_show") or {}).get("id", "")
             if not show_id:
-                shows = session.get(f"{base_url}/api/shows/my", headers={"Authorization": f"Bearer {token}"}, timeout=60).json()
+                headers = {"Authorization": f"Bearer {token}"} if token else {}
+                shows = session.get(f"{base_url}/api/shows/my", headers=headers, timeout=60).json()
                 show_id = shows["shows"][0]["id"]
 
             draft_payload = {"show_id": show_id, "intake": build_intake(spec)}

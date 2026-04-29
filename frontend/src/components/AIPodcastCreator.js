@@ -37,6 +37,9 @@ function buildInitialBrief(activeShow) {
       includeHook: true,
       knownIssues: '',
     },
+    voiceCasting: {
+      selectedVoiceIds: ['aman-warm-analyst', 'samantha-warm-cohost', 'daniel-calm-british'],
+    },
   };
 }
 
@@ -111,6 +114,29 @@ const preferredScorecardOrder = [
   'publish_readiness',
 ];
 
+const fallbackVoiceLibrary = [
+  { id: 'aman-warm-analyst', name: 'Aman', gender: 'male', style: 'warm analyst', accent: 'Indian English', description: 'Warm, steady, and trustworthy for education or finance.' },
+  { id: 'rishi-clear-guide', name: 'Rishi', gender: 'male', style: 'clear guide', accent: 'Indian English', description: 'Crisp and composed for explainers and founder conversations.' },
+  { id: 'daniel-calm-british', name: 'Daniel', gender: 'male', style: 'calm British host', accent: 'British English', description: 'Polished and calm for law, current affairs, and long-form analysis.' },
+  { id: 'reed-bright-teacher', name: 'Reed', gender: 'male', style: 'clear teacher', accent: 'Warm Indian English', description: 'Friendly and articulate for practical tutorials.' },
+  { id: 'eddy-casual-host', name: 'Eddy', gender: 'male', style: 'casual host', accent: 'Warm Indian English', description: 'Conversational and approachable for creator-led shows.' },
+  { id: 'rocko-energetic-host', name: 'Rocko', gender: 'male', style: 'energetic host', accent: 'American English', description: 'More energetic without rushing; useful for technology and startup topics.' },
+  { id: 'grandpa-wise-narrator', name: 'Grandpa', gender: 'male', style: 'wise narrator', accent: 'American English', description: 'Grounded and patient for reflective storytelling.' },
+  { id: 'oliver-uk-commentator', name: 'Oliver', gender: 'male', style: 'UK commentator', accent: 'British English', description: 'Composed and conversational for business and current-affairs contrast.' },
+  { id: 'rowan-uk-analyst', name: 'Rowan', gender: 'male', style: 'UK analyst', accent: 'British English', description: 'Crisp, slightly brighter analyst voice for explainers.' },
+  { id: 'roman-uk-host', name: 'Roman', gender: 'male', style: 'energetic host', accent: 'American English', description: 'Energetic but controlled for technology and startup discussions.' },
+  { id: 'samantha-warm-cohost', name: 'Samantha', gender: 'female', style: 'warm co-host', accent: 'American English', description: 'Warm, clear, and easy to stay with for long listening.' },
+  { id: 'tara-bright-indian', name: 'Tara', gender: 'female', style: 'bright Indian host', accent: 'Indian English', description: 'Bright and precise for education, health, and creator shows.' },
+  { id: 'flo-friendly-guide', name: 'Flo', gender: 'female', style: 'friendly guide', accent: 'American English', description: 'Friendly and modern for onboarding-style episodes.' },
+  { id: 'sandy-calm-educator', name: 'Sandy', gender: 'female', style: 'calm educator', accent: 'American English', description: 'Clear, relaxed, and teacherly for explainers.' },
+  { id: 'shelley-story-host', name: 'Shelley', gender: 'female', style: 'story host', accent: 'American English', description: 'Expressive but controlled for narrative shows.' },
+  { id: 'grandma-reflective-narrator', name: 'Grandma', gender: 'female', style: 'reflective narrator', accent: 'American English', description: 'Patient and intimate for reflective narration.' },
+  { id: 'karen-australian-guide', name: 'Karen', gender: 'female', style: 'Australian guide', accent: 'Australian English', description: 'Clean and composed for global business and environment shows.' },
+  { id: 'moira-irish-storyteller', name: 'Moira', gender: 'female', style: 'reflective storyteller', accent: 'Warm neutral English', description: 'Textured and warm for story-led episodes.' },
+  { id: 'tessa-global-host', name: 'Tessa', gender: 'female', style: 'global host', accent: 'South African English', description: 'Distinctive and articulate for international topics.' },
+  { id: 'fiona-british-guide', name: 'Fiona', gender: 'female', style: 'British guide', accent: 'British English', description: 'Friendly and precise for educational recaps and guided explainers.' },
+];
+
 function firstScorecardEntries(scorecard) {
   const available = scorecard || {};
   const prioritized = preferredScorecardOrder
@@ -123,6 +149,7 @@ function firstScorecardEntries(scorecard) {
 function isStepComplete(step, value) {
   if (step.optional) return true;
   if (step.type === 'list') return Array.isArray(value) && value.length > 0;
+  if (step.type === 'voice-multi') return Array.isArray(value) && value.length > 0;
   if (step.type === 'boolean') return typeof value === 'boolean';
   return String(value || '').trim().length > 0;
 }
@@ -145,6 +172,7 @@ export default function AIPodcastCreator({
   const [drafts, setDrafts] = useState([]);
   const [projects, setProjects] = useState([]);
   const [activeProject, setActiveProject] = useState(null);
+  const [voiceLibrary, setVoiceLibrary] = useState(fallbackVoiceLibrary);
 
   useEffect(() => {
     setBrief((current) => ({
@@ -165,6 +193,29 @@ export default function AIPodcastCreator({
     setStepIndex(0);
     toast.success('Loaded an AI Strategist idea into the brief.');
   }, [seedBrief]);
+
+  useEffect(() => {
+    let isMounted = true;
+    axios.get(`${API}/ai-voice-library`)
+      .then(({ data }) => {
+        if (isMounted && Array.isArray(data.voices) && data.voices.length >= 20) {
+          setVoiceLibrary(data.voices);
+          setBrief((current) => ({
+            ...current,
+            voiceCasting: {
+              ...current.voiceCasting,
+              selectedVoiceIds: current.voiceCasting?.selectedVoiceIds?.length
+                ? current.voiceCasting.selectedVoiceIds
+                : (data.defaults || fallbackVoiceLibrary.slice(0, 3).map((voice) => voice.id)),
+            },
+          }));
+        }
+      })
+      .catch(() => setVoiceLibrary(fallbackVoiceLibrary));
+    return () => {
+      isMounted = false;
+    };
+  }, []);
 
   const steps = useMemo(() => {
     const nicheSuggestions = uniqueSuggestions([
@@ -304,6 +355,16 @@ export default function AIPodcastCreator({
         ],
       },
       {
+        id: 'selectedVoiceIds',
+        category: 'Voice Casting',
+        label: 'Voices',
+        prompt: 'Which voices should Audioraq cast for this episode?',
+        help: 'Choose up to 4 voices. Different speakers will rotate through your choices, and final audio uses one-second sentence gaps so the episode does not feel rushed.',
+        type: 'voice-multi',
+        path: ['voiceCasting', 'selectedVoiceIds'],
+        options: voiceLibrary,
+      },
+      {
         id: 'lengthPreference',
         category: 'Tone & Style',
         label: 'Length',
@@ -356,7 +417,7 @@ export default function AIPodcastCreator({
         placeholder: 'Avoid jargon. Keep the intro tight. Do not sound salesy.',
       },
     ];
-  }, [activeShow?.category, activeShow?.title]);
+  }, [activeShow?.category, activeShow?.title, voiceLibrary]);
 
   const currentStep = steps[stepIndex];
   const currentValue = getValueAtPath(brief, currentStep.path);
@@ -429,6 +490,19 @@ export default function AIPodcastCreator({
       return;
     }
     updateBriefValue(suggestion);
+  };
+
+  const toggleVoiceSelection = (voiceId) => {
+    const existing = Array.isArray(currentValue) ? currentValue : [];
+    if (existing.includes(voiceId)) {
+      updateBriefValue(existing.filter((id) => id !== voiceId));
+      return;
+    }
+    if (existing.length >= 4) {
+      toast.error('Choose up to 4 voices for one episode.');
+      return;
+    }
+    updateBriefValue([...existing, voiceId]);
   };
 
   const handleGenerate = async () => {
@@ -510,6 +584,58 @@ export default function AIPodcastCreator({
   };
 
   const renderInput = () => {
+    if (currentStep.type === 'voice-multi') {
+      const selectedVoices = Array.isArray(currentValue) ? currentValue : [];
+      return (
+        <div>
+          <div className="flex items-center justify-between gap-4 mb-4">
+            <p className="text-xs uppercase tracking-[0.18em] text-[#8A8A93]">
+              {selectedVoices.length}/4 selected
+            </p>
+            <button
+              type="button"
+              onClick={() => updateBriefValue(['aman-warm-analyst', 'samantha-warm-cohost', 'daniel-calm-british'])}
+              className="text-xs text-[#F5A623] hover:text-[#F7B84B]"
+            >
+              Reset to recommended cast
+            </button>
+          </div>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3 max-h-[430px] overflow-auto pr-1">
+            {currentStep.options.map((voice) => {
+              const isSelected = selectedVoices.includes(voice.id);
+              return (
+                <button
+                  type="button"
+                  key={voice.id}
+                  onClick={() => toggleVoiceSelection(voice.id)}
+                  className={`text-left rounded-2xl border p-4 transition-all ${
+                    isSelected
+                      ? 'border-[#F5A623] bg-[#F5A623]/10'
+                      : 'border-[#27272A] bg-[#141417] hover:border-[#F5A623]/60'
+                  }`}
+                  data-testid={`ai-voice-option-${voice.id}`}
+                >
+                  <div className="flex items-start justify-between gap-3 mb-2">
+                    <div>
+                      <p className="text-white font-semibold">{voice.name}</p>
+                      <p className="text-xs text-[#F5A623] capitalize">{voice.gender} · {voice.style}</p>
+                    </div>
+                    <span className={`rounded-full px-2 py-1 text-[10px] uppercase tracking-[0.14em] ${
+                      isSelected ? 'bg-[#F5A623] text-[#0A0A0B]' : 'bg-[#0A0A0B] text-[#8A8A93]'
+                    }`}>
+                      {isSelected ? 'Selected' : 'Choose'}
+                    </span>
+                  </div>
+                  <p className="text-xs text-[#8A8A93] mb-2">{voice.accent}</p>
+                  <p className="text-sm text-[#C7C7D1] leading-relaxed">{voice.description}</p>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      );
+    }
+
     if (currentStep.type === 'option' || currentStep.type === 'boolean') {
       return (
         <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
@@ -680,6 +806,11 @@ export default function AIPodcastCreator({
                   {(cast.length ? cast : [{ speaker: 'Host', voice_role: 'host', delivery: 'Generate a script to assign voice roles.' }]).slice(0, 4).map((member) => (
                     <div key={`${member.speaker}-${member.voice_role}`} className="border border-[#27272A] rounded-xl p-3">
                       <p className="text-sm font-semibold text-white">{member.speaker} <span className="text-[#8A8A93] font-normal">/{member.voice_role}</span></p>
+                      {member.voice_name && (
+                        <p className="text-[11px] uppercase tracking-[0.14em] text-[#F5A623] mt-1">
+                          {member.voice_name} · {member.voice_gender} · {member.voice_style}
+                        </p>
+                      )}
                       <p className="text-xs text-[#C7C7D1] mt-1">{member.delivery}</p>
                     </div>
                   ))}

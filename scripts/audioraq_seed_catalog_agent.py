@@ -49,8 +49,9 @@ DEFAULT_PASSWORD_PREFIX = "AudioraqSeed"
 SHOW_EPISODE_COUNTS_275 = [17, 15, 14, 14, 13, 13, 12, 12, 12, 11, 11, 11, 11, 10, 10, 10, 10, 9, 9, 9, 9, 9, 8, 8, 8]
 SHOW_EPISODE_COUNTS_125 = [12, 11, 11, 11, 10, 10, 10, 10, 10, 10, 10, 10]
 SHOW_EPISODE_COUNTS_65 = [10, 10, 9, 9, 9, 9, 9]
-PROOF_STUDIO_APPLE_GAP_SECONDS = 0.45
-PROOF_STUDIO_APPLE_NARRATIVE_GAP_SECONDS = 0.75
+PROOF_STUDIO_APPLE_GAP_SECONDS = 1.0
+PROOF_STUDIO_APPLE_NARRATIVE_GAP_SECONDS = 1.0
+PROOF_STUDIO_APPLE_EDGE_PADDING_SECONDS = 1.0
 PROOF_STUDIO_APPLE_TARGET_PEAK_DBFS = -4.5
 PROOF_STUDIO_APPLE_RATES = {
     "host": 100,
@@ -67,6 +68,29 @@ PROOF_STUDIO_APPLE_VOICES = {
     "guest": ["Samantha", "Ava", "Victoria"],
     "narrator": ["Samantha", "Aman", "Alex"],
 }
+PROOF_STUDIO_VOICE_LIBRARY = [
+    {"id": "aman-warm-analyst", "name": "Aman", "gender": "male", "apple_voices": ["Aman", "Aman (English (India))"], "rate_wpm": 110},
+    {"id": "rishi-clear-guide", "name": "Rishi", "gender": "male", "apple_voices": ["Rishi"], "rate_wpm": 112},
+    {"id": "daniel-calm-british", "name": "Daniel", "gender": "male", "apple_voices": ["Daniel"], "rate_wpm": 112},
+    {"id": "reed-bright-teacher", "name": "Reed", "gender": "male", "apple_voices": ["Rishi"], "rate_wpm": 112},
+    {"id": "eddy-casual-host", "name": "Eddy", "gender": "male", "apple_voices": ["Rishi"], "rate_wpm": 112},
+    {"id": "rocko-energetic-host", "name": "Rocko", "gender": "male", "apple_voices": ["Rocko (English (US))", "Rocko"], "rate_wpm": 220},
+    {"id": "grandpa-wise-narrator", "name": "Grandpa", "gender": "male", "apple_voices": ["Grandpa (English (US))", "Grandpa"], "rate_wpm": 152},
+    {"id": "oliver-uk-commentator", "name": "Oliver", "gender": "male", "apple_voices": ["Eddy (English (UK))"], "rate_wpm": 220},
+    {"id": "rowan-uk-analyst", "name": "Rowan", "gender": "male", "apple_voices": ["Reed (English (UK))"], "rate_wpm": 162},
+    {"id": "roman-uk-host", "name": "Roman", "gender": "male", "apple_voices": ["Rocko (English (US))", "Rocko"], "rate_wpm": 220},
+    {"id": "samantha-warm-cohost", "name": "Samantha", "gender": "female", "apple_voices": ["Samantha"], "rate_wpm": 112},
+    {"id": "tara-bright-indian", "name": "Tara", "gender": "female", "apple_voices": ["Tara"], "rate_wpm": 112},
+    {"id": "flo-friendly-guide", "name": "Flo", "gender": "female", "apple_voices": ["Samantha"], "rate_wpm": 112},
+    {"id": "sandy-calm-educator", "name": "Sandy", "gender": "female", "apple_voices": ["Samantha"], "rate_wpm": 112},
+    {"id": "shelley-story-host", "name": "Shelley", "gender": "female", "apple_voices": ["Samantha"], "rate_wpm": 112},
+    {"id": "grandma-reflective-narrator", "name": "Grandma", "gender": "female", "apple_voices": ["Samantha"], "rate_wpm": 112},
+    {"id": "karen-australian-guide", "name": "Karen", "gender": "female", "apple_voices": ["Karen"], "rate_wpm": 112},
+    {"id": "moira-irish-storyteller", "name": "Moira", "gender": "female", "apple_voices": ["Samantha"], "rate_wpm": 112},
+    {"id": "tessa-global-host", "name": "Tessa", "gender": "female", "apple_voices": ["Tessa"], "rate_wpm": 112},
+    {"id": "fiona-british-guide", "name": "Fiona", "gender": "female", "apple_voices": ["Samantha"], "rate_wpm": 112},
+]
+PROOF_STUDIO_VOICE_BY_ID = {voice["id"]: voice for voice in PROOF_STUDIO_VOICE_LIBRARY}
 
 
 @dataclass(frozen=True)
@@ -208,6 +232,10 @@ def api_get(session: requests.Session, url: str, token: str = "", **kwargs: Any)
     return response
 
 
+def auth_token(auth: Dict[str, Any]) -> str:
+    return str(auth.get("access_token") or "")
+
+
 def run(cmd: List[str], **kwargs: Any) -> subprocess.CompletedProcess:
     return subprocess.run(cmd, check=True, text=True, **kwargs)
 
@@ -336,8 +364,54 @@ def fallback_audio_turns(plan: EpisodeBlueprint, title: str, generation: Dict[st
 def audio_turns_from_generation(plan: EpisodeBlueprint, title: str, generation: Dict[str, Any]) -> List[Dict[str, str]]:
     turns = normalize_audio_turns(generation.get("audio_script_turns") or generation.get("audioScriptTurns"))
     if turns:
-        return turns
-    return fallback_audio_turns(plan, title, generation)
+        return assign_catalog_voice_ids(split_turns_into_sentence_turns(turns), plan)
+    return assign_catalog_voice_ids(split_turns_into_sentence_turns(fallback_audio_turns(plan, title, generation)), plan)
+
+
+def split_turns_into_sentence_turns(turns: List[Dict[str, str]]) -> List[Dict[str, str]]:
+    sentence_turns: List[Dict[str, str]] = []
+    for turn in turns:
+        text = normalize_tts_text(turn.get("text", ""))
+        parts = [part.strip() for part in re.split(r"(?<=[.!?])\s+", text) if part.strip()]
+        for part in parts or [text]:
+            if part:
+                sentence_turns.append({**turn, "text": normalize_tts_text(part)})
+    return sentence_turns
+
+
+def catalog_voice_ids_for_plan(plan: EpisodeBlueprint) -> List[str]:
+    count = 1 if plan.speaker_plan == "one host" else 3 if "expert" in plan.speaker_plan else 2
+    anchor_id = "aman-warm-analyst"
+    rotating_ids = [voice["id"] for voice in PROOF_STUDIO_VOICE_LIBRARY]
+    start = (plan.global_index - 1) % len(rotating_ids)
+    selected = [anchor_id]
+    for offset in range(len(rotating_ids)):
+        voice_id = rotating_ids[(start + offset) % len(rotating_ids)]
+        if voice_id not in selected:
+            selected.append(voice_id)
+        if len(selected) >= count:
+            break
+    return selected
+
+
+def assign_catalog_voice_ids(turns: List[Dict[str, str]], plan: EpisodeBlueprint) -> List[Dict[str, str]]:
+    voice_ids = catalog_voice_ids_for_plan(plan)
+    speaker_map: Dict[str, str] = {}
+    voiced_turns: List[Dict[str, str]] = []
+    for turn in turns:
+        speaker_key = (turn.get("speaker") or turn.get("voice_role") or "host").strip().lower()
+        if speaker_key not in speaker_map:
+            speaker_map[speaker_key] = voice_ids[len(speaker_map) % len(voice_ids)]
+        profile = PROOF_STUDIO_VOICE_BY_ID[speaker_map[speaker_key]]
+        voiced_turns.append(
+            {
+                **turn,
+                "voice_id": profile["id"],
+                "voice_name": profile["name"],
+                "voice_gender": profile["gender"],
+            }
+        )
+    return voiced_turns
 
 
 def synthesize_turn_audio(text: str, output_wav: Path, voices: List[str], rate_wpm: int) -> str:
@@ -364,7 +438,12 @@ def synthesize_turn_audio(text: str, output_wav: Path, voices: List[str], rate_w
     raise RuntimeError(f"Could not synthesize dialogue turn: {last_error}")
 
 
-def concat_wavs(segment_paths: List[Path], output_wav: Path, gap_seconds: float = PROOF_STUDIO_APPLE_GAP_SECONDS) -> None:
+def concat_wavs(
+    segment_paths: List[Path],
+    output_wav: Path,
+    gap_seconds: float = PROOF_STUDIO_APPLE_GAP_SECONDS,
+    edge_padding_seconds: float = PROOF_STUDIO_APPLE_EDGE_PADDING_SECONDS,
+) -> None:
     if not segment_paths:
         raise RuntimeError("No dialogue segments to concatenate")
     with wave.open(str(segment_paths[0]), "rb") as first:
@@ -373,14 +452,20 @@ def concat_wavs(segment_paths: List[Path], output_wav: Path, gap_seconds: float 
         sample_width = first.getsampwidth()
         channels = first.getnchannels()
     silence = b"\x00" * int(framerate * gap_seconds) * sample_width * channels
+    edge_silence = b"\x00" * int(framerate * edge_padding_seconds) * sample_width * channels
     with wave.open(str(output_wav), "wb") as out:
         out.setparams(params)
-        for segment_path in segment_paths:
+        if edge_silence:
+            out.writeframes(edge_silence)
+        for index, segment_path in enumerate(segment_paths):
             with wave.open(str(segment_path), "rb") as segment:
                 if segment.getframerate() != framerate or segment.getsampwidth() != sample_width or segment.getnchannels() != channels:
                     raise RuntimeError(f"Dialogue segment format mismatch: {segment_path}")
                 out.writeframes(segment.readframes(segment.getnframes()))
-                out.writeframes(silence)
+                if index < len(segment_paths) - 1 and silence:
+                    out.writeframes(silence)
+        if edge_silence:
+            out.writeframes(edge_silence)
 
 
 def master_wav_headroom(path: Path, target_peak_dbfs: float = PROOF_STUDIO_APPLE_TARGET_PEAK_DBFS) -> Dict[str, Any]:
@@ -431,22 +516,33 @@ def render_apple_say_audio(turns: List[Dict[str, str]], output_wav: Path) -> Dic
     narrative_mode = "narrator" in rendered_roles
     active_rates = PROOF_STUDIO_APPLE_NARRATIVE_RATES if narrative_mode else PROOF_STUDIO_APPLE_RATES
     turn_gap_seconds = PROOF_STUDIO_APPLE_NARRATIVE_GAP_SECONDS if narrative_mode else PROOF_STUDIO_APPLE_GAP_SECONDS
-    selected_voices: Dict[str, str] = {}
+    selected_voices: Dict[str, Any] = {}
     with tempfile.TemporaryDirectory(prefix="audioraq-originals-dialogue-") as temp_dir:
         temp_path = Path(temp_dir)
         segments = []
         for index, turn in enumerate(turns, start=1):
             role = rendered_roles[index - 1]
             segment = temp_path / f"{index:03d}-{role}.wav"
+            profile = PROOF_STUDIO_VOICE_BY_ID.get(str(turn.get("voice_id") or ""))
+            voice_candidates = (
+                list(profile.get("apple_voices") or []) + PROOF_STUDIO_APPLE_VOICES.get(role, PROOF_STUDIO_APPLE_VOICES["host"])
+                if profile
+                else PROOF_STUDIO_APPLE_VOICES.get(role, PROOF_STUDIO_APPLE_VOICES["host"])
+            )
             selected_voice = synthesize_turn_audio(
                 turn["text"],
                 segment,
-                PROOF_STUDIO_APPLE_VOICES.get(role, PROOF_STUDIO_APPLE_VOICES["host"]),
-                active_rates.get(role, active_rates["host"]),
+                voice_candidates,
+                int(profile.get("rate_wpm") or active_rates.get(role, active_rates["host"])) if profile else active_rates.get(role, active_rates["host"]),
             )
-            selected_voices.setdefault(role, selected_voice)
+            selected_voices[turn.get("speaker") or role] = {
+                "voice_id": profile.get("id") if profile else "",
+                "display_name": profile.get("name") if profile else selected_voice,
+                "gender": profile.get("gender") if profile else "",
+                "engine_voice": selected_voice,
+            }
             segments.append(segment)
-        concat_wavs(segments, output_wav, gap_seconds=turn_gap_seconds)
+        concat_wavs(segments, output_wav, gap_seconds=turn_gap_seconds, edge_padding_seconds=PROOF_STUDIO_APPLE_EDGE_PADDING_SECONDS)
     mastering = master_wav_headroom(output_wav)
     return {
         "provider": "apple-say:proof-studio",
@@ -455,6 +551,7 @@ def render_apple_say_audio(turns: List[Dict[str, str]], output_wav: Path) -> Dic
         "turn_count": len(turns),
         "rates_wpm": active_rates,
         "turn_gap_seconds": turn_gap_seconds,
+        "edge_padding_seconds": PROOF_STUDIO_APPLE_EDGE_PADDING_SECONDS,
         "mastering": mastering,
     }
 
@@ -612,6 +709,9 @@ def build_intake(plan: EpisodeBlueprint) -> Dict[str, Any]:
             "includeHook": True,
             "knownIssues": known_issues,
         },
+        "voiceCasting": {
+            "selectedVoiceIds": catalog_voice_ids_for_plan(plan),
+        },
     }
 
 
@@ -647,10 +747,11 @@ def get_token_and_show_id(
             raise
         auth = login_account(session, base_url, email, password)
 
-    token = auth["access_token"]
+    token = auth_token(auth)
     show_id = (auth.get("primary_show") or {}).get("id", "")
     if not show_id:
-        shows = session.get(f"{base_url}/api/shows/my", headers={"Authorization": f"Bearer {token}"}, timeout=60).json()
+        headers = {"Authorization": f"Bearer {token}"} if token else {}
+        shows = session.get(f"{base_url}/api/shows/my", headers=headers, timeout=60).json()
         if shows.get("shows"):
             show_id = shows["shows"][0]["id"]
     if not show_id:
@@ -951,6 +1052,7 @@ def main() -> None:
     parser.add_argument("--min-voice-listenability-score", type=float, default=0.0, help="Delete the episode if Agent 2's podcast voice listenability score is lower.")
     parser.add_argument("--require-voice-status", default="", help="Comma-separated accepted podcast voice listenability statuses. Set empty to disable.")
     parser.add_argument("--replace-existing-below-score", action="store_true", help="Publish a replacement before deleting an existing Audioraq Originals episode that scores below --min-quality-score.")
+    parser.add_argument("--replace-existing-all", action="store_true", help="Publish replacements for matching existing Audioraq Originals episodes before deleting the old copies.")
     args = parser.parse_args()
 
     base_url = args.base_url.rstrip("/")
@@ -1002,7 +1104,7 @@ def main() -> None:
 
     for plan in selected:
         previous = previous_by_index.get(plan.global_index)
-        if previous and not args.replace_existing_below_score:
+        if previous and not args.replace_existing_below_score and not args.replace_existing_all:
             previous = {**previous, "status": "skipped_manifest"}
             print(json.dumps(previous, ensure_ascii=True), flush=True)
             run_results.append(previous)
@@ -1044,9 +1146,11 @@ def main() -> None:
                 should_replace_for_quality = bool(args.min_quality_score and existing_score < args.min_quality_score)
                 should_replace_for_voice_score = bool(args.min_voice_listenability_score and existing_voice_score < args.min_voice_listenability_score)
                 should_replace_for_voice_status = bool(voice_statuses and existing_voice_status not in voice_statuses)
-                if args.replace_existing_below_score and (should_replace_for_quality or should_replace_for_voice_score or should_replace_for_voice_status):
+                if args.replace_existing_all or (args.replace_existing_below_score and (should_replace_for_quality or should_replace_for_voice_score or should_replace_for_voice_status)):
                     existing_to_replace = existing_episode
                     replacement_reasons = []
+                    if args.replace_existing_all:
+                        replacement_reasons.append("forced replacement for 20-voice library and 1s pacing upgrade")
                     if should_replace_for_quality:
                         replacement_reasons.append(f"existing quality_score={existing_score} below {args.min_quality_score}")
                     if should_replace_for_voice_score:

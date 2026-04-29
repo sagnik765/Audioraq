@@ -3,6 +3,29 @@ import axios from 'axios';
 import { API } from '../lib/api';
 
 const AuthContext = createContext(null);
+let refreshPromise = null;
+
+axios.interceptors.response.use(
+  (response) => response,
+  async (error) => {
+    const originalRequest = error.config || {};
+    const status = error.response?.status;
+    const url = originalRequest.url || '';
+    if (status === 401 && !originalRequest._retry && !url.includes('/auth/login') && !url.includes('/auth/refresh')) {
+      originalRequest._retry = true;
+      refreshPromise = refreshPromise || axios.post(`${API}/auth/refresh`, {}, { withCredentials: true }).finally(() => {
+        refreshPromise = null;
+      });
+      try {
+        await refreshPromise;
+        return axios(originalRequest);
+      } catch {
+        return Promise.reject(error);
+      }
+    }
+    return Promise.reject(error);
+  },
+);
 
 function formatApiErrorDetail(detail) {
   if (detail == null) return "Something went wrong. Please try again.";

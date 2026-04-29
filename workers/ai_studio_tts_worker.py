@@ -38,8 +38,9 @@ QUALITY_PROFILES: Dict[str, Dict[str, Any]] = {
         "true_peak_db": -3.0,
         "lra": 7,
         "max_chars_per_chunk": 520,
-        "max_sentences_per_chunk": 2,
-        "pause_between_chunks_ms": 260,
+        "max_sentences_per_chunk": 1,
+        "pause_between_chunks_ms": 1000,
+        "edge_padding_ms": 1000,
         "kokoro_speed": 0.90,
         "chatterbox_temperature": 0.78,
         "chatterbox_exaggeration": 0.45,
@@ -50,8 +51,9 @@ QUALITY_PROFILES: Dict[str, Dict[str, Any]] = {
         "true_peak_db": -3.5,
         "lra": 6,
         "max_chars_per_chunk": 440,
-        "max_sentences_per_chunk": 2,
-        "pause_between_chunks_ms": 320,
+        "max_sentences_per_chunk": 1,
+        "pause_between_chunks_ms": 1000,
+        "edge_padding_ms": 1000,
         "kokoro_speed": 0.86,
         "chatterbox_temperature": 0.72,
         "chatterbox_exaggeration": 0.38,
@@ -63,12 +65,35 @@ QUALITY_PROFILES: Dict[str, Dict[str, Any]] = {
         "lra": 8,
         "max_chars_per_chunk": 380,
         "max_sentences_per_chunk": 1,
-        "pause_between_chunks_ms": 380,
+        "pause_between_chunks_ms": 1000,
+        "edge_padding_ms": 1000,
         "kokoro_speed": 0.84,
         "chatterbox_temperature": 0.82,
         "chatterbox_exaggeration": 0.58,
         "chatterbox_cfg_weight": 0.38,
     },
+}
+VOICE_LIBRARY: Dict[str, Dict[str, Any]] = {
+    "aman-warm-analyst": {"name": "Aman", "gender": "male", "kokoro_voice": "am_michael", "espeak": {"voice": "en-in+m3", "speed": "148", "pitch": "46", "amplitude": "142"}},
+    "rishi-clear-guide": {"name": "Rishi", "gender": "male", "kokoro_voice": "am_adam", "espeak": {"voice": "en-in+m2", "speed": "146", "pitch": "44", "amplitude": "142"}},
+    "daniel-calm-british": {"name": "Daniel", "gender": "male", "kokoro_voice": "bm_daniel", "espeak": {"voice": "en-gb+m3", "speed": "146", "pitch": "43", "amplitude": "140"}},
+    "reed-bright-teacher": {"name": "Reed", "gender": "male", "kokoro_voice": "am_adam", "espeak": {"voice": "en-in+m2", "speed": "146", "pitch": "44", "amplitude": "142"}},
+    "eddy-casual-host": {"name": "Eddy", "gender": "male", "kokoro_voice": "am_adam", "espeak": {"voice": "en-in+m2", "speed": "146", "pitch": "44", "amplitude": "142"}},
+    "rocko-energetic-host": {"name": "Rocko", "gender": "male", "kokoro_voice": "am_adam", "espeak": {"voice": "en-us+m5", "speed": "152", "pitch": "52", "amplitude": "140"}},
+    "grandpa-wise-narrator": {"name": "Grandpa", "gender": "male", "kokoro_voice": "am_michael", "espeak": {"voice": "en-us+m1", "speed": "138", "pitch": "38", "amplitude": "138"}},
+    "oliver-uk-commentator": {"name": "Oliver", "gender": "male", "kokoro_voice": "bm_daniel", "espeak": {"voice": "en-gb+m2", "speed": "148", "pitch": "45", "amplitude": "137"}},
+    "rowan-uk-analyst": {"name": "Rowan", "gender": "male", "kokoro_voice": "bm_daniel", "espeak": {"voice": "en-gb+m3", "speed": "149", "pitch": "47", "amplitude": "138"}},
+    "roman-uk-host": {"name": "Roman", "gender": "male", "kokoro_voice": "am_adam", "espeak": {"voice": "en-gb+m4", "speed": "150", "pitch": "50", "amplitude": "139"}},
+    "samantha-warm-cohost": {"name": "Samantha", "gender": "female", "kokoro_voice": "af_sarah", "espeak": {"voice": "en-us+f3", "speed": "146", "pitch": "58", "amplitude": "136"}},
+    "tara-bright-indian": {"name": "Tara", "gender": "female", "kokoro_voice": "af_bella", "espeak": {"voice": "en-in+f3", "speed": "146", "pitch": "59", "amplitude": "136"}},
+    "flo-friendly-guide": {"name": "Flo", "gender": "female", "kokoro_voice": "af_bella", "espeak": {"voice": "en-us+f4", "speed": "148", "pitch": "61", "amplitude": "135"}},
+    "sandy-calm-educator": {"name": "Sandy", "gender": "female", "kokoro_voice": "af_sarah", "espeak": {"voice": "en-us+f2", "speed": "144", "pitch": "57", "amplitude": "136"}},
+    "shelley-story-host": {"name": "Shelley", "gender": "female", "kokoro_voice": "af_sarah", "espeak": {"voice": "en-us+f5", "speed": "143", "pitch": "60", "amplitude": "136"}},
+    "grandma-reflective-narrator": {"name": "Grandma", "gender": "female", "kokoro_voice": "af_bella", "espeak": {"voice": "en-us+f1", "speed": "136", "pitch": "52", "amplitude": "134"}},
+    "karen-australian-guide": {"name": "Karen", "gender": "female", "kokoro_voice": "af_bella", "espeak": {"voice": "en-au+f3", "speed": "145", "pitch": "57", "amplitude": "136"}},
+    "moira-irish-storyteller": {"name": "Moira", "gender": "female", "kokoro_voice": "af_sarah", "espeak": {"voice": "en-us+f3", "speed": "144", "pitch": "57", "amplitude": "136"}},
+    "tessa-global-host": {"name": "Tessa", "gender": "female", "kokoro_voice": "af_bella", "espeak": {"voice": "en+f3", "speed": "144", "pitch": "56", "amplitude": "136"}},
+    "fiona-british-guide": {"name": "Fiona", "gender": "female", "kokoro_voice": "af_sarah", "espeak": {"voice": "en-gb+f2", "speed": "148", "pitch": "57", "amplitude": "136"}},
 }
 _kokoro_pipelines: Dict[str, Any] = {}
 _chatterbox_models: Dict[str, Any] = {}
@@ -280,24 +305,33 @@ def silence_wav_bytes(duration_ms: int, reference_segment: bytes) -> bytes:
     return output.getvalue()
 
 
-def interleave_silence(segments: List[bytes], silence_ms: int) -> List[bytes]:
-    if silence_ms <= 0 or len(segments) <= 1:
+def interleave_silence(segments: List[bytes], silence_ms: int, edge_silence_ms: int = 0) -> List[bytes]:
+    if not segments:
         return segments
+    if silence_ms <= 0 and edge_silence_ms <= 0:
+        return segments
+    edge_silence = silence_wav_bytes(edge_silence_ms, segments[0]) if edge_silence_ms > 0 else b""
+    if silence_ms <= 0 or len(segments) <= 1:
+        return ([edge_silence] if edge_silence else []) + segments + ([edge_silence] if edge_silence else [])
     silence = silence_wav_bytes(silence_ms, segments[0])
-    if not silence:
+    if not silence and not edge_silence:
         return segments
     interleaved = []
+    if edge_silence:
+        interleaved.append(edge_silence)
     for index, segment in enumerate(segments):
         if index:
             interleaved.append(silence)
         interleaved.append(segment)
+    if edge_silence:
+        interleaved.append(edge_silence)
     return interleaved
 
 
-def stitch_wav_segments(segments: List[bytes], silence_ms: int = 0) -> bytes:
+def stitch_wav_segments(segments: List[bytes], silence_ms: int = 0, edge_silence_ms: int = 0) -> bytes:
     if not segments:
         raise RuntimeError("No audio segments were generated")
-    segments = interleave_silence(segments, silence_ms)
+    segments = interleave_silence(segments, silence_ms, edge_silence_ms=edge_silence_ms)
     if len(segments) == 1:
         return segments[0]
 
@@ -385,6 +419,7 @@ class VoiceTurn(BaseModel):
     speaker: str = "Host"
     voice_role: Literal["host", "guest", "narrator"] = "host"
     text: str
+    voice_id: Optional[str] = ""
 
 
 class RenderRequest(BaseModel):
@@ -426,7 +461,7 @@ def expand_turns(req: RenderRequest) -> List[VoiceTurn]:
     expanded = []
     for turn in request_turns(req):
         for part in split_text(turn.text, max_chars, max_sentences=max_sentences):
-            expanded.append(VoiceTurn(speaker=turn.speaker, voice_role=turn.voice_role, text=part))
+            expanded.append(VoiceTurn(speaker=turn.speaker, voice_role=turn.voice_role, text=part, voice_id=turn.voice_id or ""))
     return expanded
 
 
@@ -447,6 +482,16 @@ def kokoro_voice(role: str) -> str:
     return os.environ.get(f"AUDIORAQ_TTS_KOKORO_VOICE_{role.upper()}", defaults[role]).strip() or defaults[role]
 
 
+def voice_profile(voice_id: str) -> Dict[str, Any]:
+    return VOICE_LIBRARY.get((voice_id or "").strip(), {})
+
+
+def voice_kokoro_name(turn: VoiceTurn, role: str) -> str:
+    profile = voice_profile(turn.voice_id or "")
+    configured = os.environ.get(f"AUDIORAQ_TTS_KOKORO_VOICE_ID_{(turn.voice_id or '').upper().replace('-', '_')}", "").strip()
+    return configured or str(profile.get("kokoro_voice") or kokoro_voice(role))
+
+
 def get_kokoro_pipeline(lang_code: str):
     if lang_code not in _kokoro_pipelines:
         from kokoro import KPipeline
@@ -465,7 +510,7 @@ def render_kokoro(req: RenderRequest) -> RenderedAudio:
     for turn in expand_turns(req):
         role = normalize_role(turn.voice_role)
         text = normalize_text(turn.text)
-        voice = kokoro_voice(role)
+        voice = voice_kokoro_name(turn, role)
         try:
             generator = pipeline(text, voice=voice, speed=speed)
         except TypeError:
@@ -473,7 +518,11 @@ def render_kokoro(req: RenderRequest) -> RenderedAudio:
         for item in generator:
             segments.append(samples_to_wav_bytes(extract_generated_audio(item), 24000))
 
-    stitched = stitch_wav_segments(segments, silence_ms=int(settings.get("pause_between_chunks_ms", 260)))
+    stitched = stitch_wav_segments(
+        segments,
+        silence_ms=int(settings.get("pause_between_chunks_ms", 1000)),
+        edge_silence_ms=int(settings.get("edge_padding_ms", 1000)),
+    )
     output_format = req.format or "wav"
     target_loudness = req.target_loudness_lufs or float(settings["target_loudness_lufs"])
     mastered = postprocess_audio(
@@ -560,7 +609,11 @@ def render_chatterbox(req: RenderRequest) -> RenderedAudio:
             audio = model.generate(text, **minimal_kwargs)
         segments.append(samples_to_wav_bytes(audio, int(getattr(model, "sr", 24000))))
 
-    stitched = stitch_wav_segments(segments, silence_ms=int(settings.get("pause_between_chunks_ms", 260)))
+    stitched = stitch_wav_segments(
+        segments,
+        silence_ms=int(settings.get("pause_between_chunks_ms", 1000)),
+        edge_silence_ms=int(settings.get("edge_padding_ms", 1000)),
+    )
     output_format = req.format or "wav"
     target_loudness = req.target_loudness_lufs or float(settings["target_loudness_lufs"])
     mastered = postprocess_audio(
@@ -595,6 +648,20 @@ def espeak_config(role: str) -> Dict[str, str]:
     }
 
 
+def turn_espeak_config(turn: VoiceTurn, role: str) -> Dict[str, str]:
+    profile = voice_profile(turn.voice_id or "")
+    profile_config = profile.get("espeak") if profile else None
+    if not isinstance(profile_config, dict):
+        return espeak_config(role)
+    role_config = espeak_config(role)
+    return {
+        "voice": str(profile_config.get("voice") or role_config["voice"]),
+        "speed": str(profile_config.get("speed") or role_config["speed"]),
+        "pitch": str(profile_config.get("pitch") or role_config["pitch"]),
+        "amplitude": str(profile_config.get("amplitude") or role_config["amplitude"]),
+    }
+
+
 def render_espeak(req: RenderRequest) -> RenderedAudio:
     settings = quality_profile_settings(req.quality_profile)
     renderer = shutil.which("espeak-ng") or shutil.which("espeak")
@@ -606,7 +673,7 @@ def render_espeak(req: RenderRequest) -> RenderedAudio:
         temp_path = Path(temp_dir)
         for index, turn in enumerate(expand_turns(req)):
             role = normalize_role(turn.voice_role)
-            config = espeak_config(role)
+            config = turn_espeak_config(turn, role)
             script_path = temp_path / f"turn-{index:03d}.txt"
             output_path = temp_path / f"turn-{index:03d}.wav"
             script_path.write_text(normalize_text(turn.text, keep_stage_tags=False), encoding="utf-8")
@@ -630,7 +697,11 @@ def render_espeak(req: RenderRequest) -> RenderedAudio:
                 raise RuntimeError(result.stderr or result.stdout or "espeak rendering failed")
             segments.append(output_path.read_bytes())
 
-    stitched = stitch_wav_segments(segments, silence_ms=int(settings.get("pause_between_chunks_ms", 260)))
+    stitched = stitch_wav_segments(
+        segments,
+        silence_ms=int(settings.get("pause_between_chunks_ms", 1000)),
+        edge_silence_ms=int(settings.get("edge_padding_ms", 1000)),
+    )
     output_format = req.format or "wav"
     target_loudness = req.target_loudness_lufs or float(settings["target_loudness_lufs"])
     mastered = postprocess_audio(
@@ -683,6 +754,8 @@ async def status():
         "engine_order": engine_order(RenderRequest(script_text="status")),
         "allow_espeak_fallback": env_bool("AUDIORAQ_TTS_ALLOW_ESPEAK_FALLBACK", True),
         "quality_profiles": sorted(QUALITY_PROFILES.keys()),
+        "voice_library_count": len(VOICE_LIBRARY),
+        "pacing": {"sentence_gap_ms": 1000, "edge_padding_ms": 1000},
         "tools": available_tools(),
         "kokoro_loaded": bool(_kokoro_pipelines),
         "chatterbox_loaded": bool(_chatterbox_models),

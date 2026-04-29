@@ -9,7 +9,7 @@ from fastapi import APIRouter, FastAPI, File, Form, HTTPException, Request, Resp
 from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from motor.motor_asyncio import AsyncIOMotorClient
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from starlette.middleware.cors import CORSMiddleware
 
 from array import array
@@ -19,6 +19,7 @@ import base64
 import email.utils
 import hashlib
 import io
+import ipaddress
 import json
 import jwt
 import logging
@@ -29,6 +30,7 @@ import re
 import requests
 import secrets
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -42,7 +44,7 @@ import zipfile
 from bson import ObjectId
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Iterator, List, Literal, Optional, Set, Tuple
-from urllib.parse import quote, urlencode, urlparse
+from urllib.parse import quote, urlencode, urljoin, urlparse
 
 from cryptography.fernet import Fernet, InvalidToken
 from backend.voice_quality import (
@@ -167,8 +169,8 @@ AGENT2_RLAIF_POLICY = [
 AI_AUDIO_VOICE_ROLES = {"host", "guest", "narrator"}
 AI_AUDIO_DISCLOSURE = "This episode includes AI-generated voice audio."
 PROOF_STUDIO_LOCAL_FILTER = "highpass=f=80,lowpass=f=12000,loudnorm=I=-16:TP=-1.5:LRA=11"
-PROOF_STUDIO_APPLE_GAP_SECONDS = 0.45
-PROOF_STUDIO_APPLE_NARRATIVE_GAP_SECONDS = 0.75
+PROOF_STUDIO_APPLE_GAP_SECONDS = 1.0
+PROOF_STUDIO_APPLE_NARRATIVE_GAP_SECONDS = 1.0
 PROOF_STUDIO_APPLE_TARGET_PEAK_DBFS = -4.5
 PROOF_STUDIO_APPLE_RATES = {
     "host": 100,
@@ -185,6 +187,363 @@ PROOF_STUDIO_APPLE_VOICES = {
     "guest": ["Samantha", "Ava", "Victoria"],
     "narrator": ["Samantha", "Aman", "Alex"],
 }
+AI_PODCAST_VOICE_LIBRARY: List[Dict[str, Any]] = [
+    {
+        "id": "aman-warm-analyst",
+        "name": "Aman",
+        "gender": "male",
+        "style": "warm analyst",
+        "accent": "Indian English",
+        "description": "Warm, steady, and trustworthy for education or finance.",
+        "suggested_roles": ["host", "narrator"],
+        "apple_voices": ["Aman", "Aman (English (India))"],
+        "kokoro_voice": "am_michael",
+        "openai_voice": "ash",
+        "espeak": {"voice": "en-in+m3", "speed": "148", "pitch": "46", "amplitude": "142"},
+        "rate_wpm": 110,
+    },
+    {
+        "id": "rishi-clear-guide",
+        "name": "Rishi",
+        "gender": "male",
+        "style": "clear guide",
+        "accent": "Indian English",
+        "description": "Crisp and composed for explainers and founder conversations.",
+        "suggested_roles": ["host", "guest"],
+        "apple_voices": ["Rishi"],
+        "kokoro_voice": "am_adam",
+        "openai_voice": "sage",
+        "espeak": {"voice": "en-in+m2", "speed": "146", "pitch": "44", "amplitude": "142"},
+        "rate_wpm": 112,
+    },
+    {
+        "id": "daniel-calm-british",
+        "name": "Daniel",
+        "gender": "male",
+        "style": "calm British host",
+        "accent": "American English",
+        "description": "Polished and calm for law, current affairs, and long-form analysis.",
+        "suggested_roles": ["host", "narrator"],
+        "apple_voices": ["Daniel"],
+        "kokoro_voice": "bm_daniel",
+        "openai_voice": "onyx",
+        "espeak": {"voice": "en-gb+m3", "speed": "146", "pitch": "43", "amplitude": "140"},
+        "rate_wpm": 112,
+    },
+    {
+        "id": "reed-bright-teacher",
+        "name": "Reed",
+        "gender": "male",
+        "style": "clear teacher",
+        "accent": "warm Indian English",
+        "description": "Friendly and articulate for practical tutorials.",
+        "suggested_roles": ["host", "guest"],
+        "apple_voices": ["Rishi"],
+        "kokoro_voice": "am_michael",
+        "openai_voice": "echo",
+        "espeak": {"voice": "en-in+m2", "speed": "146", "pitch": "44", "amplitude": "142"},
+        "rate_wpm": 112,
+    },
+    {
+        "id": "eddy-casual-host",
+        "name": "Eddy",
+        "gender": "male",
+        "style": "casual host",
+        "accent": "warm Indian English",
+        "description": "Conversational and approachable for creator-led shows.",
+        "suggested_roles": ["host", "guest"],
+        "apple_voices": ["Rishi"],
+        "kokoro_voice": "am_adam",
+        "openai_voice": "verse",
+        "espeak": {"voice": "en-in+m2", "speed": "146", "pitch": "44", "amplitude": "142"},
+        "rate_wpm": 112,
+    },
+    {
+        "id": "rocko-energetic-host",
+        "name": "Rocko",
+        "gender": "male",
+        "style": "energetic host",
+        "accent": "American English",
+        "description": "More energetic without rushing; useful for technology and startup topics.",
+        "suggested_roles": ["host", "guest"],
+        "apple_voices": ["Rocko (English (US))", "Rocko"],
+        "kokoro_voice": "am_adam",
+        "openai_voice": "ash",
+        "espeak": {"voice": "en-us+m5", "speed": "152", "pitch": "52", "amplitude": "140"},
+        "rate_wpm": 220,
+    },
+    {
+        "id": "grandpa-wise-narrator",
+        "name": "Grandpa",
+        "gender": "male",
+        "style": "wise narrator",
+        "accent": "American English",
+        "description": "Grounded and patient for reflective storytelling.",
+        "suggested_roles": ["narrator", "guest"],
+        "apple_voices": ["Grandpa (English (US))", "Grandpa"],
+        "kokoro_voice": "am_michael",
+        "openai_voice": "onyx",
+        "espeak": {"voice": "en-us+m1", "speed": "138", "pitch": "38", "amplitude": "138"},
+        "rate_wpm": 152,
+    },
+    {
+        "id": "oliver-uk-commentator",
+        "name": "Oliver",
+        "gender": "male",
+        "style": "UK commentator",
+        "accent": "British English",
+        "description": "Composed and conversational for business and current-affairs contrast.",
+        "suggested_roles": ["guest", "narrator"],
+        "apple_voices": ["Eddy (English (UK))"],
+        "kokoro_voice": "bm_daniel",
+        "openai_voice": "echo",
+        "espeak": {"voice": "en-gb+m2", "speed": "148", "pitch": "45", "amplitude": "137"},
+        "rate_wpm": 220,
+    },
+    {
+        "id": "rowan-uk-analyst",
+        "name": "Rowan",
+        "gender": "male",
+        "style": "UK analyst",
+        "accent": "British English",
+        "description": "Crisp, slightly brighter analyst voice for explainers.",
+        "suggested_roles": ["host", "guest"],
+        "apple_voices": ["Reed (English (UK))"],
+        "kokoro_voice": "bm_daniel",
+        "openai_voice": "sage",
+        "espeak": {"voice": "en-gb+m3", "speed": "149", "pitch": "47", "amplitude": "138"},
+        "rate_wpm": 162,
+    },
+    {
+        "id": "roman-uk-host",
+        "name": "Roman",
+        "gender": "male",
+        "style": "energetic host",
+        "accent": "American English",
+        "description": "Energetic but controlled for technology and startup discussions.",
+        "suggested_roles": ["host", "guest"],
+        "apple_voices": ["Rocko (English (US))", "Rocko"],
+        "kokoro_voice": "am_adam",
+        "openai_voice": "verse",
+        "espeak": {"voice": "en-gb+m4", "speed": "150", "pitch": "50", "amplitude": "139"},
+        "rate_wpm": 220,
+    },
+    {
+        "id": "samantha-warm-cohost",
+        "name": "Samantha",
+        "gender": "female",
+        "style": "warm co-host",
+        "accent": "American English",
+        "description": "Warm, clear, and easy to stay with for long listening.",
+        "suggested_roles": ["host", "guest", "narrator"],
+        "apple_voices": ["Samantha"],
+        "kokoro_voice": "af_sarah",
+        "openai_voice": "nova",
+        "espeak": {"voice": "en-us+f3", "speed": "146", "pitch": "58", "amplitude": "136"},
+        "rate_wpm": 112,
+    },
+    {
+        "id": "tara-bright-indian",
+        "name": "Tara",
+        "gender": "female",
+        "style": "bright Indian host",
+        "accent": "Indian English",
+        "description": "Bright and precise for education, health, and creator shows.",
+        "suggested_roles": ["host", "guest"],
+        "apple_voices": ["Samantha"],
+        "kokoro_voice": "af_bella",
+        "openai_voice": "coral",
+        "espeak": {"voice": "en-in+f3", "speed": "146", "pitch": "59", "amplitude": "136"},
+        "rate_wpm": 112,
+    },
+    {
+        "id": "flo-friendly-guide",
+        "name": "Flo",
+        "gender": "female",
+        "style": "friendly guide",
+        "accent": "American English",
+        "description": "Friendly and modern for onboarding-style episodes.",
+        "suggested_roles": ["host", "guest"],
+        "apple_voices": ["Tara"],
+        "kokoro_voice": "af_bella",
+        "openai_voice": "shimmer",
+        "espeak": {"voice": "en-us+f4", "speed": "148", "pitch": "61", "amplitude": "135"},
+        "rate_wpm": 112,
+    },
+    {
+        "id": "sandy-calm-educator",
+        "name": "Sandy",
+        "gender": "female",
+        "style": "calm educator",
+        "accent": "American English",
+        "description": "Clear, relaxed, and teacherly for explainers.",
+        "suggested_roles": ["host", "narrator"],
+        "apple_voices": ["Samantha"],
+        "kokoro_voice": "af_sarah",
+        "openai_voice": "alloy",
+        "espeak": {"voice": "en-us+f2", "speed": "144", "pitch": "57", "amplitude": "136"},
+        "rate_wpm": 112,
+    },
+    {
+        "id": "shelley-story-host",
+        "name": "Shelley",
+        "gender": "female",
+        "style": "story host",
+        "accent": "American English",
+        "description": "Expressive but controlled for narrative shows.",
+        "suggested_roles": ["host", "narrator"],
+        "apple_voices": ["Samantha"],
+        "kokoro_voice": "af_sarah",
+        "openai_voice": "nova",
+        "espeak": {"voice": "en-us+f5", "speed": "143", "pitch": "60", "amplitude": "136"},
+        "rate_wpm": 112,
+    },
+    {
+        "id": "grandma-reflective-narrator",
+        "name": "Grandma",
+        "gender": "female",
+        "style": "reflective narrator",
+        "accent": "American English",
+        "description": "Patient and intimate for reflective narration.",
+        "suggested_roles": ["narrator", "guest"],
+        "apple_voices": ["Samantha"],
+        "kokoro_voice": "af_bella",
+        "openai_voice": "shimmer",
+        "espeak": {"voice": "en-us+f1", "speed": "136", "pitch": "52", "amplitude": "134"},
+        "rate_wpm": 112,
+    },
+    {
+        "id": "karen-australian-guide",
+        "name": "Karen",
+        "gender": "female",
+        "style": "Australian guide",
+        "accent": "Australian English",
+        "description": "Clean and composed for global business and environment shows.",
+        "suggested_roles": ["host", "guest"],
+        "apple_voices": ["Karen"],
+        "kokoro_voice": "af_bella",
+        "openai_voice": "coral",
+        "espeak": {"voice": "en-au+f3", "speed": "145", "pitch": "57", "amplitude": "136"},
+        "rate_wpm": 112,
+    },
+    {
+        "id": "moira-irish-storyteller",
+        "name": "Moira",
+        "gender": "female",
+        "style": "reflective storyteller",
+        "accent": "warm neutral English",
+        "description": "Textured and warm for story-led episodes.",
+        "suggested_roles": ["narrator", "guest"],
+        "apple_voices": ["Samantha"],
+        "kokoro_voice": "af_sarah",
+        "openai_voice": "fable",
+        "espeak": {"voice": "en-us+f3", "speed": "144", "pitch": "57", "amplitude": "136"},
+        "rate_wpm": 112,
+    },
+    {
+        "id": "tessa-global-host",
+        "name": "Tessa",
+        "gender": "female",
+        "style": "global host",
+        "accent": "South African English",
+        "description": "Distinctive and articulate for international topics.",
+        "suggested_roles": ["host", "guest"],
+        "apple_voices": ["Tessa"],
+        "kokoro_voice": "af_bella",
+        "openai_voice": "shimmer",
+        "espeak": {"voice": "en+f3", "speed": "144", "pitch": "56", "amplitude": "136"},
+        "rate_wpm": 112,
+    },
+    {
+        "id": "fiona-british-guide",
+        "name": "Fiona",
+        "gender": "female",
+        "style": "British guide",
+        "accent": "British English",
+        "description": "Friendly and precise for educational recaps and guided explainers.",
+        "suggested_roles": ["host", "guest", "narrator"],
+        "apple_voices": ["Samantha"],
+        "kokoro_voice": "af_sarah",
+        "openai_voice": "alloy",
+        "espeak": {"voice": "en-gb+f2", "speed": "148", "pitch": "57", "amplitude": "136"},
+        "rate_wpm": 112,
+    },
+]
+AI_PODCAST_VOICE_BY_ID = {voice["id"]: voice for voice in AI_PODCAST_VOICE_LIBRARY}
+DEFAULT_AI_PODCAST_VOICE_IDS = ["aman-warm-analyst", "samantha-warm-cohost", "daniel-calm-british"]
+
+
+def public_ai_podcast_voice(voice: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "id": voice["id"],
+        "name": voice["name"],
+        "gender": voice["gender"],
+        "style": voice["style"],
+        "accent": voice["accent"],
+        "description": voice["description"],
+        "suggested_roles": voice.get("suggested_roles", []),
+    }
+
+
+def sanitize_ai_voice_ids(value: Any, limit: int = 4) -> List[str]:
+    values = value if isinstance(value, list) else []
+    selected: List[str] = []
+    for item in values:
+        voice_id = str(item or "").strip()
+        if voice_id in AI_PODCAST_VOICE_BY_ID and voice_id not in selected:
+            selected.append(voice_id)
+        if len(selected) >= limit:
+            break
+    return selected or DEFAULT_AI_PODCAST_VOICE_IDS[: min(limit, len(DEFAULT_AI_PODCAST_VOICE_IDS))]
+
+
+def selected_ai_voice_ids_from_intake(intake: Optional[Dict[str, Any]], limit: int = 4) -> List[str]:
+    voice_casting = (intake or {}).get("voiceCasting") or {}
+    return sanitize_ai_voice_ids(voice_casting.get("selectedVoiceIds"), limit=limit)
+
+
+def ai_voice_profile_for_turn(turn: Dict[str, str], index: int, selected_voice_ids: List[str], speaker_voice_map: Dict[str, str]) -> Dict[str, Any]:
+    explicit_voice_id = str(turn.get("voice_id") or "").strip()
+    if explicit_voice_id in AI_PODCAST_VOICE_BY_ID:
+        return AI_PODCAST_VOICE_BY_ID[explicit_voice_id]
+
+    speaker_key = str(turn.get("speaker") or turn.get("voice_role") or f"speaker-{index}").strip().lower()
+    if speaker_key not in speaker_voice_map:
+        speaker_voice_map[speaker_key] = selected_voice_ids[len(speaker_voice_map) % len(selected_voice_ids)]
+    return AI_PODCAST_VOICE_BY_ID[speaker_voice_map[speaker_key]]
+
+
+def apply_ai_voice_cast_to_turns(turns: List[Dict[str, str]], intake: Optional[Dict[str, Any]]) -> List[Dict[str, str]]:
+    selected_voice_ids = selected_ai_voice_ids_from_intake(intake, limit=4)
+    speaker_voice_map: Dict[str, str] = {}
+    voiced_turns = []
+    for index, turn in enumerate(turns):
+        profile = ai_voice_profile_for_turn(turn, index, selected_voice_ids, speaker_voice_map)
+        voiced_turns.append(
+            {
+                **turn,
+                "voice_id": profile["id"],
+                "voice_name": profile["name"],
+                "voice_gender": profile["gender"],
+                "voice_style": profile["style"],
+            }
+        )
+    return voiced_turns
+
+
+def ai_audio_sentence_gap_seconds() -> float:
+    return max(0.0, parse_float_env("AI_AUDIO_TTS_SENTENCE_GAP_SECONDS", 1.0))
+
+
+def ai_audio_edge_padding_seconds() -> float:
+    return max(0.0, parse_float_env("AI_AUDIO_TTS_EDGE_PADDING_SECONDS", 1.0))
+
+
+def tts_sentence_parts(text: str) -> List[str]:
+    normalized = normalize_local_tts_text(text)
+    return [part.strip() for part in re.split(r"(?<=[.!?])\s+", normalized) if part.strip()]
+
+
 AI_STUDIO_STAGES = [
     "brief",
     "research",
@@ -246,17 +605,34 @@ CURATED_TOPIC_CATEGORIES = [
     "education",
     "entertainment",
 ]
+CURATED_RECOMMENDED_EPISODE_TITLE_SNIPPETS = [
+    "A decision framework for on-device AI",
+    "A calm explainer on cyber incidents",
+    "What most listeners misunderstand about cosmic dawn",
+    "What most listeners misunderstand about Vietnam supply chains",
+    "What most listeners misunderstand about workplace AI",
+    "What most listeners misunderstand about supply chains",
+    "Grid Hardening",
+    "The practical beginner's guide to AI agents at work",
+    "How migration changes behavior in the real world",
+    "A decision framework for sanctions",
+]
 
 
 def now_iso():
     return datetime.now(timezone.utc).isoformat()
 
 
-def parse_int_env(name: str, default: int) -> int:
+def parse_int_env(name: str, default: int, minimum: Optional[int] = None, maximum: Optional[int] = None) -> int:
     try:
-        return int(os.environ.get(name, default))
+        value = int(os.environ.get(name, default))
     except (TypeError, ValueError):
-        return default
+        value = default
+    if minimum is not None:
+        value = max(minimum, value)
+    if maximum is not None:
+        value = min(maximum, value)
+    return value
 
 
 def parse_bool_env(name: str, default: bool = False) -> bool:
@@ -735,6 +1111,188 @@ def parse_bool(value, default=False):
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def is_production_env() -> bool:
+    explicit_env = (os.environ.get("APP_ENV") or os.environ.get("ENVIRONMENT") or "").strip().lower()
+    if explicit_env:
+        return explicit_env in {"prod", "production"}
+    public_origin = (os.environ.get("PUBLIC_APP_ORIGIN") or "").strip().lower()
+    return public_origin.startswith("https://") or parse_bool(os.environ.get("COOKIE_SECURE"), default=False)
+
+
+def should_return_auth_tokens() -> bool:
+    configured = os.environ.get("AUTH_RETURN_BEARER_TOKENS")
+    if configured is not None:
+        return parse_bool(configured, default=False)
+    return not is_production_env()
+
+
+def attach_auth_token_payload(payload: Dict[str, Any], access_token: str) -> Dict[str, Any]:
+    if should_return_auth_tokens():
+        payload["access_token"] = access_token
+    return payload
+
+
+def validate_runtime_security() -> None:
+    production = is_production_env()
+    jwt_secret = (os.environ.get("JWT_SECRET") or "").strip()
+    weak_jwt_values = {"", "secret", "changeme", "replace-with-a-long-random-secret", "dev-secret"}
+    if jwt_secret.lower() in weak_jwt_values or len(jwt_secret) < 32:
+        message = "JWT_SECRET must be a unique high-entropy value of at least 32 characters."
+        if production:
+            raise RuntimeError(message)
+        logger.warning(message)
+
+    admin_password = (os.environ.get("ADMIN_PASSWORD") or "").strip()
+    weak_admin_values = {"", "admin", "admin123", "password", "test123", "replace-with-a-strong-admin-password"}
+    if admin_password.lower() in weak_admin_values or len(admin_password) < 12:
+        message = "ADMIN_PASSWORD must be explicitly configured with a strong password before production launch."
+        if production:
+            raise RuntimeError(message)
+        logger.warning(message)
+
+
+def get_admin_password_for_seed() -> str:
+    admin_password = (os.environ.get("ADMIN_PASSWORD") or "").strip()
+    if admin_password:
+        return admin_password
+    if is_production_env():
+        raise RuntimeError("ADMIN_PASSWORD is required in production")
+    return "admin123"
+
+
+def write_test_credentials_if_enabled(admin_email: str, admin_password: str) -> None:
+    if not parse_bool(os.environ.get("WRITE_TEST_CREDENTIALS"), default=not is_production_env()):
+        return
+    memory_dir = Path(os.environ.get("MEMORY_DIR", str(DEFAULT_MEMORY_DIR)))
+    memory_dir.mkdir(parents=True, exist_ok=True)
+    include_admin_password = parse_bool(os.environ.get("INCLUDE_ADMIN_TEST_PASSWORD"), default=False)
+    admin_password_display = admin_password if include_admin_password and not is_production_env() else "<configured in environment>"
+    with open(memory_dir / "test_credentials.md", "w", encoding="utf-8") as f:
+        f.write("# Test Credentials\n\n")
+        f.write(f"## Admin\n- Email: {admin_email}\n- Password: {admin_password_display}\n- Role: admin\n\n")
+        f.write("## Test User\n- Email: testuser@test.com\n- Password: test123\n- Role: user\n\n")
+        f.write("## Test Podcaster\n- Email: podcaster@test.com\n- Password: test123\n- Role: podcaster\n\n")
+        f.write("## Auth Endpoints\n- POST /api/auth/register\n- POST /api/auth/login\n- POST /api/auth/logout\n- GET /api/auth/me\n- POST /api/auth/refresh\n")
+
+
+def get_client_fingerprint(request: Request) -> str:
+    forwarded_for = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip()
+    client_ip = forwarded_for or (request.client.host if request.client else "unknown")
+    digest = hashlib.sha256(f"{client_ip}:{os.environ.get('JWT_SECRET', '')[:16]}".encode("utf-8")).hexdigest()
+    return digest[:32]
+
+
+def is_manual_social_connect_enabled() -> bool:
+    return parse_bool(os.environ.get("SOCIAL_MANUAL_TOKEN_CONNECT_ENABLED"), default=not is_production_env())
+
+
+def max_upload_bytes() -> int:
+    return parse_int_env("MAX_UPLOAD_BYTES", 524_288_000, minimum=1_048_576, maximum=2_147_483_648)
+
+
+def max_thumbnail_bytes() -> int:
+    return parse_int_env("MAX_THUMBNAIL_UPLOAD_BYTES", 8_388_608, minimum=65_536, maximum=52_428_800)
+
+
+def analytics_retention_seconds() -> int:
+    days = parse_int_env("ANALYTICS_EVENT_RETENTION_DAYS", 180, minimum=7, maximum=1095)
+    return days * 86400
+
+
+def validate_runtime_url(url: str, *, allow_local: bool = False) -> str:
+    candidate = (url or "").strip()
+    parsed = urlparse(candidate)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise HTTPException(status_code=400, detail="URL must be an absolute http(s) URL")
+    hostname = parsed.hostname.strip().lower()
+    try:
+        addresses = socket.getaddrinfo(hostname, parsed.port or (443 if parsed.scheme == "https" else 80), type=socket.SOCK_STREAM)
+    except socket.gaierror:
+        raise HTTPException(status_code=400, detail="URL host could not be resolved")
+    for address in addresses:
+        ip = ipaddress.ip_address(address[4][0])
+        if allow_local:
+            continue
+        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.is_reserved or ip.is_unspecified:
+            raise HTTPException(status_code=400, detail="URL points to a private or unsafe network")
+    return candidate
+
+
+def safe_external_get(url: str, *, timeout: int = 30, max_bytes: int = 5_242_880, max_redirects: int = 3) -> requests.Response:
+    current_url = validate_runtime_url(url)
+    for _ in range(max_redirects + 1):
+        response = requests.get(current_url, timeout=timeout, stream=True, allow_redirects=False)
+        if response.is_redirect or response.status_code in {301, 302, 303, 307, 308}:
+            location = response.headers.get("Location", "")
+            response.close()
+            if not location:
+                raise HTTPException(status_code=400, detail="External URL redirect was missing a destination")
+            current_url = validate_runtime_url(urljoin(current_url, location))
+            continue
+        content_length = response.headers.get("Content-Length")
+        if content_length and int(content_length) > max_bytes:
+            response.close()
+            raise HTTPException(status_code=400, detail="External URL response is too large")
+        data = bytearray()
+        for chunk in response.iter_content(chunk_size=65536):
+            if not chunk:
+                continue
+            data.extend(chunk)
+            if len(data) > max_bytes:
+                response.close()
+                raise HTTPException(status_code=400, detail="External URL response is too large")
+        response._content = bytes(data)
+        response.close()
+        return response
+    raise HTTPException(status_code=400, detail="External URL redirected too many times")
+
+
+def validate_external_redirect_url(url: str) -> str:
+    return validate_runtime_url(url)
+
+
+def safe_extension(filename: str, allowed_extensions: Set[str], default: str = "bin") -> str:
+    raw_ext = (filename or "").rsplit(".", 1)[-1].lower().strip() if "." in (filename or "") else default
+    ext = re.sub(r"[^a-z0-9]", "", raw_ext)[:12] or default
+    if ext not in allowed_extensions:
+        raise HTTPException(status_code=400, detail=f"Unsupported file extension: .{ext}")
+    return ext
+
+
+async def read_upload_limited(upload: UploadFile, max_bytes: int) -> bytes:
+    data = bytearray()
+    while True:
+        chunk = await upload.read(1024 * 1024)
+        if not chunk:
+            break
+        data.extend(chunk)
+        if len(data) > max_bytes:
+            raise HTTPException(status_code=413, detail="Uploaded file is too large")
+    return bytes(data)
+
+
+def validate_thumbnail_metadata(upload: UploadFile) -> str:
+    allowed_thumbnail_types = {"image/jpeg", "image/png", "image/webp"}
+    allowed_thumbnail_extensions = {"jpg", "jpeg", "png", "webp"}
+    content_type = (upload.content_type or "").lower().strip()
+    if content_type not in allowed_thumbnail_types:
+        raise HTTPException(status_code=400, detail="Thumbnails must be JPG, PNG, or WebP images")
+    return safe_extension(upload.filename or "", allowed_thumbnail_extensions, default="jpg")
+
+
+def validate_media_extension_matches_type(filename: str, content_type: str, is_audio_upload: bool, is_video_upload: bool) -> str:
+    audio_extensions = {"mp3", "wav", "ogg", "aac", "flac", "m4a"}
+    video_extensions = {"mp4", "webm", "mov", "avi"}
+    allowed_extensions = audio_extensions | video_extensions
+    ext = safe_extension(filename or "", allowed_extensions, default="mp3" if is_audio_upload else "mp4")
+    normalized_type = (content_type or "").lower()
+    if is_audio_upload and ext in video_extensions and normalized_type != "audio/mp4":
+        raise HTTPException(status_code=400, detail="Audio uploads must use an audio file extension")
+    if is_video_upload and ext in audio_extensions:
+        raise HTTPException(status_code=400, detail="Video uploads must use a video file extension")
+    return ext
+
+
 def get_cookie_settings(request: Optional[Request] = None):
     forwarded_proto = request.headers.get("x-forwarded-proto") if request else None
     request_scheme = request.url.scheme if request else None
@@ -1209,6 +1767,91 @@ async def try_get_current_user(request: Optional[Request]):
         if exc.status_code == 401:
             return None
         raise
+
+
+async def enforce_rate_limit(request: Request, action: str, max_attempts: int, window_seconds: int) -> None:
+    now = datetime.now(timezone.utc)
+    key = hashlib.sha256(f"{action}:{get_client_fingerprint(request)}".encode("utf-8")).hexdigest()
+    window_start = now - timedelta(seconds=window_seconds)
+    existing = await db.rate_limits.find_one({"_id": key})
+    if existing:
+        created_at = existing.get("created_at")
+        if isinstance(created_at, str):
+            try:
+                created_at = datetime.fromisoformat(created_at)
+            except ValueError:
+                created_at = None
+        if created_at and created_at > window_start:
+            attempts = int(existing.get("attempts", 0)) + 1
+            await db.rate_limits.update_one(
+                {"_id": key},
+                {"$set": {"last_attempt_at": now, "expires_at": now + timedelta(seconds=window_seconds)}, "$inc": {"attempts": 1}},
+            )
+            if attempts > max_attempts:
+                raise HTTPException(status_code=429, detail="Too many requests. Please slow down.")
+            return
+
+    await db.rate_limits.update_one(
+        {"_id": key},
+        {
+            "$set": {
+                "action": action,
+                "created_at": now,
+                "last_attempt_at": now,
+                "expires_at": now + timedelta(seconds=window_seconds),
+                "attempts": 1,
+            }
+        },
+        upsert=True,
+    )
+
+
+async def record_analytics_event(
+    event_type: str,
+    request: Optional[Request],
+    user: Optional[Dict[str, Any]],
+    podcast: Optional[Dict[str, Any]],
+    metadata: Optional[Dict[str, Any]] = None,
+) -> None:
+    if not podcast:
+        return
+    try:
+        timestamp = datetime.now(timezone.utc)
+        bucket_date = timestamp.date().isoformat()
+        user_id = user_id_str(user) if user else ""
+        episode_id = podcast.get("id", "")
+        show_id = podcast.get("show_id", "")
+        event_doc = {
+            "id": str(uuid.uuid4()),
+            "event_type": event_type,
+            "episode_id": episode_id,
+            "show_id": show_id,
+            "user_id": user_id,
+            "role": user.get("role", "guest") if user else "guest",
+            "category": podcast.get("category", DEFAULT_SHOW_CATEGORY),
+            "bucket_date": bucket_date,
+            "client_fingerprint": get_client_fingerprint(request) if request else "",
+            "metadata": metadata or {},
+            "created_at": timestamp,
+        }
+        await db.analytics_events.insert_one(event_doc)
+        await db.daily_episode_metrics.update_one(
+            {"episode_id": episode_id, "bucket_date": bucket_date},
+            {
+                "$set": {
+                    "episode_id": episode_id,
+                    "show_id": show_id,
+                    "category": podcast.get("category", DEFAULT_SHOW_CATEGORY),
+                    "bucket_date": bucket_date,
+                    "updated_at": timestamp,
+                },
+                "$inc": {f"counts.{event_type}": 1},
+                "$setOnInsert": {"created_at": timestamp},
+            },
+            upsert=True,
+        )
+    except Exception as exc:
+        logger.warning(f"Analytics event write failed: {exc}")
 
 
 def user_object_id(user) -> ObjectId:
@@ -2183,10 +2826,12 @@ def normalize_audio_script_turns(items: Any, limit: int = 48) -> List[Dict[str, 
         if isinstance(item, dict):
             speaker = str(item.get("speaker") or item.get("name") or item.get("role") or "Host").strip() or "Host"
             voice_role = str(item.get("voice_role") or item.get("voiceRole") or item.get("role") or "").strip().lower()
+            voice_id = str(item.get("voice_id") or item.get("voiceId") or "").strip()
             text = str(item.get("text") or item.get("line") or item.get("script") or "").strip()
         else:
             speaker = "Host"
             voice_role = "host"
+            voice_id = ""
             text = str(item).strip()
 
         if not text:
@@ -2202,7 +2847,11 @@ def normalize_audio_script_turns(items: Any, limit: int = 48) -> List[Dict[str, 
                 voice_role = "host"
 
         text = re.sub(r"\s+", " ", text).strip()
-        normalized.append({"speaker": speaker[:80], "voice_role": voice_role, "text": text})
+        turn = {"speaker": speaker[:80], "voice_role": voice_role, "text": text}
+        if voice_id in AI_PODCAST_VOICE_BY_ID:
+            profile = AI_PODCAST_VOICE_BY_ID[voice_id]
+            turn.update({"voice_id": profile["id"], "voice_name": profile["name"], "voice_gender": profile["gender"], "voice_style": profile["style"]})
+        normalized.append(turn)
 
     return normalized
 
@@ -3546,24 +4195,33 @@ def cap_audio_script_turns(turns: List[Dict[str, str]]) -> List[Dict[str, str]]:
 
 def split_audio_turns_for_tts(turns: List[Dict[str, str]]) -> List[Dict[str, str]]:
     max_chars = parse_int_env("AI_AUDIO_TTS_MAX_CHARS_PER_TURN", 1400)
+    max_sentences = parse_int_env("AI_AUDIO_TTS_MAX_SENTENCES_PER_TURN", 1, minimum=1, maximum=4)
     split_turns = []
     for turn in turns:
         text = (turn.get("text") or "").strip()
         if not text:
             continue
-        if len(text) <= max_chars:
-            split_turns.append(turn)
+        sentences = tts_sentence_parts(text)
+        if not sentences:
             continue
-        sentences = re.split(r"(?<=[.!?])\s+", text)
+        if len(text) <= max_chars and len(sentences) <= max_sentences:
+            split_turns.append({**turn, "text": normalize_local_tts_text(text)})
+            continue
         buffer = ""
+        sentence_count = 0
         for sentence in sentences:
             candidate = f"{buffer} {sentence}".strip()
-            if len(candidate) <= max_chars:
+            if len(candidate) <= max_chars and sentence_count < max_sentences:
                 buffer = candidate
+                sentence_count += 1
                 continue
             if buffer:
                 split_turns.append({**turn, "text": buffer})
-            buffer = sentence[:max_chars].rsplit(" ", 1)[0].strip()
+            if len(sentence) > max_chars:
+                buffer = sentence[:max_chars].rsplit(" ", 1)[0].strip()
+            else:
+                buffer = sentence
+            sentence_count = 1
         if buffer:
             split_turns.append({**turn, "text": buffer})
     return split_turns
@@ -3610,7 +4268,7 @@ def build_ai_audio_turns(
             default_speaker = "Narrator" if default_role == "narrator" else "Host"
             turns = [{"speaker": default_speaker, "voice_role": default_role, "text": paragraph} for paragraph in paragraphs]
 
-    return cap_audio_script_turns(turns)
+    return apply_ai_voice_cast_to_turns(cap_audio_script_turns(turns), intake)
 
 
 def get_ai_audio_provider_order() -> List[str]:
@@ -3675,7 +4333,96 @@ def extension_for_content_type(content_type: str) -> str:
     return "mp3"
 
 
-def stitch_audio_segments(segments: List[bytes], extension: str = "mp3") -> bytes:
+def wav_silence_bytes(duration_seconds: float, reference_segment: bytes) -> bytes:
+    sample_rate = 44100
+    channels = 1
+    sample_width = 2
+    try:
+        with wave.open(io.BytesIO(reference_segment), "rb") as wav_file:
+            sample_rate = wav_file.getframerate() or sample_rate
+            channels = wav_file.getnchannels() or channels
+            sample_width = wav_file.getsampwidth() or sample_width
+    except Exception:
+        pass
+    output = io.BytesIO()
+    with wave.open(output, "wb") as wav_file:
+        wav_file.setnchannels(channels)
+        wav_file.setsampwidth(sample_width)
+        wav_file.setframerate(sample_rate)
+        frame_count = max(1, int(sample_rate * max(0.0, duration_seconds)))
+        wav_file.writeframes(b"\x00" * frame_count * channels * sample_width)
+    return output.getvalue()
+
+
+def compressed_silence_bytes(duration_seconds: float, extension: str) -> bytes:
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        return b""
+    with tempfile.TemporaryDirectory(prefix="audioraq-tts-silence-") as temp_dir:
+        temp_path = Path(temp_dir)
+        output_path = temp_path / f"silence.{extension}"
+        codec_args = ["-acodec", "libmp3lame", "-b:a", "128k"] if extension == "mp3" else ["-acodec", "pcm_s16le"]
+        cmd = [
+            ffmpeg,
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "anullsrc=r=44100:cl=mono",
+            "-t",
+            f"{max(0.01, duration_seconds):.3f}",
+            *codec_args,
+            str(output_path),
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        if result.returncode != 0:
+            logger.warning(f"Could not generate {extension} silence: {result.stderr or result.stdout}")
+            return b""
+        return output_path.read_bytes()
+
+
+def audio_silence_segment(duration_seconds: float, extension: str, reference_segment: bytes) -> bytes:
+    if duration_seconds <= 0:
+        return b""
+    if extension == "wav":
+        return wav_silence_bytes(duration_seconds, reference_segment)
+    return compressed_silence_bytes(duration_seconds, extension)
+
+
+def apply_audio_segment_padding(
+    segments: List[bytes],
+    extension: str,
+    gap_seconds: float,
+    edge_padding_seconds: float,
+) -> List[bytes]:
+    if not segments:
+        return segments
+    silence_gap = audio_silence_segment(gap_seconds, extension, segments[0]) if gap_seconds > 0 else b""
+    silence_edge = audio_silence_segment(edge_padding_seconds, extension, segments[0]) if edge_padding_seconds > 0 else b""
+    padded = []
+    if silence_edge:
+        padded.append(silence_edge)
+    for index, segment in enumerate(segments):
+        if index and silence_gap:
+            padded.append(silence_gap)
+        padded.append(segment)
+    if silence_edge:
+        padded.append(silence_edge)
+    return padded
+
+
+def stitch_audio_segments(
+    segments: List[bytes],
+    extension: str = "mp3",
+    gap_seconds: Optional[float] = None,
+    edge_padding_seconds: Optional[float] = None,
+) -> bytes:
+    gap = ai_audio_sentence_gap_seconds() if gap_seconds is None else max(0.0, gap_seconds)
+    edge = ai_audio_edge_padding_seconds() if edge_padding_seconds is None else max(0.0, edge_padding_seconds)
+    segments = apply_audio_segment_padding(segments, extension, gap, edge)
     if len(segments) == 1:
         return segments[0]
     ffmpeg = shutil.which("ffmpeg")
@@ -3922,7 +4669,12 @@ def synthesize_apple_say_turn(text: str, output_wav: Path, voices: List[str], ra
     raise RuntimeError(f"Could not synthesize Apple proof-studio dialogue turn: {last_error}")
 
 
-def concat_wav_files_with_silence(segment_paths: List[Path], output_wav: Path, gap_seconds: float = PROOF_STUDIO_APPLE_GAP_SECONDS) -> None:
+def concat_wav_files_with_silence(
+    segment_paths: List[Path],
+    output_wav: Path,
+    gap_seconds: float = PROOF_STUDIO_APPLE_GAP_SECONDS,
+    edge_padding_seconds: float = 1.0,
+) -> None:
     if not segment_paths:
         raise RuntimeError("No Apple proof-studio audio segments were generated")
     with wave.open(str(segment_paths[0]), "rb") as first:
@@ -3932,14 +4684,21 @@ def concat_wav_files_with_silence(segment_paths: List[Path], output_wav: Path, g
         channels = first.getnchannels()
     silence_frames = int(framerate * max(0.0, gap_seconds))
     silence = b"\x00" * silence_frames * sample_width * channels
+    edge_frames = int(framerate * max(0.0, edge_padding_seconds))
+    edge_silence = b"\x00" * edge_frames * sample_width * channels
     with wave.open(str(output_wav), "wb") as out:
         out.setparams(params)
-        for segment_path in segment_paths:
+        if edge_silence:
+            out.writeframes(edge_silence)
+        for index, segment_path in enumerate(segment_paths):
             with wave.open(str(segment_path), "rb") as segment:
                 if segment.getframerate() != framerate or segment.getsampwidth() != sample_width or segment.getnchannels() != channels:
                     raise RuntimeError(f"Apple proof-studio segment format mismatch: {segment_path}")
                 out.writeframes(segment.readframes(segment.getnframes()))
-                out.writeframes(silence)
+                if index < len(segment_paths) - 1 and silence:
+                    out.writeframes(silence)
+        if edge_silence:
+            out.writeframes(edge_silence)
 
 
 def master_wav_peak_headroom(path: Path, target_peak_dbfs: float = PROOF_STUDIO_APPLE_TARGET_PEAK_DBFS) -> Dict[str, Any]:
@@ -3991,40 +4750,56 @@ def render_apple_say_proof_audio(script_text: str, turns: Optional[List[Dict[str
     ]
     narrative_mode = "narrator" in rendered_roles
     active_rates = PROOF_STUDIO_APPLE_NARRATIVE_RATES if narrative_mode else PROOF_STUDIO_APPLE_RATES
-    turn_gap_seconds = PROOF_STUDIO_APPLE_NARRATIVE_GAP_SECONDS if narrative_mode else PROOF_STUDIO_APPLE_GAP_SECONDS
+    turn_gap_seconds = ai_audio_sentence_gap_seconds()
+    edge_padding_seconds = ai_audio_edge_padding_seconds()
 
     with tempfile.TemporaryDirectory(prefix="audioraq-apple-proof-") as temp_dir:
         temp_path = Path(temp_dir)
         segments = []
         voices = {}
         timings = []
-        cursor = 0.0
+        cursor = edge_padding_seconds
         for index, turn in enumerate(rendered_turns, start=1):
             role = rendered_roles[index - 1]
-            voice_candidates = PROOF_STUDIO_APPLE_VOICES.get(role, PROOF_STUDIO_APPLE_VOICES["host"])
+            voice_profile = AI_PODCAST_VOICE_BY_ID.get(str(turn.get("voice_id") or ""))
+            voice_candidates = (
+                list(voice_profile.get("apple_voices") or []) + PROOF_STUDIO_APPLE_VOICES.get(role, PROOF_STUDIO_APPLE_VOICES["host"])
+                if voice_profile
+                else PROOF_STUDIO_APPLE_VOICES.get(role, PROOF_STUDIO_APPLE_VOICES["host"])
+            )
+            rate_wpm = int(voice_profile.get("rate_wpm") or active_rates.get(role, active_rates["host"])) if voice_profile else active_rates.get(role, active_rates["host"])
             segment_path = temp_path / f"segment-{index:03d}-{role}.wav"
             selected_voice, duration_seconds = synthesize_apple_say_turn(
                 turn.get("text") or "",
                 segment_path,
                 voice_candidates,
-                active_rates.get(role, active_rates["host"]),
+                rate_wpm,
             )
-            voices[role] = selected_voice
+            speaker_key = turn.get("speaker") or role
+            voices[speaker_key] = {
+                "voice_id": voice_profile.get("id") if voice_profile else "",
+                "display_name": voice_profile.get("name") if voice_profile else selected_voice,
+                "gender": voice_profile.get("gender") if voice_profile else "",
+                "style": voice_profile.get("style") if voice_profile else "",
+                "engine_voice": selected_voice,
+            }
             timings.append(
                 {
                     "speaker": turn.get("speaker") or role.title(),
                     "voice_role": role,
+                    "voice_id": voice_profile.get("id") if voice_profile else "",
+                    "voice_name": voice_profile.get("name") if voice_profile else selected_voice,
                     "voice": selected_voice,
                     "start": round(cursor, 3),
                     "end": round(cursor + duration_seconds, 3),
                     "duration": round(duration_seconds, 3),
                 }
             )
-            cursor += duration_seconds + turn_gap_seconds
+            cursor += duration_seconds + (turn_gap_seconds if index < len(rendered_turns) else edge_padding_seconds)
             segments.append(segment_path)
 
         output_path = temp_path / "episode.wav"
-        concat_wav_files_with_silence(segments, output_path, gap_seconds=turn_gap_seconds)
+        concat_wav_files_with_silence(segments, output_path, gap_seconds=turn_gap_seconds, edge_padding_seconds=edge_padding_seconds)
         mastering = master_wav_peak_headroom(output_path)
         data = output_path.read_bytes()
         if len(data) < 1024:
@@ -4041,8 +4816,9 @@ def render_apple_say_proof_audio(script_text: str, turns: Optional[List[Dict[str
             "timings": timings,
             "rates_wpm": active_rates,
             "turn_gap_seconds": turn_gap_seconds,
+            "edge_padding_seconds": edge_padding_seconds,
             "mastering": mastering,
-            "enhancement_profile": f"audioraq-qa-proof-dialogue+apple-system-voices+calm-podcast-rate+{turn_gap_seconds}s-turn-gaps",
+            "enhancement_profile": f"audioraq-qa-proof-dialogue+20-voice-library+calm-podcast-rate+{turn_gap_seconds}s-sentence-gaps+{edge_padding_seconds}s-edge-padding",
             "benchmark_note": "Replicates the April 11 QA proof-studio recipe using generic macOS system voices; does not clone a real person's voice.",
             "voice_profile": "apple_proof_studio",
             "extension": "wav",
@@ -4068,14 +4844,35 @@ def render_local_ai_audio(script_text: str, turns: Optional[List[Dict[str, str]]
         voices = {}
         for index, turn in enumerate(rendered_turns):
             role = turn.get("voice_role") if turn.get("voice_role") in AI_AUDIO_VOICE_ROLES else "host"
+            voice_profile = AI_PODCAST_VOICE_BY_ID.get(str(turn.get("voice_id") or ""))
             host_config = local_tts_role_config("host")
-            config = local_tts_role_config(role) if use_multivoice and turns else {
-                "voice": turn.get("voice") or host_config["voice"],
-                "speed": turn.get("speed") or host_config["speed"],
-                "pitch": turn.get("pitch") or host_config["pitch"],
-                "amplitude": turn.get("amplitude") or host_config["amplitude"],
+            if voice_profile and voice_profile.get("espeak"):
+                profile_config = voice_profile["espeak"]
+                config = {
+                    "voice": str(profile_config.get("voice") or host_config["voice"]),
+                    "speed": str(profile_config.get("speed") or host_config["speed"]),
+                    "pitch": str(profile_config.get("pitch") or host_config["pitch"]),
+                    "amplitude": str(profile_config.get("amplitude") or host_config["amplitude"]),
+                }
+            else:
+                config = (
+                    local_tts_role_config(role)
+                    if use_multivoice and turns
+                    else {
+                        "voice": turn.get("voice") or host_config["voice"],
+                        "speed": turn.get("speed") or host_config["speed"],
+                        "pitch": turn.get("pitch") or host_config["pitch"],
+                        "amplitude": turn.get("amplitude") or host_config["amplitude"],
+                    }
+                )
+            speaker_key = turn.get("speaker") or role
+            voices[speaker_key] = {
+                "voice_id": voice_profile.get("id") if voice_profile else "",
+                "display_name": voice_profile.get("name") if voice_profile else config["voice"],
+                "gender": voice_profile.get("gender") if voice_profile else "",
+                "style": voice_profile.get("style") if voice_profile else "",
+                "engine_voice": config["voice"],
             }
-            voices[role] = config["voice"]
             script_path = temp_path / f"script-{index:03d}.txt"
             output_path = temp_path / f"segment-{index:03d}.wav"
             script_path.write_text(normalize_local_tts_text(turn.get("text") or ""), encoding="utf-8")
@@ -4149,7 +4946,10 @@ def render_elevenlabs_ai_audio(turns: List[Dict[str, str]]) -> Dict[str, Any]:
         tts_inputs = []
         for turn in rendered_turns:
             voice_role = turn.get("voice_role") if turn.get("voice_role") in AI_AUDIO_VOICE_ROLES else "host"
-            tts_inputs.append({"text": turn["text"], "voice_id": active_voice_ids[voice_role]})
+            profile = AI_PODCAST_VOICE_BY_ID.get(str(turn.get("voice_id") or ""))
+            env_key = f"ELEVENLABS_VOICE_ID_{re.sub(r'[^A-Z0-9]+', '_', (profile or {}).get('id', '').upper()).strip('_')}" if profile else ""
+            selected_voice_id = os.environ.get(env_key, "").strip() if env_key else ""
+            tts_inputs.append({"text": turn["text"], "voice_id": selected_voice_id or active_voice_ids[voice_role]})
         return tts_inputs
 
     body_template = {"model_id": model_id}
@@ -4222,14 +5022,25 @@ def render_openai_ai_audio(turns: List[Dict[str, str]]) -> Dict[str, Any]:
     ).strip()
 
     segments = []
+    actual_voices: Dict[str, Any] = {}
     rendered_turns = split_audio_turns_for_tts(turns)
     if not rendered_turns:
         raise RuntimeError("no voice turns were available for OpenAI TTS")
     for turn in rendered_turns:
         voice_role = turn.get("voice_role") if turn.get("voice_role") in AI_AUDIO_VOICE_ROLES else "host"
+        voice_profile = AI_PODCAST_VOICE_BY_ID.get(str(turn.get("voice_id") or ""))
+        selected_voice = (voice_profile.get("openai_voice") if voice_profile else "") or voices[voice_role]
+        speaker_key = turn.get("speaker") or voice_role
+        actual_voices[speaker_key] = {
+            "voice_id": voice_profile.get("id") if voice_profile else "",
+            "display_name": voice_profile.get("name") if voice_profile else selected_voice,
+            "gender": voice_profile.get("gender") if voice_profile else "",
+            "style": voice_profile.get("style") if voice_profile else "",
+            "engine_voice": selected_voice,
+        }
         payload = {
             "model": model,
-            "voice": voices[voice_role],
+            "voice": selected_voice,
             "input": turn["text"],
             "response_format": response_format,
         }
@@ -4255,7 +5066,7 @@ def render_openai_ai_audio(turns: List[Dict[str, str]]) -> Dict[str, Any]:
         "provider": f"openai:{model}",
         "provider_kind": "openai",
         "model": model,
-        "voices": voices,
+        "voices": actual_voices or voices,
         "turn_count": len(rendered_turns),
         "extension": extension,
         "filename": f"ai-generated-episode.{extension}",
@@ -4273,6 +5084,10 @@ def render_local_http_ai_audio(script_text: str, turns: List[Dict[str, str]]) ->
         "target_loudness_lufs": parse_float_env("AI_AUDIO_TARGET_LUFS", -16.0),
         "format": os.environ.get("AI_AUDIO_LOCAL_TTS_FORMAT", "wav").strip().lower() or "wav",
         "quality_profile": os.environ.get("AI_AUDIO_LOCAL_TTS_PROFILE", "podcast-dialogue").strip() or "podcast-dialogue",
+        "pacing": {
+            "sentence_gap_seconds": ai_audio_sentence_gap_seconds(),
+            "edge_padding_seconds": ai_audio_edge_padding_seconds(),
+        },
     }
     response = requests.post(
         f"{base_url}/v1/render",
@@ -4909,9 +5724,10 @@ def build_ai_studio_cast(intake: Optional[Dict[str, Any]], generation: Dict[str,
         if format_name == "narrative":
             turns.append({"speaker": "Narrator", "voice_role": "narrator", "text": ""})
 
+    voiced_turns = apply_ai_voice_cast_to_turns(turns, intake)
     cast = []
     seen = set()
-    for turn in turns:
+    for turn in voiced_turns:
         role = turn.get("voice_role") if turn.get("voice_role") in AI_AUDIO_VOICE_ROLES else "host"
         speaker = (turn.get("speaker") or role.title()).strip() or role.title()
         key = f"{speaker.lower()}:{role}"
@@ -4922,6 +5738,10 @@ def build_ai_studio_cast(intake: Optional[Dict[str, Any]], generation: Dict[str,
             {
                 "speaker": speaker,
                 "voice_role": role,
+                "voice_id": turn.get("voice_id", ""),
+                "voice_name": turn.get("voice_name", ""),
+                "voice_gender": turn.get("voice_gender", ""),
+                "voice_style": turn.get("voice_style", ""),
                 "delivery": f"{tone} podcast delivery; distinct from the other speakers and never imitating a real person.",
                 "purpose": "Guide the listener" if role == "host" else "Add perspective" if role == "guest" else "Carry narrative transitions",
             }
@@ -5651,9 +6471,9 @@ def enforce_audioraq_originals_quality_gate(
 
 
 async def store_upload(upload: UploadFile, path_prefix: str, default_content_type: str):
-    ext = upload.filename.split(".")[-1] if upload.filename and "." in upload.filename else "bin"
+    ext = validate_thumbnail_metadata(upload)
     object_path = f"{APP_NAME}/{path_prefix}/{uuid.uuid4()}.{ext}"
-    data = await upload.read()
+    data = await read_upload_limited(upload, max_thumbnail_bytes())
     put_object(object_path, data, upload.content_type or default_content_type)
     return object_path, data
 
@@ -6130,6 +6950,7 @@ async def fetch_creator_analytics(user, show_id: Optional[str] = None):
 
     saved_rows = []
     progress_rows = []
+    metric_rows = []
     if episode_ids:
         saved_rows = await db.saved_podcasts.aggregate(
             [
@@ -6138,8 +6959,17 @@ async def fetch_creator_analytics(user, show_id: Optional[str] = None):
             ]
         ).to_list(len(episode_ids))
         progress_rows = await db.playback_progress.find({"podcast_id": {"$in": episode_ids}}).to_list(MAX_LIBRARY_ITEMS)
+        metric_since = (datetime.now(timezone.utc).date() - timedelta(days=30)).isoformat()
+        metric_rows = await db.daily_episode_metrics.find(
+            {"episode_id": {"$in": episode_ids}, "bucket_date": {"$gte": metric_since}}
+        ).to_list(max(len(episode_ids) * 31, 100))
 
     saved_map = {row["_id"]: row.get("saved_count", 0) for row in saved_rows}
+    metric_map: Dict[str, Dict[str, int]] = {}
+    for row in metric_rows:
+        episode_counts = metric_map.setdefault(row.get("episode_id", ""), {})
+        for key, value in (row.get("counts") or {}).items():
+            episode_counts[key] = episode_counts.get(key, 0) + int(value or 0)
     progress_map = {}
     listener_ids = set()
     for row in progress_rows:
@@ -6181,6 +7011,10 @@ async def fetch_creator_analytics(user, show_id: Optional[str] = None):
                 "show_id": episode.get("show_id", ""),
                 "show_title": episode.get("show_title", ""),
                 "play_count": episode.get("play_count", 0),
+                "last_30d_plays": metric_map.get(episode["id"], {}).get("play_started", 0),
+                "last_30d_saves": metric_map.get(episode["id"], {}).get("save", 0),
+                "last_30d_likes": metric_map.get(episode["id"], {}).get("like", 0),
+                "last_30d_ratings": metric_map.get(episode["id"], {}).get("rating", 0),
                 "saved_count": saved_map.get(episode["id"], 0),
                 "started_count": started_count,
                 "completed_count": completed_count,
@@ -6231,6 +7065,7 @@ async def fetch_creator_analytics(user, show_id: Optional[str] = None):
             "saved_count": total_saves,
             "avg_completion_rate": avg_completion_rate,
             "listener_count": len(listener_ids),
+            "analytics_storage_mode": "mongo_event_log_plus_daily_rollups",
         },
         "shows": show_analytics,
         "episodes": episode_analytics[:12],
@@ -6668,12 +7503,17 @@ class GrowthOptimizationInput(BaseModel):
     knownIssues: Optional[str] = ""
 
 
+class VoiceCastingInput(BaseModel):
+    selectedVoiceIds: List[str] = Field(default_factory=lambda: DEFAULT_AI_PODCAST_VOICE_IDS[:3])
+
+
 class AIPodcastIntake(BaseModel):
     identity: PodcastIdentityInput
     episodeIntent: EpisodeIntentInput
     contentInput: ContentInput
     toneStyle: ToneStyleInput
     growthOptimization: GrowthOptimizationInput
+    voiceCasting: VoiceCastingInput = Field(default_factory=VoiceCastingInput)
 
 
 class GenerateAIPodcastDraftRequest(BaseModel):
@@ -6732,8 +7572,36 @@ app = FastAPI()
 api_router = APIRouter(prefix="/api")
 
 
+@api_router.get("/ai-voice-library")
+async def get_ai_voice_library():
+    return {
+        "voices": [public_ai_podcast_voice(voice) for voice in AI_PODCAST_VOICE_LIBRARY],
+        "defaults": DEFAULT_AI_PODCAST_VOICE_IDS[:3],
+        "selection_limit": 4,
+        "pacing": {
+            "sentence_gap_seconds": ai_audio_sentence_gap_seconds(),
+            "start_padding_seconds": ai_audio_edge_padding_seconds(),
+            "end_padding_seconds": ai_audio_edge_padding_seconds(),
+        },
+    }
+
+
+@app.middleware("http")
+async def security_headers_middleware(request: Request, call_next):
+    response = await call_next(request)
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+    response.headers.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=()")
+    response.headers.setdefault("Cross-Origin-Opener-Policy", "same-origin")
+    if (request.headers.get("x-forwarded-proto") or request.url.scheme).lower() == "https":
+        response.headers.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains; preload")
+    return response
+
+
 @app.on_event("startup")
 async def startup():
+    validate_runtime_security()
     await db.users.create_index("email", unique=True)
     await db.users.create_index("auth_providers.google.sub", unique=True, sparse=True)
     await db.users.create_index("auth_providers.apple.sub", unique=True, sparse=True)
@@ -6782,9 +7650,21 @@ async def startup():
     await db.feedback_submissions.create_index([("created_at", -1)])
     await db.feedback_submissions.create_index([("analysis.problem_areas", 1), ("analysis.urgency", 1)])
     await db.feedback_submissions.create_index([("user_id", 1), ("created_at", -1)])
+    await db.rate_limits.create_index("expires_at", expireAfterSeconds=0)
+    await db.analytics_events.create_index("created_at", expireAfterSeconds=analytics_retention_seconds())
+    await db.analytics_events.create_index([("event_type", 1), ("created_at", -1)])
+    await db.analytics_events.create_index([("episode_id", 1), ("created_at", -1)])
+    await db.analytics_events.create_index([("user_id", 1), ("created_at", -1)])
+    await db.analytics_events.create_index([("show_id", 1), ("bucket_date", 1)])
+    await db.daily_episode_metrics.create_index([("episode_id", 1), ("bucket_date", 1)], unique=True)
+    await db.daily_episode_metrics.create_index([("show_id", 1), ("bucket_date", -1)])
+    await db.podcasts.create_index([("is_deleted", 1), ("publication_status", 1), ("moderation_status", 1), ("category", 1), ("created_at", -1)])
+    await db.podcasts.create_index([("is_deleted", 1), ("publication_status", 1), ("moderation_status", 1), ("play_count", -1), ("created_at", -1)])
+    await db.podcasts.create_index([("is_deleted", 1), ("publication_status", 1), ("moderation_status", 1), ("rating_average", -1), ("rating_count", -1)])
+    await db.podcasts.create_index([("show_id", 1), ("season_number", 1), ("episode_number", 1)])
 
     admin_email = os.environ.get("ADMIN_EMAIL", "admin@audioraq.com")
-    admin_password = os.environ.get("ADMIN_PASSWORD", "admin123")
+    admin_password = get_admin_password_for_seed()
     existing = await db.users.find_one({"email": admin_email})
     if existing is None:
         hashed = hash_password(admin_password)
@@ -6826,14 +7706,7 @@ async def shutdown():
     except Exception as e:
         logger.error(f"Storage init failed: {e}")
 
-    memory_dir = Path(os.environ.get("MEMORY_DIR", str(DEFAULT_MEMORY_DIR)))
-    memory_dir.mkdir(parents=True, exist_ok=True)
-    with open(memory_dir / "test_credentials.md", "w") as f:
-        f.write("# Test Credentials\n\n")
-        f.write(f"## Admin\n- Email: {admin_email}\n- Password: {admin_password}\n- Role: admin\n\n")
-        f.write("## Test User\n- Email: testuser@test.com\n- Password: test123\n- Role: user\n\n")
-        f.write("## Test Podcaster\n- Email: podcaster@test.com\n- Password: test123\n- Role: podcaster\n\n")
-        f.write("## Auth Endpoints\n- POST /api/auth/register\n- POST /api/auth/login\n- POST /api/auth/logout\n- GET /api/auth/me\n- POST /api/auth/refresh\n")
+    write_test_credentials_if_enabled(admin_email, admin_password)
 
 
 def build_social_display_name(email: str = "", fallback_name: str = "") -> str:
@@ -7199,8 +8072,7 @@ async def complete_social_signup(req: CompleteSocialSignupRequest, request: Requ
         refresh_token = create_refresh_token(str(existing_user["_id"]))
         set_auth_cookies(response, access_token, refresh_token, request)
         payload = await build_user_response(existing_user)
-        payload["access_token"] = access_token
-        return payload
+        return attach_auth_token_payload(payload, access_token)
 
     keywords = []
     if req.role == "podcaster" and req.podcast_description:
@@ -7240,8 +8112,7 @@ async def complete_social_signup(req: CompleteSocialSignupRequest, request: Requ
     clear_pending_social_cookie(response)
 
     payload = await build_user_response(user_doc)
-    payload["access_token"] = access_token
-    return payload
+    return attach_auth_token_payload(payload, access_token)
 
 
 @api_router.post("/auth/register")
@@ -7287,8 +8158,7 @@ async def register(req: RegisterRequest, request: Request, response: Response):
     set_auth_cookies(response, access_token, refresh_token, request)
 
     payload = await build_user_response(user_doc)
-    payload["access_token"] = access_token
-    return payload
+    return attach_auth_token_payload(payload, access_token)
 
 
 @api_router.post("/auth/login")
@@ -7327,8 +8197,7 @@ async def login(req: LoginRequest, request: Request, response: Response):
     clear_pending_social_cookie(response)
 
     payload = await build_user_response(user)
-    payload["access_token"] = access_token
-    return payload
+    return attach_auth_token_payload(payload, access_token)
 
 
 @api_router.post("/auth/logout")
@@ -7359,7 +8228,8 @@ async def refresh_token(request: Request, response: Response):
         user_id = str(user["_id"])
         access_token = create_access_token(user_id, user["email"])
         response.set_cookie(key="access_token", value=access_token, max_age=3600, **get_cookie_settings(request))
-        return {"message": "Token refreshed", "access_token": access_token}
+        payload = {"message": "Token refreshed"}
+        return attach_auth_token_payload(payload, access_token)
     except jwt.ExpiredSignatureError:
         raise HTTPException(status_code=401, detail="Refresh token expired")
     except jwt.InvalidTokenError:
@@ -7395,15 +8265,18 @@ async def update_podcast_description(req: UpdatePodcastDescriptionRequest, reque
 
 @api_router.get("/social/providers")
 async def get_social_publish_providers():
+    manual_supported = is_manual_social_connect_enabled()
     return {
         "linkedin": {
             "configured": is_linkedin_social_configured(),
             "oauth_supported": is_linkedin_social_configured(),
+            "manual_token_supported": manual_supported,
             "scopes": get_linkedin_social_scopes().split(),
         },
         "instagram": {
             "configured": is_instagram_social_configured(),
             "oauth_supported": is_instagram_social_configured(),
+            "manual_token_supported": manual_supported,
             "scopes": get_instagram_social_scopes().split(","),
         },
     }
@@ -7485,6 +8358,9 @@ async def social_publish_connect_callback(provider: str, request: Request, code:
 async def manual_social_publish_connect(req: ManualSocialConnectRequest, request: Request):
     user = await get_current_user(request)
     ensure_social_publishing_access(user)
+    if not is_manual_social_connect_enabled():
+        raise HTTPException(status_code=403, detail="Manual token connect is disabled. Use OAuth connection instead.")
+    await enforce_rate_limit(request, "manual_social_connect", 8, 3600)
     access_token = (req.access_token or "").strip()
     if not access_token:
         raise HTTPException(status_code=400, detail="Access token is required")
@@ -7595,6 +8471,7 @@ async def get_social_post_card(post_id: str):
 
 @api_router.post("/feedback")
 async def submit_feedback(req: FeedbackSubmissionRequest, request: Request):
+    await enforce_rate_limit(request, "feedback_submit", 20, 3600)
     current_user = await try_get_current_user(request)
     message = str(req.message or "").strip()
     if len(message) < 8:
@@ -7959,6 +8836,10 @@ async def generate_ai_podcast_draft(req: GenerateAIPodcastDraftRequest, request:
         raise HTTPException(status_code=404, detail="Show not found")
 
     intake = req.intake.dict()
+    intake["voiceCasting"] = {
+        **(intake.get("voiceCasting") or {}),
+        "selectedVoiceIds": selected_ai_voice_ids_from_intake(intake, limit=4),
+    }
     if not normalize_string_list(intake["contentInput"].get("keyPoints"), limit=10):
         raise HTTPException(status_code=400, detail="Add at least one key point before generating")
 
@@ -8047,14 +8928,17 @@ async def import_rss_feed(req: RssImportRequest, request: Request):
     user = await get_current_user(request)
     if user["role"] != "podcaster":
         raise HTTPException(status_code=403, detail="Only podcasters can import RSS feeds")
+    await enforce_rate_limit(request, "rss_import", 12, 3600)
 
-    feed_url = req.feed_url.strip()
+    feed_url = validate_runtime_url(req.feed_url.strip())
     if not feed_url:
         raise HTTPException(status_code=400, detail="Feed URL is required")
 
     try:
-        response = requests.get(feed_url, timeout=30)
+        response = safe_external_get(feed_url, timeout=30, max_bytes=8_388_608)
         response.raise_for_status()
+    except HTTPException:
+        raise
     except Exception as exc:
         logger.error(f"RSS fetch failed: {exc}")
         raise HTTPException(status_code=400, detail="Could not fetch RSS feed")
@@ -8092,6 +8976,11 @@ async def import_rss_feed(req: RssImportRequest, request: Request):
         namespaces,
         attribute="href",
     ) or xml_first_text(channel, ["image/url"], namespaces)
+    if feed_thumbnail:
+        try:
+            feed_thumbnail = validate_external_redirect_url(feed_thumbnail)
+        except HTTPException:
+            feed_thumbnail = ""
 
     target_show = None
     if req.show_id:
@@ -8135,6 +9024,10 @@ async def import_rss_feed(req: RssImportRequest, request: Request):
             media_url = xml_first_text(item, ["media:content", "atom:link"], namespaces, attribute="url") or xml_first_text(item, ["atom:link"], namespaces, attribute="href")
         if not media_url:
             continue
+        try:
+            media_url = validate_external_redirect_url(media_url)
+        except HTTPException:
+            continue
 
         external_guid = xml_first_text(item, ["guid", "atom:id"], namespaces) or media_url
         existing = await db.podcasts.find_one(
@@ -8157,6 +9050,11 @@ async def import_rss_feed(req: RssImportRequest, request: Request):
             namespaces,
             attribute="href",
         ) or feed_thumbnail
+        if item_thumbnail:
+            try:
+                item_thumbnail = validate_external_redirect_url(item_thumbnail)
+            except HTTPException:
+                item_thumbnail = ""
         published_at = parse_rss_datetime(xml_first_text(item, ["pubDate", "published", "updated"], namespaces)) or now_iso()
         filename = os.path.basename(urlparse(media_url).path) or f"{uuid.uuid4()}.mp3"
         normalized_media_type = "video" if media_type.startswith("video/") else "audio"
@@ -8473,7 +9371,7 @@ async def get_show_thumbnail(show_id: str):
         external_thumbnail_url = external_thumbnail_url or (latest_episode.get("external_thumbnail_url") if latest_episode else "")
     if not thumbnail_path:
         if external_thumbnail_url:
-            return RedirectResponse(external_thumbnail_url)
+            return RedirectResponse(validate_external_redirect_url(external_thumbnail_url))
         return generated_thumbnail_response(
             show.get("title", "Audioraq Show"),
             show.get("podcaster_name", ""),
@@ -8517,6 +9415,7 @@ async def upload_podcast(
     is_video_upload = content_type in allowed_video or content_type.startswith("video/")
     if not (is_audio_upload or is_video_upload):
         raise HTTPException(status_code=400, detail=f"Unsupported file type: {content_type}. Allowed: audio and video files.")
+    ext = validate_media_extension_matches_type(file.filename or "", content_type, is_audio_upload, is_video_upload)
 
     show = None
     selected_show_id = (show_id or "").strip()
@@ -8547,9 +9446,8 @@ async def upload_podcast(
             enriched = await enrich_episodes([existing_ai_episode], current_user=user)
             return enriched[0]
 
-    ext = file.filename.split(".")[-1] if "." in file.filename else "bin"
     media_path = f"{APP_NAME}/episodes/{user['_id']}/{uuid.uuid4()}.{ext}"
-    data = await file.read()
+    data = await read_upload_limited(file, max_upload_bytes())
     put_object(media_path, data, content_type)
 
     thumbnail_path = ""
@@ -8897,6 +9795,38 @@ async def get_podcasts(
     if id_filters:
         query["id"] = id_filters
 
+    if sort == "recommended":
+        recommended_query = add_query_clause(
+            query,
+            {
+                "$or": [
+                    {"title": {"$regex": re.escape(snippet), "$options": "i"}}
+                    for snippet in CURATED_RECOMMENDED_EPISODE_TITLE_SNIPPETS
+                ]
+            },
+        )
+        candidates = await db.podcasts.find(recommended_query).to_list(80)
+        ordered = []
+        used_ids: Set[str] = set()
+        for snippet in CURATED_RECOMMENDED_EPISODE_TITLE_SNIPPETS:
+            match = next(
+                (
+                    episode
+                    for episode in candidates
+                    if episode.get("id") not in used_ids and snippet.lower() in str(episode.get("title") or "").lower()
+                ),
+                None,
+            )
+            if match:
+                used_ids.add(match["id"])
+                ordered.append(match)
+        if limit:
+            ordered = ordered[:limit]
+        enriched = await enrich_episodes(ordered, current_user=current_user)
+        for episode in enriched:
+            episode["recommendation_reason"] = "Founder recommended Audioraq Original"
+        return {"podcasts": enriched, "total": len(ordered), "page": 1, "pages": 1 if ordered else 0}
+
     sort_spec = [("created_at", -1)]
     if sort == "trending":
         sort_spec = [("play_count", -1), ("created_at", -1)]
@@ -8952,7 +9882,7 @@ async def get_podcast(podcast_id: str, request: Request):
     show = None
     if podcast.get("show_id"):
         show = await db.shows.find_one({"id": podcast["show_id"], "is_deleted": False})
-    if listener_brief_needs_refresh(podcast.get("listener_brief_cache"), podcast):
+    if current_user is not None and listener_brief_needs_refresh(podcast.get("listener_brief_cache"), podcast):
         podcast["listener_brief_cache"] = await ensure_listener_brief_cache(podcast, show)
     enriched = await enrich_episodes([podcast], current_user=current_user)
     return enriched[0]
@@ -8992,6 +9922,7 @@ async def save_podcast(podcast_id: str, request: Request):
         upsert=True,
     )
     await db.hidden_podcasts.delete_one({"user_id": user["_id"], "podcast_id": podcast_id})
+    await record_analytics_event("save", request, user, podcast)
     return {"message": "Episode saved", "podcast_id": podcast_id}
 
 
@@ -9015,6 +9946,7 @@ async def like_podcast(podcast_id: str, request: Request):
         upsert=True,
     )
     engagement = await refresh_episode_engagement_fields(podcast_id)
+    await record_analytics_event("like", request, user, podcast)
     return {"message": "Episode liked", "podcast_id": podcast_id, **engagement}
 
 
@@ -9041,6 +9973,7 @@ async def rate_podcast(podcast_id: str, req: UpdatePodcastRatingRequest, request
         upsert=True,
     )
     engagement = await refresh_episode_engagement_fields(podcast_id)
+    await record_analytics_event("rating", request, user, podcast, {"rating": req.rating})
     return {"message": "Rating saved", "podcast_id": podcast_id, "viewer_rating": req.rating, **engagement}
 
 
@@ -9234,11 +10167,13 @@ async def stream_podcast(podcast_id: str, request: Request):
     should_count_play = should_count_stream_play(range_header)
 
     if podcast.get("external_media_url"):
+        external_media_url = validate_external_redirect_url(podcast["external_media_url"])
         if should_count_play:
             await db.podcasts.update_one({"id": podcast_id}, {"$inc": {"play_count": 1}})
             if podcast.get("show_id"):
                 await db.shows.update_one({"id": podcast["show_id"]}, {"$set": {"updated_at": now_iso()}})
-        return RedirectResponse(podcast["external_media_url"])
+            await record_analytics_event("play_started", request, current_user, podcast, {"source": "external_redirect"})
+        return RedirectResponse(external_media_url)
 
     try:
         content_type = podcast.get("content_type") or mimetypes.guess_type(podcast.get("original_filename", ""))[0] or "application/octet-stream"
@@ -9252,6 +10187,7 @@ async def stream_podcast(podcast_id: str, request: Request):
             await db.podcasts.update_one({"id": podcast_id}, {"$inc": {"play_count": 1}})
             if podcast.get("show_id"):
                 await db.shows.update_one({"id": podcast["show_id"]}, {"$set": {"updated_at": now_iso()}})
+            await record_analytics_event("play_started", request, current_user, podcast, {"source": "media_stream"})
         return response
     except HTTPException:
         raise
@@ -9276,7 +10212,7 @@ async def get_thumbnail(podcast_id: str, request: Request):
         external_thumbnail_url = external_thumbnail_url or (show.get("external_thumbnail_url") if show else "")
     if not thumbnail_path:
         if external_thumbnail_url:
-            return RedirectResponse(external_thumbnail_url)
+            return RedirectResponse(validate_external_redirect_url(external_thumbnail_url))
         return generated_thumbnail_response(
             podcast.get("title", "Audioraq Episode"),
             podcast.get("show_title", podcast.get("podcaster_name", "")),
@@ -9302,6 +10238,7 @@ async def record_view(podcast_id: str, request: Request):
         {"$set": {"viewed_at": now_iso()}},
         upsert=True,
     )
+    await record_analytics_event("view_recorded", request, user, podcast)
     await db.playback_progress.update_one(
         {"user_id": user["_id"], "podcast_id": podcast_id},
         {
@@ -9371,6 +10308,13 @@ async def update_playback_progress(podcast_id: str, req: UpdatePlaybackProgressR
         {"$set": {"viewed_at": timestamp}},
         upsert=True,
     )
+    await record_analytics_event(
+        "play_completed" if is_completed else "play_progress",
+        request,
+        user,
+        podcast,
+        {"progress_percent": progress_percent, "duration_seconds": duration_seconds},
+    )
     return {
         "podcast_id": podcast_id,
         "progress_seconds": progress_seconds,
@@ -9428,6 +10372,7 @@ async def hide_podcast_from_feed(podcast_id: str, request: Request):
         upsert=True,
     )
     await db.saved_podcasts.delete_one({"user_id": user["_id"], "podcast_id": podcast_id})
+    await record_analytics_event("not_interested", request, user, podcast)
     return {"message": "Episode hidden from recommendations", "podcast_id": podcast_id}
 
 
@@ -9585,7 +10530,13 @@ app.include_router(api_router)
 
 cors_origin_setting = os.environ.get("CORS_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000")
 cors_origins = [origin.strip() for origin in cors_origin_setting.split(",") if origin.strip()]
-allow_origin_regex = r"https?://.*" if cors_origin_setting.strip() == "*" else None
+allow_origin_regex = None
+if cors_origin_setting.strip() == "*":
+    if parse_bool(os.environ.get("ALLOW_WILDCARD_CORS"), default=not is_production_env()):
+        allow_origin_regex = r"https?://.*"
+    else:
+        logger.warning("Ignoring wildcard CORS_ORIGINS in production; configure explicit origins instead.")
+        cors_origins = []
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[] if allow_origin_regex else cors_origins,
