@@ -5290,7 +5290,7 @@ def enforce_ai_audio_listenability_gate(quality_agent: Dict[str, Any], stored_pa
     if not parse_bool_env("AI_AUDIO_ENFORCE_LISTENABILITY_GATE", True):
         return
     voice_review = (quality_agent or {}).get("podcast_voice") or {}
-    min_score = parse_float_env("AI_AUDIO_MIN_LISTENABILITY_SCORE", 82.0)
+    min_score = parse_float_env("AI_AUDIO_MIN_LISTENABILITY_SCORE", 95.0)
     score = voice_review.get("listenability_score")
     status = voice_review.get("status")
     effective_min_score = min_score

@@ -1049,7 +1049,7 @@ def main() -> None:
     parser.add_argument("--min-quality-score", type=float, default=60.0, help="Delete the episode if Agent 2 returns a lower quality score.")
     parser.add_argument("--require-moderation", default="clear", help="Delete the episode if moderation_status does not match. Set empty to disable.")
     parser.add_argument("--require-quality-status", default="pass,review", help="Comma-separated accepted quality statuses. Set empty to disable.")
-    parser.add_argument("--min-voice-listenability-score", type=float, default=0.0, help="Delete the episode if Agent 2's podcast voice listenability score is lower.")
+    parser.add_argument("--min-voice-listenability-score", type=float, default=95.0, help="Delete the episode if Agent 2's podcast voice listenability score is lower.")
     parser.add_argument("--require-voice-status", default="", help="Comma-separated accepted podcast voice listenability statuses. Set empty to disable.")
     parser.add_argument("--replace-existing-below-score", action="store_true", help="Publish a replacement before deleting an existing Audioraq Originals episode that scores below --min-quality-score.")
     parser.add_argument("--replace-existing-all", action="store_true", help="Publish replacements for matching existing Audioraq Originals episodes before deleting the old copies.")

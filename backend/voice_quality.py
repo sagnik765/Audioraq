@@ -14,8 +14,8 @@ from typing import Any, Dict, Optional
 PODCAST_VOICE_TARGETS: Dict[str, Dict[str, Any]] = {
     "education": {
         "label": "Educational / explainer",
-        "wpm": (105, 122, 145, 165),
-        "pause_ratio": (0.08, 0.14, 0.25, 0.34),
+        "wpm": (92, 108, 145, 165),
+        "pause_ratio": (0.08, 0.14, 0.29, 0.38),
         "dynamic_range_db": (2.4, 4.0, 16.0, 24.0),
         "rms_dbfs": (-30.0, -23.0, -16.0, -10.0),
         "peak_dbfs": (-18.0, -8.0, -3.0, -0.8),
@@ -23,8 +23,8 @@ PODCAST_VOICE_TARGETS: Dict[str, Dict[str, Any]] = {
     },
     "interview": {
         "label": "Interview / conversational",
-        "wpm": (112, 130, 158, 178),
-        "pause_ratio": (0.07, 0.12, 0.24, 0.33),
+        "wpm": (98, 118, 158, 178),
+        "pause_ratio": (0.07, 0.12, 0.28, 0.37),
         "dynamic_range_db": (2.8, 4.5, 18.0, 26.0),
         "rms_dbfs": (-30.0, -23.0, -15.5, -9.5),
         "peak_dbfs": (-18.0, -8.0, -3.0, -0.8),
@@ -32,8 +32,8 @@ PODCAST_VOICE_TARGETS: Dict[str, Dict[str, Any]] = {
     },
     "storytelling": {
         "label": "Storytelling / narrative",
-        "wpm": (95, 112, 138, 158),
-        "pause_ratio": (0.10, 0.17, 0.30, 0.42),
+        "wpm": (88, 102, 138, 158),
+        "pause_ratio": (0.10, 0.17, 0.34, 0.46),
         "dynamic_range_db": (3.2, 5.0, 20.0, 30.0),
         "rms_dbfs": (-31.0, -24.0, -16.5, -10.5),
         "peak_dbfs": (-18.0, -9.0, -3.5, -0.8),
@@ -41,8 +41,8 @@ PODCAST_VOICE_TARGETS: Dict[str, Dict[str, Any]] = {
     },
     "news_analysis": {
         "label": "News / analysis",
-        "wpm": (112, 128, 152, 172),
-        "pause_ratio": (0.07, 0.12, 0.22, 0.30),
+        "wpm": (98, 116, 152, 172),
+        "pause_ratio": (0.07, 0.12, 0.27, 0.36),
         "dynamic_range_db": (2.5, 4.0, 16.0, 24.0),
         "rms_dbfs": (-29.0, -22.0, -15.5, -9.5),
         "peak_dbfs": (-18.0, -8.0, -3.0, -0.8),
@@ -50,8 +50,8 @@ PODCAST_VOICE_TARGETS: Dict[str, Dict[str, Any]] = {
     },
     "comedy": {
         "label": "Comedy / energetic conversation",
-        "wpm": (118, 138, 172, 198),
-        "pause_ratio": (0.06, 0.11, 0.24, 0.34),
+        "wpm": (108, 128, 172, 198),
+        "pause_ratio": (0.06, 0.11, 0.27, 0.36),
         "dynamic_range_db": (3.0, 5.0, 20.0, 30.0),
         "rms_dbfs": (-29.0, -22.0, -15.0, -9.0),
         "peak_dbfs": (-18.0, -8.0, -3.0, -0.8),
@@ -59,8 +59,8 @@ PODCAST_VOICE_TARGETS: Dict[str, Dict[str, Any]] = {
     },
     "default": {
         "label": "General podcast",
-        "wpm": (105, 122, 155, 178),
-        "pause_ratio": (0.08, 0.13, 0.25, 0.36),
+        "wpm": (95, 112, 155, 178),
+        "pause_ratio": (0.08, 0.13, 0.29, 0.38),
         "dynamic_range_db": (2.5, 4.0, 18.0, 26.0),
         "rms_dbfs": (-30.0, -23.0, -16.0, -10.0),
         "peak_dbfs": (-18.0, -8.0, -3.0, -0.8),
