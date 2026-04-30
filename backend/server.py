@@ -618,6 +618,19 @@ CURATED_RECOMMENDED_EPISODE_TITLE_SNIPPETS = [
     "A decision framework for sanctions",
 ]
 
+LAUNCH_PROMO_CODE = "PODCASTAI"
+LAUNCH_PROMO_DURATION_DAYS = 60
+LAUNCH_PROMO_OFFERS = {
+    LAUNCH_PROMO_CODE: {
+        "code": LAUNCH_PROMO_CODE,
+        "title": "Free AI podcast audit",
+        "description": "Product Hunt creators get two months of Audioraq AI podcast audit access.",
+        "offer_type": "ai_podcast_audit",
+        "source": "product_hunt",
+        "duration_days": LAUNCH_PROMO_DURATION_DAYS,
+    }
+}
+
 
 def now_iso():
     return datetime.now(timezone.utc).isoformat()
@@ -1130,6 +1143,117 @@ def attach_auth_token_payload(payload: Dict[str, Any], access_token: str) -> Dic
     if should_return_auth_tokens():
         payload["access_token"] = access_token
     return payload
+
+
+def normalize_promo_code(value: Optional[str]) -> str:
+    return re.sub(r"[^A-Z0-9]+", "", (value or "").strip().upper())
+
+
+def get_launch_promo_offer(raw_code: Optional[str]) -> Optional[Dict[str, Any]]:
+    normalized = normalize_promo_code(raw_code)
+    return LAUNCH_PROMO_OFFERS.get(normalized)
+
+
+def promo_expiry_from(now_dt: Optional[datetime] = None) -> datetime:
+    base = now_dt or datetime.now(timezone.utc)
+    return base + timedelta(days=LAUNCH_PROMO_DURATION_DAYS)
+
+
+def build_promo_redemption(raw_code: Optional[str], now_dt: Optional[datetime] = None) -> Dict[str, Any]:
+    offer = get_launch_promo_offer(raw_code)
+    if not offer:
+        raise HTTPException(status_code=400, detail="Promo code not recognized. Use PODCASTAI for the Product Hunt launch offer.")
+    issued_at = now_dt or datetime.now(timezone.utc)
+    expires_at = promo_expiry_from(issued_at)
+    return {
+        "code": offer["code"],
+        "title": offer["title"],
+        "description": offer["description"],
+        "offer_type": offer["offer_type"],
+        "source": offer["source"],
+        "duration_days": offer["duration_days"],
+        "redeemed_at": issued_at.isoformat(),
+        "starts_at": issued_at.isoformat(),
+        "expires_at": expires_at.isoformat(),
+        "status": "active",
+    }
+
+
+def build_promo_user_fields(raw_code: Optional[str], now_dt: Optional[datetime] = None) -> Dict[str, Any]:
+    if not normalize_promo_code(raw_code):
+        return {}
+    redemption = build_promo_redemption(raw_code, now_dt=now_dt)
+    code = redemption["code"]
+    offer_type = redemption["offer_type"]
+    return {
+        "promo_redemptions": {code: redemption},
+        "promo_entitlements": {offer_type: redemption},
+        "launch_source": redemption["source"],
+    }
+
+
+def public_promo_status(redemption: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    if not isinstance(redemption, dict):
+        return {"active": False}
+    expires_at = parse_iso_datetime(redemption.get("expires_at"))
+    now_dt = datetime.now(timezone.utc)
+    active = bool(expires_at and expires_at > now_dt and redemption.get("status", "active") == "active")
+    days_remaining = 0
+    if expires_at and expires_at > now_dt:
+        days_remaining = max(0, math.ceil((expires_at - now_dt).total_seconds() / 86400))
+    return {
+        "active": active,
+        "code": redemption.get("code", ""),
+        "title": redemption.get("title", ""),
+        "description": redemption.get("description", ""),
+        "offer_type": redemption.get("offer_type", ""),
+        "source": redemption.get("source", ""),
+        "redeemed_at": redemption.get("redeemed_at", ""),
+        "starts_at": redemption.get("starts_at", ""),
+        "expires_at": redemption.get("expires_at", ""),
+        "days_remaining": days_remaining,
+        "status": "active" if active else "expired",
+    }
+
+
+def public_user_promo_entitlements(user_doc: Dict[str, Any]) -> Dict[str, Any]:
+    entitlements = user_doc.get("promo_entitlements") or {}
+    redemptions = user_doc.get("promo_redemptions") or {}
+    audit = entitlements.get("ai_podcast_audit") or redemptions.get(LAUNCH_PROMO_CODE)
+    return {
+        "ai_podcast_audit": public_promo_status(audit),
+        "launch_offer": {
+            "code": LAUNCH_PROMO_CODE,
+            "title": LAUNCH_PROMO_OFFERS[LAUNCH_PROMO_CODE]["title"],
+            "duration_days": LAUNCH_PROMO_DURATION_DAYS,
+        },
+    }
+
+
+async def redeem_launch_promo_for_user(user_doc: Dict[str, Any], raw_code: Optional[str]) -> Dict[str, Any]:
+    offer = get_launch_promo_offer(raw_code)
+    if not offer:
+        raise HTTPException(status_code=400, detail="Promo code not recognized. Use PODCASTAI for the Product Hunt launch offer.")
+
+    existing = (user_doc.get("promo_redemptions") or {}).get(offer["code"])
+    if existing:
+        status = public_promo_status(existing)
+        if status.get("active"):
+            return status
+
+    redemption = build_promo_redemption(offer["code"])
+    await db.users.update_one(
+        {"_id": user_object_id(user_doc)},
+        {
+            "$set": {
+                f"promo_redemptions.{offer['code']}": redemption,
+                f"promo_entitlements.{offer['offer_type']}": redemption,
+                "launch_source": offer["source"],
+                "updated_at": now_iso(),
+            }
+        },
+    )
+    return public_promo_status(redemption)
 
 
 def validate_runtime_security() -> None:
@@ -6905,6 +7029,7 @@ async def build_user_response(user_doc):
         "avatar_url": user_doc.get("avatar_url", ""),
         "auth_providers": auth_providers,
         "primary_show": primary_show,
+        "promo_entitlements": public_user_promo_entitlements(user_doc),
     }
 
 
@@ -7390,6 +7515,7 @@ class RegisterRequest(BaseModel):
     interests: Optional[List[str]] = []
     podcast_description: Optional[str] = ""
     show_title: Optional[str] = ""
+    promo_code: Optional[str] = ""
 
 
 class LoginRequest(BaseModel):
@@ -7405,6 +7531,11 @@ class CompleteSocialSignupRequest(BaseModel):
     interests: Optional[List[str]] = []
     podcast_description: Optional[str] = ""
     show_title: Optional[str] = ""
+    promo_code: Optional[str] = ""
+
+
+class RedeemPromoRequest(BaseModel):
+    code: str
 
 
 class UpdateInterestsRequest(BaseModel):
@@ -7605,6 +7736,7 @@ async def startup():
     await db.users.create_index("email", unique=True)
     await db.users.create_index("auth_providers.google.sub", unique=True, sparse=True)
     await db.users.create_index("auth_providers.apple.sub", unique=True, sparse=True)
+    await db.users.create_index("promo_redemptions.PODCASTAI.expires_at")
     await db.login_attempts.create_index("identifier")
     await db.social_auth_sessions.create_index("id", unique=True)
     await db.social_auth_sessions.create_index("expires_at", expireAfterSeconds=0)
@@ -8094,6 +8226,7 @@ async def complete_social_signup(req: CompleteSocialSignupRequest, request: Requ
         "created_at": now_iso(),
         "updated_at": now_iso(),
     }
+    user_doc.update(build_promo_user_fields(req.promo_code))
     result = await db.users.insert_one(user_doc)
     user_doc["_id"] = result.inserted_id
 
@@ -8144,6 +8277,7 @@ async def register(req: RegisterRequest, request: Request, response: Response):
         "show_title": (req.show_title or "").strip(),
         "created_at": now_iso(),
     }
+    user_doc.update(build_promo_user_fields(req.promo_code))
     result = await db.users.insert_one(user_doc)
     user_doc["_id"] = result.inserted_id
 
@@ -8211,6 +8345,30 @@ async def logout(response: Response):
 async def get_me(request: Request):
     user = await get_current_user(request)
     return await build_user_response(user)
+
+
+@api_router.get("/promos/status")
+async def get_promo_status(request: Request):
+    user = await get_current_user(request)
+    return public_user_promo_entitlements(user)
+
+
+@api_router.post("/promos/redeem")
+async def redeem_promo(req: RedeemPromoRequest, request: Request):
+    user = await get_current_user(request)
+    status = await redeem_launch_promo_for_user(user, req.code)
+    return {
+        "message": "PODCASTAI unlocked: free AI podcast audit access is active for two months.",
+        "promo": status,
+        "promo_entitlements": {
+            "ai_podcast_audit": status,
+            "launch_offer": {
+                "code": LAUNCH_PROMO_CODE,
+                "title": LAUNCH_PROMO_OFFERS[LAUNCH_PROMO_CODE]["title"],
+                "duration_days": LAUNCH_PROMO_DURATION_DAYS,
+            },
+        },
+    }
 
 
 @api_router.post("/auth/refresh")
@@ -9225,6 +9383,7 @@ async def get_show_ai_strategy(show_id: str, request: Request, refresh: bool = F
     analytics = await fetch_creator_analytics(analytics_user, show_id=show_id)
     recent_episodes = await db.podcasts.find({"show_id": show_id, "is_deleted": False}).sort("created_at", -1).limit(12).to_list(12)
     strategy = await ensure_show_ai_strategy(show, analytics, recent_episodes, refresh=refresh)
+    strategy["audit_offer"] = public_user_promo_entitlements(user).get("ai_podcast_audit", {"active": False})
     return strategy
 
 

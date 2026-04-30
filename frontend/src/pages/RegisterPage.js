@@ -23,6 +23,7 @@ export default function RegisterPage() {
   const [podcastDescription, setPodcastDescription] = useState('');
   const [selectedInterests, setSelectedInterests] = useState([]);
   const [interestOptions, setInterestOptions] = useState([]);
+  const [promoCode, setPromoCode] = useState('');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
   const [pendingSocial, setPendingSocial] = useState(null);
@@ -34,6 +35,13 @@ export default function RegisterPage() {
       setInterestOptions(res.data.interests || []);
     }).catch(() => {});
   }, []);
+
+  useEffect(() => {
+    const incomingPromo = searchParams.get('promo') || searchParams.get('code') || searchParams.get('coupon');
+    if (incomingPromo) {
+      setPromoCode(incomingPromo.toUpperCase().replace(/[^A-Z0-9]/g, ''));
+    }
+  }, [searchParams]);
 
   useEffect(() => {
     let active = true;
@@ -87,6 +95,7 @@ export default function RegisterPage() {
       interests: role === 'user' ? selectedInterests : [],
       podcast_description: role === 'podcaster' ? podcastDescription : '',
       show_title: role === 'podcaster' ? showTitle : '',
+      promo_code: promoCode.trim(),
     };
     const result = socialMode
       ? await completeSocialSignup({
@@ -97,6 +106,7 @@ export default function RegisterPage() {
           interests: role === 'user' ? selectedInterests : [],
           podcast_description: role === 'podcaster' ? podcastDescription : '',
           show_title: role === 'podcaster' ? showTitle : '',
+          promo_code: promoCode.trim(),
         })
       : await register(payload);
     setLoading(false);
@@ -437,6 +447,27 @@ export default function RegisterPage() {
                   </div>
                 </>
               )}
+
+              <div className="mt-6 rounded-2xl border border-[#F5A623]/30 bg-[#F5A623]/10 px-4 py-4">
+                <div className="flex items-start justify-between gap-4 mb-3">
+                  <div>
+                    <p className="text-xs uppercase tracking-[0.2em] font-semibold text-[#F5A623] mb-1">Product Hunt promo</p>
+                    <p className="text-sm text-[#EDE6D2]">Use <span className="font-semibold text-white">PODCASTAI</span> for a free AI podcast audit for two months.</p>
+                  </div>
+                  <span className="hidden sm:inline-flex rounded-full bg-[#0A0A0B] border border-[#F5A623]/30 px-3 py-1 text-xs font-semibold text-[#F5A623]">
+                    Launch offer
+                  </span>
+                </div>
+                <label className="text-xs uppercase tracking-[0.2em] font-semibold text-[#8A8A93] mb-2 block">Promo code</label>
+                <input
+                  type="text"
+                  value={promoCode}
+                  onChange={(e) => setPromoCode(e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, ''))}
+                  className="w-full bg-[#0A0A0B] border border-[#27272A] focus:border-[#F5A623] focus:ring-1 focus:ring-[#F5A623] rounded-lg text-white px-4 py-3 placeholder:text-[#8A8A93] transition-all outline-none"
+                  placeholder="PODCASTAI"
+                  data-testid="register-promo-code"
+                />
+              </div>
 
               <div className="flex gap-3 mt-6">
                 <button

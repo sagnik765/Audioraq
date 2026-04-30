@@ -41,6 +41,8 @@ export default function SettingsPage() {
   const [showDescription, setShowDescription] = useState('');
   const [showCategory, setShowCategory] = useState('general');
   const [saving, setSaving] = useState(false);
+  const [promoCode, setPromoCode] = useState('PODCASTAI');
+  const [promoSubmitting, setPromoSubmitting] = useState(false);
 
   const [socialLoading, setSocialLoading] = useState(false);
   const [socialSubmitting, setSocialSubmitting] = useState(false);
@@ -73,6 +75,7 @@ export default function SettingsPage() {
     () => socialAccounts.filter((account) => account.provider === postProvider),
     [socialAccounts, postProvider],
   );
+  const auditPromo = user?.promo_entitlements?.ai_podcast_audit || {};
   const manualTokenSupported = useMemo(
     () => Object.values(socialProviders || {}).some((details) => details?.manual_token_supported),
     [socialProviders],
@@ -199,6 +202,24 @@ export default function SettingsPage() {
       toast.error(error.response?.data?.detail || 'Failed to update show');
     } finally {
       setSaving(false);
+    }
+  };
+
+  const handleRedeemPromo = async (event) => {
+    event.preventDefault();
+    if (!promoCode.trim()) {
+      toast.error('Enter a promo code first');
+      return;
+    }
+    setPromoSubmitting(true);
+    try {
+      const { data } = await axios.post(`${API}/promos/redeem`, { code: promoCode.trim() }, { withCredentials: true });
+      toast.success(data.message || 'Promo code applied');
+      checkAuth();
+    } catch (error) {
+      toast.error(error.response?.data?.detail || 'Could not apply promo code');
+    } finally {
+      setPromoSubmitting(false);
     }
   };
 
@@ -368,6 +389,49 @@ export default function SettingsPage() {
               : 'Refine your interests to improve the home feed.'}
           </p>
         </div>
+
+        <section className="bg-[#141417] border border-[#27272A] rounded-3xl p-6 md:p-8">
+          <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-6">
+            <div>
+              <p className="text-xs uppercase tracking-[0.2em] font-semibold text-[#F5A623] mb-2">Launch Promo</p>
+              <h2 className="font-['Outfit'] text-2xl font-semibold text-white mb-2">Free AI podcast audit</h2>
+              <p className="text-sm text-[#8A8A93] max-w-2xl">
+                Product Hunt users can use <span className="text-white font-semibold">PODCASTAI</span> to unlock two months of AI podcast audit access for creator strategy, positioning, episode ideas, and quality guidance.
+              </p>
+              {auditPromo.active ? (
+                <div className="mt-4 inline-flex flex-wrap gap-2 rounded-2xl border border-[#22C55E]/30 bg-[#22C55E]/10 px-4 py-3 text-sm text-[#BBF7D0]">
+                  <span className="font-semibold">Active</span>
+                  <span>Expires {formatDateTime(auditPromo.expires_at)}</span>
+                  <span>{auditPromo.days_remaining || 0} days remaining</span>
+                </div>
+              ) : (
+                <p className="text-xs text-[#71717A] mt-3">Activation is instant and does not slow down the podcast creation flow.</p>
+              )}
+            </div>
+
+            <form onSubmit={handleRedeemPromo} className="w-full lg:max-w-sm">
+              <label className="text-xs uppercase tracking-[0.2em] font-semibold text-[#8A8A93] mb-2 block">Promo code</label>
+              <div className="flex gap-3">
+                <input
+                  type="text"
+                  value={promoCode}
+                  onChange={(e) => setPromoCode(e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, ''))}
+                  className="min-w-0 flex-1 bg-[#0A0A0B] border border-[#27272A] focus:border-[#F5A623] rounded-xl text-white px-4 py-3 outline-none"
+                  placeholder="PODCASTAI"
+                  data-testid="settings-promo-code"
+                />
+                <button
+                  type="submit"
+                  disabled={promoSubmitting || auditPromo.active}
+                  className="bg-[#F5A623] hover:bg-[#F7B84B] text-[#0A0A0B] font-bold rounded-full px-5 py-3 transition-colors disabled:opacity-50"
+                  data-testid="settings-promo-submit"
+                >
+                  {auditPromo.active ? 'Applied' : promoSubmitting ? 'Applying...' : 'Apply'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </section>
 
         {canManagePublishing ? (
           <>

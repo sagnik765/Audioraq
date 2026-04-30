@@ -17,7 +17,7 @@ const categories = [
 ];
 
 export default function PodcasterDashboard() {
-  const { checkAuth } = useAuth();
+  const { user, checkAuth } = useAuth();
   const { currentPodcast } = usePlayer();
   const [shows, setShows] = useState([]);
   const [episodes, setEpisodes] = useState([]);
@@ -84,6 +84,7 @@ export default function PodcasterDashboard() {
 
   const visibleEpisodes = selectedShowId ? episodes.filter((episode) => episode.show_id === selectedShowId) : episodes;
   const activeShow = shows.find((show) => show.id === selectedShowId) || shows[0] || null;
+  const auditPromo = user?.promo_entitlements?.ai_podcast_audit || {};
 
   const totalPlays = episodes.reduce((sum, episode) => sum + (episode.play_count || 0), 0);
 
@@ -522,6 +523,11 @@ export default function PodcasterDashboard() {
               <p className="text-sm text-[#8A8A93] max-w-3xl">
                 This is the creator-side AI layer that actually matters: it reads the show, recent episodes, and listener signals, then turns that into concrete next-episode moves you can send straight into AI Studio.
               </p>
+              {auditPromo.active && (
+                <p className="mt-3 inline-flex rounded-full border border-[#22C55E]/30 bg-[#22C55E]/10 px-4 py-2 text-xs font-semibold uppercase tracking-[0.16em] text-[#BBF7D0]">
+                  PODCASTAI audit active · {auditPromo.days_remaining || 0} days left
+                </p>
+              )}
             </div>
             <div className="flex flex-wrap gap-3">
               <button
