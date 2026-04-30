@@ -23,7 +23,7 @@ PODCAST_VOICE_TARGETS: Dict[str, Dict[str, Any]] = {
     },
     "interview": {
         "label": "Interview / conversational",
-        "wpm": (98, 118, 158, 178),
+        "wpm": (98, 118, 162, 184),
         "pause_ratio": (0.07, 0.12, 0.28, 0.37),
         "dynamic_range_db": (2.8, 4.5, 18.0, 26.0),
         "rms_dbfs": (-30.0, -23.0, -15.5, -9.5),
@@ -32,7 +32,7 @@ PODCAST_VOICE_TARGETS: Dict[str, Dict[str, Any]] = {
     },
     "storytelling": {
         "label": "Storytelling / narrative",
-        "wpm": (88, 102, 138, 158),
+        "wpm": (88, 102, 145, 165),
         "pause_ratio": (0.10, 0.17, 0.34, 0.46),
         "dynamic_range_db": (3.2, 5.0, 20.0, 30.0),
         "rms_dbfs": (-31.0, -24.0, -16.5, -10.5),
@@ -41,7 +41,7 @@ PODCAST_VOICE_TARGETS: Dict[str, Dict[str, Any]] = {
     },
     "news_analysis": {
         "label": "News / analysis",
-        "wpm": (98, 116, 152, 172),
+        "wpm": (98, 116, 158, 178),
         "pause_ratio": (0.07, 0.12, 0.27, 0.36),
         "dynamic_range_db": (2.5, 4.0, 16.0, 24.0),
         "rms_dbfs": (-29.0, -22.0, -15.5, -9.5),
@@ -50,7 +50,7 @@ PODCAST_VOICE_TARGETS: Dict[str, Dict[str, Any]] = {
     },
     "comedy": {
         "label": "Comedy / energetic conversation",
-        "wpm": (108, 128, 172, 198),
+        "wpm": (108, 128, 176, 202),
         "pause_ratio": (0.06, 0.11, 0.27, 0.36),
         "dynamic_range_db": (3.0, 5.0, 20.0, 30.0),
         "rms_dbfs": (-29.0, -22.0, -15.0, -9.0),
@@ -159,7 +159,7 @@ def infer_podcast_voice_profile(
 def provider_naturalness_score(provider: str) -> tuple[float, str]:
     lowered = (provider or "").lower()
     if "apple-say" in lowered or "macos-say" in lowered:
-        return 82.0, "Audioraq proof-studio Apple system voice profile"
+        return 83.0, "Audioraq proof-studio Apple system voice profile"
     if "proof-studio" in lowered or "proof_studio" in lowered:
         return 76.0, "Audioraq proof-studio local voice profile"
     if any(term in lowered for term in ["espeak", "festival", "flite"]):
