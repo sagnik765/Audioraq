@@ -9,6 +9,7 @@ import { Dialog, DialogContent } from '../components/ui/dialog';
 import { useAuth } from '../contexts/AuthContext';
 import { usePlayer } from '../contexts/PlayerContext';
 import { API } from '../lib/api';
+import { displayAIText } from '../lib/displayText';
 
 const categories = [
   'general', 'technology', 'science', 'business', 'health', 'education',
@@ -143,7 +144,7 @@ export default function PodcasterDashboard() {
     if (episode.publication_status === 'draft' && !episode.is_playable) {
       toast.success(`${actionLabel} created as an AI draft in your studio.`);
       if (episode.moderation_summary) {
-        toast.message(episode.moderation_summary);
+        toast.message(displayAIText(episode.moderation_summary));
       }
       return;
     }
@@ -152,7 +153,7 @@ export default function PodcasterDashboard() {
       return;
     }
     if (episode.moderation_status === 'review' && episode.moderation_summary) {
-      toast.message(`Safety review: ${episode.moderation_summary}`);
+      toast.message(`Safety review: ${displayAIText(episode.moderation_summary)}`);
     } else {
       toast.success(actionLabel);
     }
@@ -429,7 +430,7 @@ export default function PodcasterDashboard() {
               <p className="text-xs uppercase tracking-[0.2em] font-semibold text-[#F5A623] mb-2">Show Manager</p>
               <h2 className="font-['Outfit'] text-2xl font-semibold text-white">Show > Season > Episode organization</h2>
               <p className="text-sm text-[#8A8A93] mt-1">
-                Keep each show branded, then publish episodes into seasons with Agent 2 quality status attached.
+                Keep each show branded, then publish episodes into seasons with AI Agents quality status attached.
               </p>
             </div>
             <button
@@ -806,7 +807,7 @@ export default function PodcasterDashboard() {
           <div className="bg-[#141417] border border-[#27272A] rounded-3xl p-8 mb-8" data-testid="upload-podcast-form">
             <h2 className="font-['Outfit'] text-xl font-semibold text-white mb-6">Publish Episode</h2>
             <div className="bg-[#0A0A0B] border border-[#27272A] rounded-2xl px-4 py-4 mb-6">
-              <p className="text-xs uppercase tracking-[0.18em] text-[#F5A623] mb-2">Fast Agent 2 gate</p>
+              <p className="text-xs uppercase tracking-[0.18em] text-[#F5A623] mb-2">Fast AI Agents gate</p>
               <p className="text-sm text-[#C7C7D1]">
                 Clean episodes use Audioraq's local fast-path safety and quality checks first, then publish. Risky packages still escalate before they reach listeners.
               </p>
@@ -816,11 +817,11 @@ export default function PodcasterDashboard() {
                 <p className="text-xs uppercase tracking-[0.18em] text-[#8A8A93] mb-2">AI draft applied</p>
                 <p className="text-sm text-white mb-2">{aiDraftApplied.generation?.episode_title || aiDraftApplied.publish_prefill?.title}</p>
                 <p className="text-sm text-[#8A8A93]">
-                  Title, description, and category were prefilled from your AI episode package. Create with AI is audio-only, and Agent 2 will attach a quality report before publishing.
+                  Title, description, and category were prefilled from your AI episode package. Create with AI is audio-only, and AI Agents will attach a quality report before publishing.
                 </p>
                 {aiDraftApplied.agent2_review && (
                   <p className="text-xs text-[#F5A623] mt-3">
-                    Agent 2 score: {aiDraftApplied.agent2_review.quality_score}/100 · {aiDraftApplied.agent2_review.status}
+                    AI Agents score: {aiDraftApplied.agent2_review.quality_score}/100 · {aiDraftApplied.agent2_review.status}
                   </p>
                 )}
                 <button
@@ -860,7 +861,7 @@ export default function PodcasterDashboard() {
                   }`}
                 >
                   <p className="text-sm font-semibold text-white mb-1">Create rendered AI audio</p>
-                  <p className="text-xs text-[#8A8A93]">Render a playable audio episode from the generated script, then attach the Agent 2 review.</p>
+                  <p className="text-xs text-[#8A8A93]">Render a playable audio episode from the generated script, then attach the AI Agents review.</p>
                 </button>
               </div>
             )}
@@ -989,7 +990,7 @@ export default function PodcasterDashboard() {
                 <div className="bg-[#0A0A0B] border border-[#27272A] rounded-2xl px-4 py-4">
                   <p className="text-xs uppercase tracking-[0.18em] text-[#8A8A93] mb-2">AI draft outcome</p>
                   <p className="text-sm text-[#C7C7D1]">
-                    This renders an audio-only episode from the AI package, publishes it as playable audio, and stores the generated script package, safety review, and Agent 2 quality report.
+                    This renders an audio-only episode from the AI package, publishes it as playable audio, and stores the generated script package, safety review, and AI Agents quality report.
                   </p>
                 </div>
               )}

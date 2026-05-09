@@ -139,7 +139,7 @@ def main() -> None:
             "Signup gates make high-value viewer and creator workflows member-only.",
             "Feedback widget is live and founder review workbook is generated.",
             "Five proof podcasts are polished enough to show voice and workflow quality.",
-            "Product Hunt assets include creator studio, AI strategy, Agent 2 gate, and episode page screenshots.",
+            "Product Hunt assets include creator studio, AI strategy, AI Agents gate, and episode page screenshots.",
         ],
         "launch_platform_rules": LAUNCH_PLATFORM_RULES,
         "competitive_intelligence_excerpt": memo_excerpt,

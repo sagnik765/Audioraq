@@ -596,7 +596,7 @@ def build_episode_plan(
         target_audience=show.target_audience,
         topic=topic,
         key_points=build_key_points(show, topic, episode_number),
-        references=["Audioraq Originals editorial brief", "Agent 2 topic strategy memo"],
+        references=["Audioraq Originals editorial brief", "AI Agents topic strategy memo"],
         tone=show.tone,
         format=show.format,
         length_band=show.length_band,
@@ -634,7 +634,7 @@ def build_single_plan(global_index: int, single_index: int, category: str, topic
             "Use one example or scenario",
             "Close with a memorable next step",
         ],
-        references=["Audioraq Originals editorial brief", "Agent 2 topic strategy memo"],
+        references=["Audioraq Originals editorial brief", "AI Agents topic strategy memo"],
         tone=["professional", "casual", "storytelling"][single_index % 3],
         format=format_name,
         length_band=length_band,
@@ -1046,10 +1046,10 @@ def main() -> None:
     parser.add_argument("--password", default="", help="Optional shared password for generated seed accounts.")
     parser.add_argument("--require-provider-kind", default="", help="If set, delete and reject episodes that publish with a different TTS provider kind.")
     parser.add_argument("--continue-on-provider-mismatch", action="store_true", help="Keep processing after a required-provider mismatch. Off by default to avoid burning credits or seeding low-quality audio.")
-    parser.add_argument("--min-quality-score", type=float, default=60.0, help="Delete the episode if Agent 2 returns a lower quality score.")
+    parser.add_argument("--min-quality-score", type=float, default=60.0, help="Delete the episode if AI Agents returns a lower quality score.")
     parser.add_argument("--require-moderation", default="clear", help="Delete the episode if moderation_status does not match. Set empty to disable.")
     parser.add_argument("--require-quality-status", default="pass,review", help="Comma-separated accepted quality statuses. Set empty to disable.")
-    parser.add_argument("--min-voice-listenability-score", type=float, default=95.0, help="Delete the episode if Agent 2's podcast voice listenability score is lower.")
+    parser.add_argument("--min-voice-listenability-score", type=float, default=95.0, help="Delete the episode if AI Agents' podcast voice listenability score is lower.")
     parser.add_argument("--require-voice-status", default="", help="Comma-separated accepted podcast voice listenability statuses. Set empty to disable.")
     parser.add_argument("--replace-existing-below-score", action="store_true", help="Publish a replacement before deleting an existing Audioraq Originals episode that scores below --min-quality-score.")
     parser.add_argument("--replace-existing-all", action="store_true", help="Publish replacements for matching existing Audioraq Originals episodes before deleting the old copies.")

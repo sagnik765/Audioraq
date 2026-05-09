@@ -563,7 +563,7 @@ AI_STUDIO_STAGE_LABELS = {
     "cast": "Cast & Voices",
     "table_read": "Table Read",
     "final_render": "Final Audio Render",
-    "agent2_review": "Agent 2 Review",
+    "agent2_review": "AI Agents Review",
     "publish": "Publish",
 }
 
@@ -822,6 +822,39 @@ def decode_social_publish_state(state: str, expected_provider: str) -> Dict[str,
 
 def get_linkedin_social_scopes() -> str:
     return "r_organization_social w_organization_social"
+
+
+def parse_csv_env(name: str) -> List[str]:
+    return [item.strip() for item in os.environ.get(name, "").split(",") if item.strip()]
+
+
+def normalize_guardrail_label(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", (value or "").strip().lower())
+
+
+def is_linkedin_business_only_enabled() -> bool:
+    return parse_bool_env("LINKEDIN_BUSINESS_ONLY", True)
+
+
+def get_allowed_linkedin_organization_ids() -> Set[str]:
+    candidates = (
+        parse_csv_env("LINKEDIN_ALLOWED_ORGANIZATION_IDS")
+        + parse_csv_env("AUDIORAQ_LINKEDIN_ORGANIZATION_ID")
+    )
+    return {normalize_linkedin_organization_id(item) for item in candidates if normalize_linkedin_organization_id(item)}
+
+
+def get_allowed_linkedin_organization_names() -> Set[str]:
+    names = parse_csv_env("LINKEDIN_ALLOWED_ORGANIZATION_NAMES") or ["Audioraq"]
+    return {normalize_guardrail_label(name) for name in names if normalize_guardrail_label(name)}
+
+
+def linkedin_business_guardrail_summary() -> Dict[str, Any]:
+    return {
+        "business_only": is_linkedin_business_only_enabled(),
+        "allowed_organization_ids_configured": bool(get_allowed_linkedin_organization_ids()),
+        "allowed_organization_names": sorted(get_allowed_linkedin_organization_names()),
+    }
 
 
 def build_linkedin_social_authorize_url(request: Request, state: str) -> str:
@@ -2056,8 +2089,67 @@ def normalize_linkedin_organization_id(value: Any) -> str:
     raw = str(value or "").strip()
     if raw.startswith("urn:li:organization:"):
         return raw.rsplit(":", 1)[-1]
+    if raw.startswith("urn:li:person:") or raw.startswith("urn:li:member:"):
+        return ""
     digits = "".join(ch for ch in raw if ch.isdigit())
     return digits or raw
+
+
+def enforce_linkedin_business_guardrail(organization: Dict[str, Any], *, source: str = "linkedin") -> Dict[str, Any]:
+    organization_id = normalize_linkedin_organization_id(
+        organization.get("organization_id")
+        or organization.get("account_id")
+        or organization.get("organization_urn")
+    )
+    account_name = (
+        organization.get("account_name")
+        or organization.get("organization_name")
+        or organization.get("name")
+        or ""
+    ).strip()
+    if not organization_id:
+        raise HTTPException(status_code=403, detail="LinkedIn publishing is restricted to a Company Page, not a personal profile.")
+    if not is_linkedin_business_only_enabled():
+        return {**organization, "organization_id": organization_id}
+
+    allowed_ids = get_allowed_linkedin_organization_ids()
+    if allowed_ids:
+        if organization_id not in allowed_ids:
+            raise HTTPException(
+                status_code=403,
+                detail="LinkedIn publishing is locked to the Audioraq Company Page. This organization is not on the approved allowlist.",
+            )
+        return {**organization, "organization_id": organization_id}
+
+    allowed_names = get_allowed_linkedin_organization_names()
+    normalized_name = normalize_guardrail_label(account_name)
+    if normalized_name and normalized_name in allowed_names:
+        return {**organization, "organization_id": organization_id}
+
+    if source == "manual":
+        raise HTTPException(
+            status_code=403,
+            detail="Manual LinkedIn connection requires AUDIORAQ_LINKEDIN_ORGANIZATION_ID or LINKEDIN_ALLOWED_ORGANIZATION_IDS so the agent cannot target a personal or wrong business account.",
+        )
+    raise HTTPException(
+        status_code=403,
+        detail="LinkedIn publishing is locked to the Audioraq Company Page. Set AUDIORAQ_LINKEDIN_ORGANIZATION_ID if LinkedIn does not return the exact page name.",
+    )
+
+
+def filter_linkedin_business_organizations(organizations: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    allowed: List[Dict[str, Any]] = []
+    errors: List[str] = []
+    for organization in organizations:
+        try:
+            allowed.append(enforce_linkedin_business_guardrail(organization, source="linkedin"))
+        except HTTPException as exc:
+            errors.append(str(exc.detail))
+    if allowed:
+        return allowed
+    if errors:
+        raise HTTPException(status_code=403, detail=errors[0])
+    return []
 
 
 def build_linkedin_headers(access_token: str, content_type: str = "application/json") -> Dict[str, str]:
@@ -2316,20 +2408,21 @@ async def connect_linkedin_social_accounts(
     if requested_org_id:
         organizations = [item for item in organizations if item["organization_id"] == requested_org_id]
     if not organizations and requested_org_id:
-        organizations = [
-            {
-                "organization_id": requested_org_id,
-                "organization_urn": f"urn:li:organization:{requested_org_id}",
-                "account_id": requested_org_id,
-                "account_name": organization_name.strip() or f"LinkedIn Organization {requested_org_id}",
-                "role": "ADMINISTRATOR",
-            }
-        ]
+        fallback_org = {
+            "organization_id": requested_org_id,
+            "organization_urn": f"urn:li:organization:{requested_org_id}",
+            "account_id": requested_org_id,
+            "account_name": organization_name.strip() or f"LinkedIn Organization {requested_org_id}",
+            "role": "ADMINISTRATOR",
+        }
+        fallback_source = "manual" if is_linkedin_business_only_enabled() else "linkedin"
+        organizations = [enforce_linkedin_business_guardrail(fallback_org, source=fallback_source)]
     if not organizations:
         raise HTTPException(
             status_code=400,
             detail="No administered LinkedIn organization was found for this token. Confirm the app has organization posting permissions and the member is a page admin.",
         )
+    organizations = filter_linkedin_business_organizations(organizations)
 
     connected = []
     for organization in organizations:
@@ -2344,7 +2437,11 @@ async def connect_linkedin_social_accounts(
                 access_token=access_token,
                 refresh_token=refresh_token,
                 token_expires_at=token_expires_at,
-                metadata={"organization_urn": organization["organization_urn"], "role": organization["role"]},
+                metadata={
+                    "organization_urn": organization["organization_urn"],
+                    "role": organization["role"],
+                    "business_guardrail": "audioraq_company_page_only" if is_linkedin_business_only_enabled() else "disabled",
+                },
             )
         )
     return connected
@@ -2436,7 +2533,8 @@ async def publish_linkedin_social_post(post: Dict[str, Any], account: Dict[str, 
     access_token = decrypt_social_token(account.get("access_token", ""))
     if not access_token:
         raise HTTPException(status_code=400, detail="LinkedIn access token is missing")
-    organization_id = normalize_linkedin_organization_id(account.get("organization_id") or account.get("account_id"))
+    guarded_account = enforce_linkedin_business_guardrail(account, source="stored_account")
+    organization_id = normalize_linkedin_organization_id(guarded_account.get("organization_id") or guarded_account.get("account_id"))
     if not organization_id:
         raise HTTPException(status_code=400, detail="LinkedIn organization id is missing")
     payload = {
@@ -2649,7 +2747,7 @@ async def build_social_analytics(user: Dict[str, Any]) -> Dict[str, Any]:
 
 FEEDBACK_PROBLEM_PATTERNS = [
     ("signup_conversion", ["signup", "sign up", "login", "account", "register", "onboarding"]),
-    ("creator_ai_studio", ["create with ai", "ai studio", "draft", "script", "voice", "tts", "agent 2", "quality"]),
+    ("creator_ai_studio", ["create with ai", "ai studio", "draft", "script", "voice", "tts", "ai agents", "quality"]),
     ("podcast_discovery", ["browse", "recommend", "search", "filter", "discover", "category", "home feed"]),
     ("playback_reliability", ["play", "audio", "video", "buffer", "loading", "stream", "queue", "resume"]),
     ("creator_workflow", ["upload", "publish", "show", "season", "episode", "thumbnail", "rss"]),
@@ -3881,7 +3979,7 @@ def agent2_rlaif_self_feedback(gan_review: Dict[str, Any], rag_review: Dict[str,
 
     reward = round(max(0, min(100, reward)), 1)
     if not critique:
-        critique.append("The episode package meets the current Agent 2 quality bar.")
+        critique.append("The episode package meets the current AI Agents quality bar.")
     if not actions:
         actions.append("Preserve the current structure and avoid adding unnecessary complexity.")
 
@@ -3986,7 +4084,7 @@ def build_agent2_scorecard(
             float(voice_review.get("listenability_score") or 0),
             voice_review.get("summary") or "Long-form podcast voice listenability.",
         )
-    scorecard["publish_readiness"] = agent2_scorecard_item(readiness_score, "Combined Agent 2 signal for whether this can move toward publishing.")
+    scorecard["publish_readiness"] = agent2_scorecard_item(readiness_score, "Combined AI Agents signal for whether this can move toward publishing.")
     return scorecard
 
 
@@ -4042,7 +4140,7 @@ def evaluate_agent2_quality(
         voice_summary = f"; voice listenability {voice_score}/100 {voice_review.get('status', '')}"
 
     return {
-        "agent": "Agent 2 - Podcast Quality Reviewer",
+        "agent": "AI Agents - Podcast Quality Review",
         "version": AGENT2_VERSION,
         "source_kind": source_kind,
         "status": status,
@@ -4054,7 +4152,7 @@ def evaluate_agent2_quality(
         "voice_clarity": voice_clarity,
         "podcast_voice": voice_review,
         "summary": (
-            f"Agent 2 quality score {quality_score}/100; "
+            f"AI Agents quality score {quality_score}/100; "
             f"AI-risk {gan_review['label']} {gan_review['score']}; RAG safety {rag_review['status']}"
             f"{clarity_summary}{voice_summary}."
         ),
@@ -4075,7 +4173,7 @@ def merge_agent2_quality_into_moderation(moderation: Dict[str, Any], quality_age
         part
         for part in [
             merged.get("summary", ""),
-            f"Agent 2 RAG check: {rag.get('summary', '')}",
+            f"AI Agents RAG check: {rag.get('summary', '')}",
         ]
         if part
     )[:300]
@@ -4136,19 +4234,19 @@ async def revise_ai_generation_with_agent2_feedback(
         "recommended_category": "string",
     }
     prompt = (
-        "Agent 2 reviewed this AI podcast package and produced RLAIF-style self-feedback.\n"
+        "AI Agents reviewed this AI podcast package and produced RLAIF-style self-feedback.\n"
         "Revise the package once using the feedback. Keep the creator's topic, audience, tone, and goal intact.\n"
         "Do not add unsafe claims. Do not make it clickbait. Make it more concrete, human-paced, and useful.\n\n"
         "Also revise audio_script_turns so they are voice-ready spoken text, preserve speaker roles, and never imitate any real person's voice.\n\n"
         f"Show:\n{json.dumps({'title': show.get('title'), 'description': show.get('description'), 'category': show.get('category')}, ensure_ascii=True)}\n\n"
         f"Creator brief:\n{json.dumps(brief, ensure_ascii=True)}\n\n"
         f"Current package:\n{json.dumps(generation, ensure_ascii=True)}\n\n"
-        f"Agent 2 review:\n{json.dumps(quality_agent, ensure_ascii=True)}\n\n"
+        f"AI Agents review:\n{json.dumps(quality_agent, ensure_ascii=True)}\n\n"
         f"Return JSON matching this schema exactly:\n{json.dumps(schema, ensure_ascii=True)}"
     )
     result = await run_ai_json_chat(
         "agent2-rlaif-revision",
-        "You are Agent 2, Audioraq's quality-improvement reviewer. Return revised JSON only.",
+        "You are Audioraq's AI Agents quality-improvement reviewer. Return revised JSON only.",
         prompt,
         expected_type=dict,
     )
@@ -4158,7 +4256,7 @@ async def revise_ai_generation_with_agent2_feedback(
         revised["ai_text_revision_provider"] = result.get("provider", AI_TEXT_PROVIDER_DETERMINISTIC)
         return revised
     if result.get("errors"):
-        logger.warning(f"Agent 2 RLAIF revision skipped after provider errors: {result['errors'][-2:]}")
+        logger.warning(f"AI Agents RLAIF revision skipped after provider errors: {result['errors'][-2:]}")
     return None
 
 
@@ -5302,7 +5400,7 @@ def enforce_ai_audio_listenability_gate(quality_agent: Dict[str, Any], stored_pa
                 cleanup_storage_paths(stored_paths, strict=False)
             raise HTTPException(
                 status_code=422,
-                detail="Agent 2 could not measure voice listenability. Install ffmpeg or disable AI_AUDIO_REQUIRE_VOICE_METRICS for development.",
+                detail="AI Agents could not measure voice listenability. Install ffmpeg or disable AI_AUDIO_REQUIRE_VOICE_METRICS for development.",
             )
         return
 
@@ -5314,7 +5412,7 @@ def enforce_ai_audio_listenability_gate(quality_agent: Dict[str, Any], stored_pa
         raise HTTPException(
             status_code=422,
             detail=(
-                f"Agent 2 blocked publishing because podcast voice listenability scored {score}/100 "
+                f"AI Agents blocked publishing because podcast voice listenability scored {score}/100 "
                 f"below the required {effective_min_score}/100. {guidance}"
             ),
         )
@@ -5942,7 +6040,7 @@ def build_ai_studio_stage_state(
             state,
             "agent2_review",
             stage_status,
-            agent2_review.get("summary", "Agent 2 review complete."),
+            agent2_review.get("summary", "AI Agents review complete."),
         )
         if review_status == "pass":
             state = update_ai_studio_stage_state(state, "publish", "ready", "Quality gate passed; ready for creator approval.")
@@ -6588,7 +6686,7 @@ def enforce_audioraq_originals_quality_gate(
         raise HTTPException(
             status_code=422,
             detail=(
-                "Audioraq Originals must pass the Agent 2 quality gate before publishing. "
+                "Audioraq Originals must pass the AI Agents quality gate before publishing. "
                 f"Current score: {score}/100; required: {AUDIORAQ_ORIGINALS_MIN_QUALITY_SCORE}/100."
             ),
         )
@@ -6767,9 +6865,9 @@ def build_episode_quality_signals(episode: Dict, show: Optional[Dict]) -> List[s
     if int(episode.get("play_count", 0) or 0) >= 25:
         signals.append("Popular listen")
     if float(episode.get("quality_score", 0) or 0) >= 82:
-        signals.append("Agent 2 quality checked")
+        signals.append("AI Agents quality checked")
     elif episode.get("quality_status") == "revise":
-        signals.append("Agent 2 suggests improvements")
+        signals.append("AI Agents suggest improvements")
     if normalize_content_rating(episode.get("audience_rating")) == MATURE_RATING:
         signals.append("18+ audience")
     if episode.get("publication_status") == PUBLICATION_STATUS_DRAFT:
@@ -8430,6 +8528,7 @@ async def get_social_publish_providers():
             "oauth_supported": is_linkedin_social_configured(),
             "manual_token_supported": manual_supported,
             "scopes": get_linkedin_social_scopes().split(),
+            "business_guardrail": linkedin_business_guardrail_summary(),
         },
         "instagram": {
             "configured": is_instagram_social_configured(),
@@ -8575,7 +8674,11 @@ async def get_social_posts(request: Request, provider: Optional[str] = None, sta
 async def create_social_post(req: SocialPostCreateRequest, request: Request):
     user = await get_current_user(request)
     ensure_social_publishing_access(user)
-    await get_social_connected_account(user, req.social_account_id)
+    account = await get_social_connected_account(user, req.social_account_id)
+    if account.get("provider") != req.provider:
+        raise HTTPException(status_code=400, detail="Selected account does not match the requested social provider")
+    if req.provider == SOCIAL_PUBLISH_PROVIDER_LINKEDIN:
+        enforce_linkedin_business_guardrail(account, source="stored_account")
 
     payload = req.model_dump()
     if payload.get("scheduled_at"):

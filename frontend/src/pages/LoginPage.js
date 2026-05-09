@@ -2,7 +2,6 @@ import React, { useEffect, useState } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
 import { Microphone, Eye, EyeSlash } from '@phosphor-icons/react';
-import SocialAuthButtons from '../components/SocialAuthButtons';
 
 export default function LoginPage() {
   const { login } = useAuth();
@@ -58,7 +57,7 @@ export default function LoginPage() {
           </Link>
 
           <h1 className="font-['Outfit'] text-3xl sm:text-4xl tracking-tight font-bold text-white mb-2">Welcome back</h1>
-          <p className="text-[#8A8A93] mb-8">Sign in to continue to your podcasts</p>
+          <p className="text-[#8A8A93] mb-8">Sign in with email to continue to your podcasts</p>
 
           {error && (
             <div className="bg-[#EF4444]/10 border border-[#EF4444]/30 rounded-lg px-4 py-3 mb-6 text-sm text-[#EF4444]" data-testid="login-error">
@@ -66,8 +65,9 @@ export default function LoginPage() {
             </div>
           )}
 
-          <div className="mb-6">
-            <SocialAuthButtons context="sign in" />
+          <div className="mb-6 rounded-2xl border border-[#27272A] bg-[#141417] px-4 py-4">
+            <p className="text-xs uppercase tracking-[0.2em] text-[#8A8A93] mb-2">Secure login</p>
+            <p className="text-sm text-[#C7C7D1]">Audioraq uses email sign-in here so the account flow stays simple, predictable, and secure.</p>
           </div>
 
           <form onSubmit={handleSubmit} className="space-y-5">

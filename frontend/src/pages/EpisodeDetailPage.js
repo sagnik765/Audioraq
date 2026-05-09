@@ -8,6 +8,7 @@ import PodcastCard from '../components/PodcastCard';
 import { usePlayer } from '../contexts/PlayerContext';
 import { API } from '../lib/api';
 import { useAuth } from '../contexts/AuthContext';
+import { displayAIText } from '../lib/displayText';
 import {
   authRequest,
   clearPodcastRating,
@@ -380,7 +381,7 @@ export default function EpisodeDetailPage() {
             {episode.moderation_summary && (isOwnShow || user?.role === 'admin') && (
               <div className="bg-[#0A0A0B] border border-[#27272A] rounded-2xl px-4 py-4 mb-6">
                 <p className="text-xs uppercase tracking-[0.2em] font-semibold text-[#8A8A93] mb-1">Safety review</p>
-                <p className="text-sm text-white mb-2">{episode.moderation_summary}</p>
+                <p className="text-sm text-white mb-2">{displayAIText(episode.moderation_summary)}</p>
                 <p className="text-xs text-[#8A8A93] uppercase tracking-[0.16em]">
                   Status: {episode.moderation_status || 'clear'}
                 </p>
@@ -414,7 +415,7 @@ export default function EpisodeDetailPage() {
               <div className="flex flex-wrap gap-2 mb-6">
                 {episode.quality_signals.map((signal) => (
                   <span key={signal} className="px-3 py-1 rounded-full bg-[#0A0A0B] border border-[#27272A] text-xs uppercase tracking-[0.18em] text-[#C7C7D1]">
-                    {signal}
+                    {displayAIText(signal)}
                   </span>
                 ))}
               </div>

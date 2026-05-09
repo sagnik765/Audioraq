@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Re-score stored Agent 2 podcast voice reports with the current rubric.
+"""Re-score stored AI Agents podcast voice reports with the current rubric.
 
 This is intended for safe post-deploy maintenance: it does not touch media
 objects and it does not rewrite episode copy. It only recalculates the nested
@@ -104,7 +104,7 @@ def rebuild_quality_agent(
         if readiness_inputs:
             scorecard["publish_readiness"] = scorecard_item(
                 sum(readiness_inputs) / len(readiness_inputs),
-                "Combined Agent 2 signal for whether this can move toward publishing.",
+                "Combined AI Agents signal for whether this can move toward publishing.",
             )
     quality_agent["scorecard"] = scorecard
 
@@ -127,7 +127,7 @@ def rebuild_quality_agent(
         voice_summary = f"; voice listenability {new_score}/100 {voice_review.get('status', '')}"
     gan = quality_agent.get("gan_discriminator") or {}
     quality_agent["summary"] = (
-        f"Agent 2 quality score {quality_agent.get('quality_score', 0)}/100; "
+        f"AI Agents quality score {quality_agent.get('quality_score', 0)}/100; "
         f"AI-risk {gan.get('label', 'unknown')} {gan.get('score', 'unknown')}; "
         f"RAG safety {rag_status or 'unknown'}{clarity_summary}{voice_summary}."
     )

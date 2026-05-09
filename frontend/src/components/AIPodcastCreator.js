@@ -3,6 +3,7 @@ import axios from 'axios';
 import { PencilSimple, Play, Plus } from '@phosphor-icons/react';
 import { toast } from 'sonner';
 import { API } from '../lib/api';
+import { displayAIText } from '../lib/displayText';
 
 function uniqueSuggestions(values) {
   return [...new Set((values || []).filter(Boolean).map((value) => String(value).trim()).filter(Boolean))];
@@ -85,7 +86,7 @@ const studioStages = [
   { id: 'cast', label: 'Cast' },
   { id: 'table_read', label: 'Table Read' },
   { id: 'final_render', label: 'Render' },
-  { id: 'agent2_review', label: 'Agent 2' },
+  { id: 'agent2_review', label: 'AI Agents' },
   { id: 'publish', label: 'Publish' },
 ];
 
@@ -715,7 +716,7 @@ export default function AIPodcastCreator({
           <p className="text-xs uppercase tracking-[0.2em] font-semibold text-[#F5A623] mb-2">Create Podcast with AI</p>
           <h2 className="font-['Outfit'] text-2xl font-semibold text-white mb-2">Build an episode brief one answer at a time</h2>
           <p className="text-sm text-[#8A8A93] max-w-3xl">
-            Audioraq keeps this conversational on purpose. You answer one focused question, we store the brief as structured JSON, and the AI turns it into an audio-only podcast package. Agent 2 checks the result with GAN-inspired quality scoring, RAG safety retrieval, and RLAIF-style self-feedback before it reaches publishing.
+            Audioraq keeps this conversational on purpose. You answer one focused question, we store the brief as structured JSON, and AI Agents turn it into an audio-only podcast package with quality scoring, safety retrieval, and self-feedback before it reaches publishing.
           </p>
         </div>
 
@@ -740,7 +741,7 @@ export default function AIPodcastCreator({
               <p className="text-xs uppercase tracking-[0.18em] text-[#F5A623] mb-2">AI Creator Studio</p>
               <h3 className="font-['Outfit'] text-xl font-semibold text-white mb-2">Production-room workflow</h3>
               <p className="text-sm text-[#8A8A93] max-w-3xl">
-                This keeps Audioraq&apos;s USP focused: creators get guided podcast strategy, dialogue structure, source review, voice casting, Agent 2 QA, and audio-only AI publishing in one simple pipeline.
+                This keeps Audioraq&apos;s USP focused: creators get guided podcast strategy, dialogue structure, source review, voice casting, AI Agents QA, and audio-only AI publishing in one simple pipeline.
               </p>
             </div>
             <div className="flex flex-wrap gap-3">
@@ -821,7 +822,7 @@ export default function AIPodcastCreator({
               </div>
 
               <div className="bg-[#141417] border border-[#27272A] rounded-2xl p-4">
-                <p className="text-xs uppercase tracking-[0.18em] text-[#8A8A93] mb-2">Agent 2 Scorecard</p>
+                <p className="text-xs uppercase tracking-[0.18em] text-[#8A8A93] mb-2">AI Agents Scorecard</p>
                 {scorecardEntries.length > 0 ? (
                   <div className="space-y-2">
                     {scorecardEntries.map(([key, item]) => (
@@ -832,7 +833,7 @@ export default function AIPodcastCreator({
                     ))}
                   </div>
                 ) : (
-                  <p className="text-sm text-[#8A8A93]">Agent 2 scores appear after generation and review.</p>
+                  <p className="text-sm text-[#8A8A93]">AI Agents scores appear after generation and review.</p>
                 )}
               </div>
             </div>
@@ -969,16 +970,16 @@ export default function AIPodcastCreator({
 
                     {generatedDraft.agent2_review && (
                       <div className={`border rounded-2xl p-4 mb-4 ${qualityTone(generatedDraft.agent2_review.status)}`}>
-                        <p className="text-xs uppercase tracking-[0.18em] mb-2">Agent 2 Quality Gate</p>
+                        <p className="text-xs uppercase tracking-[0.18em] mb-2">AI Agents Quality Gate</p>
                         <p className="text-sm font-semibold text-white mb-1">
                           Score {generatedDraft.agent2_review.quality_score}/100 · {generatedDraft.agent2_review.status}
                         </p>
                         <p className="text-xs text-[#C7C7D1] leading-relaxed">
-                          {generatedDraft.agent2_review.summary}
+                          {displayAIText(generatedDraft.agent2_review.summary)}
                         </p>
                         {generatedDraft.agent2_review.rlaif?.improvement_actions?.length > 0 && (
                           <p className="text-xs text-[#8A8A93] mt-2">
-                            Next improvement: {generatedDraft.agent2_review.rlaif.improvement_actions[0]}
+                            Next improvement: {displayAIText(generatedDraft.agent2_review.rlaif.improvement_actions[0])}
                           </p>
                         )}
                         {generatedDraft.agent2_review.scorecard && (
@@ -1056,7 +1057,7 @@ export default function AIPodcastCreator({
                         'A structured episode outline that matches the show, audience, and goal.',
                         'A sharper intro hook without turning the episode into generic clickbait.',
                         'Talking points, production notes, and publish-ready copy for an audio-only AI episode.',
-                        'An Agent 2 quality report with GAN-inspired scoring, RAG safety retrieval, and RLAIF-style feedback.',
+                        'An AI Agents quality report with GAN-inspired scoring, RAG safety retrieval, and RLAIF-style feedback.',
                       ].map((line) => (
                         <div key={line} className="bg-[#141417] border border-[#27272A] rounded-2xl p-4">
                           <p className="text-sm text-[#C7C7D1]">{line}</p>
@@ -1136,7 +1137,7 @@ export default function AIPodcastCreator({
                     </div>
                     {draft.agent2_review && (
                       <div className={`inline-flex rounded-full border px-3 py-1 text-[10px] uppercase tracking-[0.16em] mb-3 ${qualityTone(draft.agent2_review.status)}`}>
-                        Agent 2 {draft.agent2_review.quality_score}/100 · {draft.agent2_review.status}
+                        AI Agents {draft.agent2_review.quality_score}/100 · {draft.agent2_review.status}
                       </div>
                     )}
                     <p className="text-sm text-[#C7C7D1] line-clamp-3 mb-4">

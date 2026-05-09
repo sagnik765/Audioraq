@@ -171,7 +171,7 @@ AI_AUDIO_TTS_LOCAL_VOICE_PROFILE=proof_studio
 AI_AUDIO_TTS_LOCAL_FILTER=highpass=f=80,lowpass=f=12000,loudnorm=I=-16:TP=-1.5:LRA=11
 ```
 
-`AI_TEXT_PROVIDER=ollama,deterministic` routes draft writing, Agent 2 revision, safety review, keyword extraction, and AI recommendations to a local Ollama-compatible endpoint first, then falls back to deterministic logic instead of a paid LLM API. The current code does not bundle an Ollama model; install/run the local model outside the web container and point `AI_TEXT_LOCAL_BASE_URL` at it.
+`AI_TEXT_PROVIDER=ollama,deterministic` routes draft writing, AI Agents revision, safety review, keyword extraction, and AI recommendations to a local Ollama-compatible endpoint first, then falls back to deterministic logic instead of a paid LLM API. The current code does not bundle an Ollama model; install/run the local model outside the web container and point `AI_TEXT_LOCAL_BASE_URL` at it.
 
 `AI_AUDIO_TTS_PROVIDER=apple_say,local` uses the restored proof-studio path. On macOS it can reproduce the April 11 QA recipe with the generic system voices `Aman` for the host and `Samantha` for the co-host/guest, plus the same 0.22s dialogue gaps. OCI/Linux cannot run Apple system voices, so the live site uses `AI_AUDIO_TTS_PROVIDER=local` with the matching proof-studio local voice profile instead of forcing Kokoro.
 
@@ -239,56 +239,11 @@ Keep `AI_AUDIO_TTS_LOCAL_FALLBACK=true` so Audioraq still publishes an audio epi
 
 The built-in local fallback can be improved, but it is still not a neural production TTS provider. Set `AI_AUDIO_TTS_LOCAL_MULTIVOICE=true` and `AI_AUDIO_TTS_LOCAL_POSTPROCESS=true` to render host/guest/narrator turns with different `espeak-ng` voice variants, pacing, pitch, and ffmpeg normalization. This is useful for low-cost seeding or outages, but it should be labeled as local fallback quality rather than ElevenLabs-equivalent audio.
 
-### 3c. Enable Google and Apple sign-in
+### 3c. Auth policy
 
-The live app already contains the full OAuth flow. The last step is adding real provider credentials to [deploy/oracle/oracle.env.example](/Users/sagnikroy/Documents/New%20project/Podlyzer-Centralized-Podcast-Hub/deploy/oracle/oracle.env.example) and your deployed `deploy/oracle/oracle.env`.
+Audioraq currently uses email and password signup/login only. The frontend intentionally does not show wallet, social sign-in, or payment-provider buttons during onboarding, because the launch experience should feel simple, focused, and secure.
 
-Use these exact production callback URLs:
-- Google callback: `https://www.audioraq.com/api/auth/oauth/google/callback`
-- Apple callback: `https://www.audioraq.com/api/auth/oauth/apple/callback`
-
-Set these production env vars:
-
-```dotenv
-GOOGLE_CLIENT_ID=<google-oauth-client-id>
-GOOGLE_CLIENT_SECRET=<google-oauth-client-secret>
-GOOGLE_REDIRECT_URI=https://www.audioraq.com/api/auth/oauth/google/callback
-
-APPLE_CLIENT_ID=<apple-services-id>
-APPLE_TEAM_ID=<apple-team-id>
-APPLE_KEY_ID=<apple-key-id>
-APPLE_PRIVATE_KEY=-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----
-APPLE_REDIRECT_URI=https://www.audioraq.com/api/auth/oauth/apple/callback
-```
-
-#### Google Cloud
-
-1. Open Google Cloud Console and create or select the Audioraq project.
-2. Configure the OAuth consent screen with app name `Audioraq`, your support email, and the authorized domain `audioraq.com`.
-3. Create an OAuth client of type `Web application`.
-4. Add this redirect URI:
-   - `https://www.audioraq.com/api/auth/oauth/google/callback`
-5. Copy the Google client ID and secret into `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET`.
-
-#### Apple Developer
-
-1. In Apple Developer, create or use an App ID with `Sign in with Apple` enabled.
-2. Create a `Services ID`. This Services ID becomes `APPLE_CLIENT_ID`.
-3. Under the Services ID configuration, enable `Sign in with Apple` for the web.
-4. Set:
-   - Primary App ID: your Apple app identifier with Sign in with Apple enabled
-   - Domains and subdomains: `www.audioraq.com`, `audioraq.com`
-   - Return URL: `https://www.audioraq.com/api/auth/oauth/apple/callback`
-5. Create a `Sign in with Apple` key, download the `.p8` file once, and copy:
-   - `APPLE_TEAM_ID`
-   - `APPLE_KEY_ID`
-   - the `.p8` contents into `APPLE_PRIVATE_KEY`
-
-Important:
-- Store `APPLE_PRIVATE_KEY` as one line with literal `\n` escapes in the env file.
-- If you want extra safety, you can also add the apex callback URL in each provider console:
-  - `https://audioraq.com/api/auth/oauth/google/callback`
-  - `https://audioraq.com/api/auth/oauth/apple/callback`
+If social login is reintroduced later, it should ship as a deliberate product decision with provider credentials, callback testing, privacy copy, and a separate launch QA pass.
 
 ### 4. Launch Audioraq
 
@@ -317,19 +272,12 @@ After DNS propagates, test:
 
 ```bash
 curl https://www.audioraq.com/api/health
-curl https://www.audioraq.com/api/auth/social/providers
 ```
 
 Expected result:
 
 ```json
 {"status":"ok"}
-```
-
-And after the provider secrets are added:
-
-```json
-{"google":true,"apple":true}
 ```
 
 ### Why this fixes the URL branding

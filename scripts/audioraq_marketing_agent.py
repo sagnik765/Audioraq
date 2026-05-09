@@ -40,7 +40,7 @@ PRODUCT_POSITIONING = (
 PRODUCT_PROOF_POINTS = [
     "Show-first catalog structure: Show > Season > Episode",
     "Create with AI for audio-first podcast creation",
-    "Agent 2 quality gates for safety, quality, and listenability",
+    "Agentic AI quality gates for safety, quality, and listenability",
     "AI Strategist for podcasters to decide what to publish next",
     "AI Listener Brief and Ask this Episode for viewers",
     "Proof-of-work catalog via Audioraq Originals",
@@ -168,7 +168,7 @@ LINKEDIN_TEMPLATES = [
             "In Audioraq, the flow now looks like this:\n"
             "1. AI Strategist suggests what the show should publish next\n"
             "2. The creator sends that idea straight into Create with AI\n"
-            "3. Agent 2 reviews quality before it reaches listeners\n\n"
+            "3. Agentic AI reviews quality before it reaches listeners\n\n"
             "That is closer to a studio team than a text box."
         ),
         "hashtags": ["#podcastcreator", "#productdemo", "#aiworkflow", "#creatortools"],

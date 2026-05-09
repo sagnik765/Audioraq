@@ -73,34 +73,6 @@ export function AuthProvider({ children }) {
     }
   };
 
-  const getPendingSocialSignup = useCallback(async () => {
-    try {
-      const { data } = await axios.get(`${API}/auth/social/pending`, { withCredentials: true });
-      return { success: true, data };
-    } catch (e) {
-      return { success: false, error: formatApiErrorDetail(e.response?.data?.detail) || e.message };
-    }
-  }, []);
-
-  const completeSocialSignup = useCallback(async (formData) => {
-    try {
-      const { data } = await axios.post(`${API}/auth/social/complete`, formData, { withCredentials: true });
-      setUser(data);
-      return { success: true, data };
-    } catch (e) {
-      return { success: false, error: formatApiErrorDetail(e.response?.data?.detail) || e.message };
-    }
-  }, []);
-
-  const cancelPendingSocialSignup = useCallback(async () => {
-    try {
-      await axios.post(`${API}/auth/social/cancel`, {}, { withCredentials: true });
-      return { success: true };
-    } catch (e) {
-      return { success: false, error: formatApiErrorDetail(e.response?.data?.detail) || e.message };
-    }
-  }, []);
-
   const logout = async () => {
     try {
       await axios.post(`${API}/auth/logout`, {}, { withCredentials: true });
@@ -125,9 +97,6 @@ export function AuthProvider({ children }) {
         loading,
         login,
         register,
-        getPendingSocialSignup,
-        completeSocialSignup,
-        cancelPendingSocialSignup,
         logout,
         updateInterests,
         checkAuth,

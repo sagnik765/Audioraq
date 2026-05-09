@@ -4,6 +4,7 @@ import { toast } from 'sonner';
 import { Broadcast, PlayCircle, UsersThree, Waveform } from '@phosphor-icons/react';
 import { API } from '../lib/api';
 import { useAuth } from '../contexts/AuthContext';
+import { displayAIText } from '../lib/displayText';
 import { followShow, unfollowShow } from '../lib/library';
 
 export default function ShowCard({ show, onFollowChange }) {
@@ -127,7 +128,7 @@ export default function ShowCard({ show, onFollowChange }) {
           <div className="flex flex-wrap gap-2 mt-4">
             {show.quality_signals.slice(0, 3).map((signal) => (
               <span key={signal} className="px-2.5 py-1 rounded-full bg-[#0A0A0B] border border-[#27272A] text-[10px] uppercase tracking-[0.16em] text-[#C7C7D1]">
-                {signal}
+                {displayAIText(signal)}
               </span>
             ))}
           </div>

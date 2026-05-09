@@ -20,15 +20,21 @@ export default function BrowsePage() {
   const [mediaType, setMediaType] = useState('');
   const [sort, setSort] = useState('recent');
   const [followingOnly, setFollowingOnly] = useState(false);
+  const [browseParams, setBrowseParams] = useState({
+    search: '',
+    category: '',
+    mediaType: '',
+    sort: 'recent',
+    followingOnly: false,
+  });
   const [loading, setLoading] = useState(true);
 
-  const fetchBrowse = useCallback(async (overrides = {}) => {
-    const nextSearch = overrides.search ?? searchQuery;
-    const nextCategory = overrides.category ?? selectedCategory;
-    const nextMediaType = overrides.mediaType ?? mediaType;
-    const nextSort = overrides.sort ?? sort;
-    const nextFollowingOnly = overrides.followingOnly ?? followingOnly;
-
+  const fetchBrowse = useCallback(async (params) => {
+    const nextSearch = params.search || '';
+    const nextCategory = params.category || '';
+    const nextMediaType = params.mediaType || '';
+    const nextSort = params.sort || 'recent';
+    const nextFollowingOnly = Boolean(params.followingOnly);
     setLoading(true);
     try {
       const showsUrl = `${API}/shows?limit=8${nextSearch ? `&search=${encodeURIComponent(nextSearch)}` : ''}${nextCategory ? `&category=${encodeURIComponent(nextCategory)}` : ''}${nextFollowingOnly ? '&following_only=true' : ''}`;
@@ -48,15 +54,18 @@ export default function BrowsePage() {
     } finally {
       setLoading(false);
     }
-  }, [followingOnly, mediaType, searchQuery, selectedCategory, sort, user]);
+  }, [user]);
 
   useEffect(() => {
-    fetchBrowse();
+    fetchBrowse(browseParams);
+  }, [browseParams, fetchBrowse]);
+
+  useEffect(() => {
     axios.get(`${API}/categories`, authRequest).then((res) => setCategories(res.data.categories || [])).catch(() => {});
-  }, [fetchBrowse]);
+  }, []);
 
   const handleSearch = () => {
-    fetchBrowse({ search: searchQuery });
+    setBrowseParams((prev) => ({ ...prev, search: searchQuery }));
   };
 
   const removeEpisode = (podcastId) => {
@@ -131,7 +140,7 @@ export default function BrowsePage() {
                 value={sort}
                 onChange={(e) => {
                   setSort(e.target.value);
-                  fetchBrowse({ sort: e.target.value });
+                  setBrowseParams((prev) => ({ ...prev, sort: e.target.value }));
                 }}
                 className="bg-[#0A0A0B] border border-[#27272A] rounded-full px-4 py-2 text-sm text-white outline-none"
               >
@@ -146,7 +155,7 @@ export default function BrowsePage() {
                 value={mediaType}
                 onChange={(e) => {
                   setMediaType(e.target.value);
-                  fetchBrowse({ mediaType: e.target.value });
+                  setBrowseParams((prev) => ({ ...prev, mediaType: e.target.value }));
                 }}
                 className="bg-[#0A0A0B] border border-[#27272A] rounded-full px-4 py-2 text-sm text-white outline-none"
               >
@@ -159,7 +168,7 @@ export default function BrowsePage() {
                   onClick={() => {
                     const nextFollowingOnly = !followingOnly;
                     setFollowingOnly(nextFollowingOnly);
-                    fetchBrowse({ followingOnly: nextFollowingOnly });
+                    setBrowseParams((prev) => ({ ...prev, followingOnly: nextFollowingOnly }));
                   }}
                   className={`rounded-full px-4 py-2 text-sm font-medium transition-all ${
                     followingOnly
@@ -183,7 +192,7 @@ export default function BrowsePage() {
                 onClick={() => {
                   const nextCategory = selectedCategory === category ? '' : category;
                   setSelectedCategory(nextCategory);
-                  fetchBrowse({ category: nextCategory });
+                  setBrowseParams((prev) => ({ ...prev, category: nextCategory }));
                 }}
                 className={`px-4 py-2 rounded-full text-sm font-medium transition-all ${
                   selectedCategory === category
@@ -249,7 +258,7 @@ export default function BrowsePage() {
                   </h2>
                   <p className="text-sm text-[#8A8A93] mt-1">
                     {sort === 'recommended'
-                      ? 'A curated set of 10 polished proof-of-work episodes with strong Agent 2 quality, voice clarity, and listenability scores.'
+                      ? 'A curated set of 10 polished proof-of-work episodes with strong AI Agents quality, voice clarity, and listenability scores.'
                       : selectedCategory
                       ? `Topic-mapped recommendations for ${selectedCategory}, using category, keywords, titles, and show context.`
                       : 'Recommendation reasons and trust cues are built in so you can make a decision quickly.'}

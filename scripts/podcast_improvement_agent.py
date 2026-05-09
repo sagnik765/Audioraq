@@ -2,7 +2,7 @@
 """
 Podcast Improvement Agent for Audioraq QA.
 
-Agent 2 improves scripts/media from the AI Podcast Creation Agent output by
+AI Agents improves scripts/media from the AI Podcast Creation Agent output by
 turning monotone monologues into 2-person or 3-person dialogue episodes. It
 scores each episode for:
 - monotony and AI-detectability risk using a GAN-inspired discriminator report

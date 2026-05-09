@@ -5,6 +5,7 @@ import { usePlayer } from '../contexts/PlayerContext';
 import { BookmarkSimple, Eye, EyeSlash, Headphones, Play, Star, Waveform } from '@phosphor-icons/react';
 import { API } from '../lib/api';
 import { useAuth } from '../contexts/AuthContext';
+import { displayAIText } from '../lib/displayText';
 import { hidePodcast, restorePodcast, savePodcast, unsavePodcast } from '../lib/library';
 
 export default function PodcastCard({ podcast, onHide, onSaveChange }) {
@@ -209,7 +210,7 @@ export default function PodcastCard({ podcast, onHide, onSaveChange }) {
           <div className="flex flex-wrap gap-2 mb-3">
             {podcast.quality_signals.slice(0, 2).map((signal) => (
               <span key={signal} className="bg-[#0A0A0B] border border-[#27272A] text-[10px] text-[#C7C7D1] px-2 py-0.5 rounded-full uppercase tracking-[0.16em]">
-                {signal}
+                {displayAIText(signal)}
               </span>
             ))}
           </div>
@@ -236,21 +237,23 @@ export default function PodcastCard({ podcast, onHide, onSaveChange }) {
             <span>{formatDate(podcast.created_at)}</span>
           </div>
         </div>
-        {isPlayable && (
+        {isPlayable && requiresSignup && (
           <div className="flex items-center gap-2 mt-4 flex-wrap">
-            {requiresSignup && (
-              <button
-                type="button"
-                onClick={(event) => {
-                  event.stopPropagation();
-                  navigate('/register');
-                }}
-                className="rounded-full px-3 py-1.5 text-[11px] font-bold uppercase tracking-[0.16em] bg-[#F5A623] text-[#0A0A0B] hover:bg-[#F7B84B] transition-colors"
-                data-testid={`podcast-signup-${podcast.id}`}
-              >
-                Sign up to play
-              </button>
-            )}
+            <button
+              type="button"
+              onClick={(event) => {
+                event.stopPropagation();
+                navigate('/register');
+              }}
+              className="rounded-full px-3 py-1.5 text-[11px] font-bold uppercase tracking-[0.16em] bg-[#F5A623] text-[#0A0A0B] hover:bg-[#F7B84B] transition-colors"
+              data-testid={`podcast-signup-${podcast.id}`}
+            >
+              Sign up for full listening
+            </button>
+          </div>
+        )}
+        {isPlayable && !requiresSignup && (
+          <div className="flex items-center gap-2 mt-4 flex-wrap">
             <button
               type="button"
               onClick={(event) => handleQueue(event, 'next')}

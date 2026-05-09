@@ -8,6 +8,7 @@ import PodcastCard from '../components/PodcastCard';
 import { usePlayer } from '../contexts/PlayerContext';
 import { API } from '../lib/api';
 import { useAuth } from '../contexts/AuthContext';
+import { displayAIText } from '../lib/displayText';
 import { followShow, unfollowShow, authRequest } from '../lib/library';
 
 export default function ShowPage() {
@@ -175,7 +176,7 @@ export default function ShowPage() {
               <div className="flex flex-wrap gap-2 mb-6">
                 {show.quality_signals.map((signal) => (
                   <span key={signal} className="px-3 py-1 rounded-full bg-[#0A0A0B] border border-[#27272A] text-xs uppercase tracking-[0.18em] text-[#C7C7D1]">
-                    {signal}
+                    {displayAIText(signal)}
                   </span>
                 ))}
               </div>

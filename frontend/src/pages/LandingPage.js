@@ -62,14 +62,14 @@ export default function LandingPage() {
         <div className="relative z-10 max-w-3xl px-6 md:px-8 lg:px-12 opacity-0 animate-fade-in-up">
           <div className="inline-flex items-center gap-2 bg-[#141417]/80 border border-[#27272A] rounded-full px-4 py-2 mb-8">
             <span className="w-2 h-2 rounded-full bg-[#F5A623] animate-pulse" />
-            <span className="text-xs uppercase tracking-[0.2em] font-semibold text-[#8A8A93]">A platform built for podcasters</span>
+            <span className="text-xs uppercase tracking-[0.2em] font-semibold text-[#8A8A93]">AI-first podcast studio</span>
           </div>
           <h1 className="font-['Outfit'] text-4xl sm:text-5xl lg:text-6xl tracking-tighter font-bold text-white leading-[1.1] mb-6">
-            Your podcast deserves<br />
-            <span className="text-[#F5A623]">its own stage.</span>
+            Create better podcasts<br />
+            <span className="text-[#F5A623]">without the blank page.</span>
           </h1>
           <p className="text-base text-[#8A8A93] leading-relaxed max-w-xl mb-10">
-            Stop competing with short-form content. Audioraq is a dedicated platform where podcasters connect directly with listeners who are searching for exactly what you create.
+            Audioraq helps creators plan shows, generate audio-first episodes, run AI Agents quality checks, publish into a show-first catalog, and learn from listeners.
           </p>
           <div className="flex flex-wrap gap-4">
             <Link
@@ -78,7 +78,7 @@ export default function LandingPage() {
               data-testid="hero-get-started-btn"
             >
               <Microphone weight="bold" className="w-5 h-5" />
-              Start Podcasting
+              Start Creating
             </Link>
             <Link
               to="/browse"
@@ -89,6 +89,18 @@ export default function LandingPage() {
               Browse Podcasts
             </Link>
           </div>
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mt-10 max-w-2xl">
+            {[
+              ['AI studio', 'Brief, outline, script, voice casting'],
+              ['Quality gates', 'Listenability, safety, and structure checks'],
+              ['Show-first', 'Show, season, episode, and listener signals'],
+            ].map(([label, body]) => (
+              <div key={label} className="rounded-2xl border border-[#27272A] bg-[#141417]/80 px-4 py-4 backdrop-blur">
+                <p className="text-xs uppercase tracking-[0.18em] text-[#F5A623] mb-2">{label}</p>
+                <p className="text-xs text-[#C7C7D1] leading-relaxed">{body}</p>
+              </div>
+            ))}
+          </div>
         </div>
       </div>
 
@@ -98,7 +110,7 @@ export default function LandingPage() {
           <div className="text-center mb-16 opacity-0 animate-fade-in-up stagger-1">
             <span className="text-xs uppercase tracking-[0.2em] font-semibold text-[#F5A623] mb-4 block">Why Audioraq</span>
             <h2 className="font-['Outfit'] text-2xl sm:text-3xl lg:text-4xl tracking-tight font-semibold text-white">
-              Built exclusively for podcasts
+              Built around the real podcast workflow
             </h2>
           </div>
 
@@ -106,18 +118,18 @@ export default function LandingPage() {
             {[
               {
                 icon: <Microphone weight="duotone" className="w-8 h-8 text-[#F5A623]" />,
-                title: "For Podcasters",
-                desc: "Upload your audio and video content. Your show gets discovered by listeners actively searching for your niche."
+                title: "Create With AI",
+                desc: "Move from show idea to structured audio episode package with guided inputs, voice casting, and publish-ready metadata."
               },
               {
                 icon: <MagnifyingGlass weight="duotone" className="w-8 h-8 text-[#F5A623]" />,
-                title: "Smart Discovery",
-                desc: "AI-powered recommendations match listeners with podcasts based on their interests and viewing history."
+                title: "Quality Before Publishing",
+                desc: "AI Agents review listenability, safety, structure, and clarity so speed does not turn into low-quality output."
               },
               {
                 icon: <WaveformSlash weight="duotone" className="w-8 h-8 text-[#F5A623]" />,
-                title: "No Noise",
-                desc: "No short videos, no memes. Just podcasts. Your content isn't buried under unrelated media."
+                title: "Listeners Get Context",
+                desc: "Episode pages show trust signals, ratings, saves, views, AI briefs, and clear reasons to listen before pressing play."
               }
             ].map((feature, i) => (
               <div
@@ -136,16 +148,53 @@ export default function LandingPage() {
         </div>
       </section>
 
+      <section className="px-6 md:px-8 lg:px-12 pb-24">
+        <div className="max-w-6xl mx-auto grid grid-cols-1 lg:grid-cols-[0.95fr_1.05fr] gap-8">
+          <div className="bg-[#141417] border border-[#27272A] rounded-3xl p-8 md:p-10">
+            <span className="text-xs uppercase tracking-[0.2em] font-semibold text-[#F5A623] mb-4 block">For creators</span>
+            <h2 className="font-['Outfit'] text-2xl sm:text-3xl tracking-tight font-semibold text-white mb-4">
+              A production team inside your workflow
+            </h2>
+            <p className="text-sm text-[#8A8A93] leading-relaxed mb-6">
+              Audioraq is designed to help creators publish consistently without stitching together strategy docs, AI tools, audio workflows, hosting, and feedback.
+            </p>
+            <div className="space-y-3">
+              {['Plan the next episode from show context', 'Create audio-first drafts with guided inputs', 'Use quality checks before publishing', 'Track saves, ratings, plays, and completion'].map((item) => (
+                <div key={item} className="rounded-2xl bg-[#0A0A0B] border border-[#27272A] px-4 py-3 text-sm text-[#C7C7D1]">
+                  {item}
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <div className="bg-[#F5A623] rounded-3xl p-8 md:p-10 text-[#0A0A0B]">
+            <span className="text-xs uppercase tracking-[0.2em] font-bold mb-4 block">Launch offer</span>
+            <h2 className="font-['Outfit'] text-2xl sm:text-3xl tracking-tight font-bold mb-4">
+              Free AI podcast audit for early creators
+            </h2>
+            <p className="text-sm leading-relaxed mb-6">
+              Use code <span className="font-bold">PODCASTAI</span> to unlock two months of creator audit access: show positioning, episode ideas, and quality guidance.
+            </p>
+            <Link
+              to="/register?promo=PODCASTAI"
+              className="inline-flex rounded-full bg-[#0A0A0B] px-6 py-3 text-sm font-bold text-white hover:bg-[#1F1F24] transition-colors"
+            >
+              Claim PODCASTAI
+            </Link>
+          </div>
+        </div>
+      </section>
+
       {/* CTA */}
       <section className="py-24 px-6 md:px-8 lg:px-12">
         <div className="max-w-4xl mx-auto text-center bg-[#141417] border border-[#27272A] rounded-2xl p-12 md:p-16 relative overflow-hidden">
           <div className="absolute inset-0 bg-gradient-to-br from-[#F5A623]/5 to-transparent" />
           <div className="relative z-10">
             <h2 className="font-['Outfit'] text-2xl sm:text-3xl lg:text-4xl tracking-tight font-semibold text-white mb-4">
-              Ready to be heard?
+              Ready to create a show people come back to?
             </h2>
             <p className="text-[#8A8A93] mb-8 max-w-md mx-auto">
-              Join the community of podcasters and listeners who value quality content.
+              Start with a show, create with AI when it helps, and publish with quality signals listeners can trust.
             </p>
             <Link
               to="/register"
