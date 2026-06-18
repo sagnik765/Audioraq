@@ -86,7 +86,7 @@ const studioStages = [
   { id: 'cast', label: 'Cast' },
   { id: 'table_read', label: 'Table Read' },
   { id: 'final_render', label: 'Render' },
-  { id: 'agent2_review', label: 'AI Agents' },
+  { id: 'quality_review', label: 'AI Agents' },
   { id: 'publish', label: 'Publish' },
 ];
 
@@ -706,7 +706,7 @@ export default function AIPodcastCreator({
   const cast = projectArtifacts.cast || [];
   const scriptTurns = projectArtifacts.script?.audio_script_turns || [];
   const scorecardEntries = firstScorecardEntries(
-    displayedProject?.agent2_review?.scorecard || generatedDraft?.agent2_review?.scorecard,
+    displayedProject?.quality_review?.scorecard || generatedDraft?.quality_review?.scorecard,
   );
 
   return (
@@ -968,23 +968,23 @@ export default function AIPodcastCreator({
                       </button>
                     </div>
 
-                    {generatedDraft.agent2_review && (
-                      <div className={`border rounded-2xl p-4 mb-4 ${qualityTone(generatedDraft.agent2_review.status)}`}>
+                    {generatedDraft.quality_review && (
+                      <div className={`border rounded-2xl p-4 mb-4 ${qualityTone(generatedDraft.quality_review.status)}`}>
                         <p className="text-xs uppercase tracking-[0.18em] mb-2">AI Agents Quality Gate</p>
                         <p className="text-sm font-semibold text-white mb-1">
-                          Score {generatedDraft.agent2_review.quality_score}/100 · {generatedDraft.agent2_review.status}
+                          Score {generatedDraft.quality_review.quality_score}/100 · {generatedDraft.quality_review.status}
                         </p>
                         <p className="text-xs text-[#C7C7D1] leading-relaxed">
-                          {displayAIText(generatedDraft.agent2_review.summary)}
+                          {displayAIText(generatedDraft.quality_review.summary)}
                         </p>
-                        {generatedDraft.agent2_review.rlaif?.improvement_actions?.length > 0 && (
+                        {generatedDraft.quality_review.rlaif?.improvement_actions?.length > 0 && (
                           <p className="text-xs text-[#8A8A93] mt-2">
-                            Next improvement: {displayAIText(generatedDraft.agent2_review.rlaif.improvement_actions[0])}
+                            Next improvement: {displayAIText(generatedDraft.quality_review.rlaif.improvement_actions[0])}
                           </p>
                         )}
-                        {generatedDraft.agent2_review.scorecard && (
+                        {generatedDraft.quality_review.scorecard && (
                           <div className="grid grid-cols-2 md:grid-cols-3 gap-2 mt-4">
-                            {firstScorecardEntries(generatedDraft.agent2_review.scorecard).map(([key, item]) => (
+                            {firstScorecardEntries(generatedDraft.quality_review.scorecard).map(([key, item]) => (
                               <div key={key} className="bg-[#0A0A0B]/70 border border-[#27272A] rounded-xl p-3">
                                 <p className="text-[10px] uppercase tracking-[0.14em] text-[#8A8A93] mb-1">{key.replace(/_/g, ' ')}</p>
                                 <p className="text-sm font-semibold text-white">{Math.round(item.score || 0)}/100</p>
@@ -1135,9 +1135,9 @@ export default function AIPodcastCreator({
                         {draft.publish_prefill?.category || draft.recommended_category}
                       </span>
                     </div>
-                    {draft.agent2_review && (
-                      <div className={`inline-flex rounded-full border px-3 py-1 text-[10px] uppercase tracking-[0.16em] mb-3 ${qualityTone(draft.agent2_review.status)}`}>
-                        AI Agents {draft.agent2_review.quality_score}/100 · {draft.agent2_review.status}
+                    {draft.quality_review && (
+                      <div className={`inline-flex rounded-full border px-3 py-1 text-[10px] uppercase tracking-[0.16em] mb-3 ${qualityTone(draft.quality_review.status)}`}>
+                        AI Agents {draft.quality_review.quality_score}/100 · {draft.quality_review.status}
                       </div>
                     )}
                     <p className="text-sm text-[#C7C7D1] line-clamp-3 mb-4">

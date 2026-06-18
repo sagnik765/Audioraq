@@ -111,7 +111,7 @@ AI_AUDIO_REQUIRE_NEURAL_WORKER=true
 ```
 
 This makes failed neural rendering block the publish instead of quietly creating robotic audio.
-The listenability gate also blocks newly generated AI episodes when Agent 2 scores the rendered voice below the publish threshold.
+The listenability gate also blocks newly generated AI episodes when AI Agents scores the rendered voice below the publish threshold.
 
 ## Listenability Profiles
 
@@ -131,7 +131,7 @@ Run the offline benchmark before publishing a proof-of-work batch:
 
 ```bash
 python scripts/audioraq_voice_benchmark.py \
-  --dataset /Users/sagnikroy/Downloads/podcast_voice_seed_dataset.csv \
+  --dataset /path/to/podcast_voice_seed_dataset.csv \
   --worker-url http://127.0.0.1:8015 \
   --engines kokoro,chatterbox \
   --quality-profile podcast-education-calm

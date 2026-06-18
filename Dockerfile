@@ -4,14 +4,14 @@ WORKDIR /app/frontend
 
 COPY frontend/package.json ./
 COPY frontend/package-lock.json ./
-COPY frontend/craco.config.js ./
 COPY frontend/postcss.config.js ./
 COPY frontend/tailwind.config.js ./
+COPY frontend/vite.config.mjs ./
+COPY frontend/index.html ./
 COPY frontend/components.json ./
 COPY frontend/jsconfig.json ./
 COPY frontend/public ./public
 COPY frontend/src ./src
-COPY frontend/plugins ./plugins
 
 RUN npm ci
 RUN npm run build

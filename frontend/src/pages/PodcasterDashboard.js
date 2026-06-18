@@ -819,9 +819,9 @@ export default function PodcasterDashboard() {
                 <p className="text-sm text-[#8A8A93]">
                   Title, description, and category were prefilled from your AI episode package. Create with AI is audio-only, and AI Agents will attach a quality report before publishing.
                 </p>
-                {aiDraftApplied.agent2_review && (
+                {aiDraftApplied.quality_review && (
                   <p className="text-xs text-[#F5A623] mt-3">
-                    AI Agents score: {aiDraftApplied.agent2_review.quality_score}/100 · {aiDraftApplied.agent2_review.status}
+                    AI Agents score: {aiDraftApplied.quality_review.quality_score}/100 · {aiDraftApplied.quality_review.status}
                   </p>
                 )}
                 <button

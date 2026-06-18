@@ -36,7 +36,12 @@ from backend.voice_quality import score_podcast_voice_listenability
 
 
 DEFAULT_OUTPUT_ROOT = REPO_ROOT / "qa" / "voice-benchmarks"
-DEFAULT_DATASET = Path("/Users/sagnikroy/Downloads/podcast_voice_seed_dataset.csv")
+DEFAULT_DATASET = Path(
+    os.environ.get(
+        "AUDIORAQ_VOICE_BENCHMARK_DATASET",
+        REPO_ROOT / "data" / "podcast_voice_seed_dataset.csv",
+    )
+)
 DEFAULT_SCRIPT = (
     "This is an Audioraq voice benchmark for long-form podcast listening. "
     "The goal is not drama. The goal is trust, clarity, warmth, and pacing that a listener can stay with. "

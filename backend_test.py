@@ -1,11 +1,12 @@
 import requests
 import sys
 import json
+import os
 from datetime import datetime
 
 class PodcastHubAPITester:
-    def __init__(self, base_url="https://podcast-hub-68.preview.emergentagent.com/api"):
-        self.base_url = base_url
+    def __init__(self, base_url=None):
+        self.base_url = base_url or os.environ.get("AUDIORAQ_API_URL", "http://127.0.0.1:8001/api")
         self.session = requests.Session()
         self.tests_run = 0
         self.tests_passed = 0
