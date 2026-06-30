@@ -52,6 +52,7 @@ from backend.voice_quality import (
     is_proof_studio_provider,
     score_podcast_voice_listenability,
 )
+from backend.text_to_audio_api import build_text_to_audio_router, ensure_text_to_audio_indexes
 from PIL import Image, ImageDraw, ImageFont
 
 
@@ -5342,7 +5343,12 @@ def render_openai_ai_audio(turns: List[Dict[str, str]]) -> Dict[str, Any]:
     }
 
 
-def render_local_http_ai_audio(script_text: str, turns: List[Dict[str, str]]) -> Dict[str, Any]:
+def render_local_http_ai_audio(
+    script_text: str,
+    turns: List[Dict[str, str]],
+    output_format: str = "",
+    quality_profile: str = "",
+) -> Dict[str, Any]:
     base_url = os.environ.get("AI_AUDIO_LOCAL_TTS_URL", "").strip().rstrip("/")
     if not base_url:
         raise RuntimeError("AI_AUDIO_LOCAL_TTS_URL is not configured")
@@ -5351,8 +5357,8 @@ def render_local_http_ai_audio(script_text: str, turns: List[Dict[str, str]]) ->
         "script_text": script_text,
         "turns": split_audio_turns_for_tts(turns),
         "target_loudness_lufs": parse_float_env("AI_AUDIO_TARGET_LUFS", -16.0),
-        "format": os.environ.get("AI_AUDIO_LOCAL_TTS_FORMAT", "wav").strip().lower() or "wav",
-        "quality_profile": os.environ.get("AI_AUDIO_LOCAL_TTS_PROFILE", "podcast-dialogue").strip() or "podcast-dialogue",
+        "format": output_format or os.environ.get("AI_AUDIO_LOCAL_TTS_FORMAT", "wav").strip().lower() or "wav",
+        "quality_profile": quality_profile or os.environ.get("AI_AUDIO_LOCAL_TTS_PROFILE", "podcast-dialogue").strip() or "podcast-dialogue",
         "pacing": {
             "sentence_gap_seconds": ai_audio_sentence_gap_seconds(),
             "edge_padding_seconds": ai_audio_edge_padding_seconds(),
@@ -5428,6 +5434,98 @@ def render_ai_audio_bytes(script_text: str, turns: Optional[List[Dict[str, str]]
     raise HTTPException(
         status_code=502,
         detail=f"AI audio rendering failed across configured providers. Last errors: {'; '.join(provider_errors[-3:])}",
+    )
+
+
+def transcode_ai_audio_result(rendered: Dict[str, Any], output_format: str) -> Dict[str, Any]:
+    requested = "mp3" if output_format == "mp3" else "wav"
+    current = str(rendered.get("extension") or extension_for_content_type(str(rendered.get("content_type") or ""))).lower()
+    if current == requested:
+        return rendered
+
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        raise RuntimeError(f"ffmpeg is required to deliver {requested} output")
+    data = rendered.get("data") or b""
+    if len(data) < 1024:
+        raise RuntimeError("audio renderer returned an incomplete file")
+
+    with tempfile.TemporaryDirectory(prefix="audioraq-text-to-audio-") as temp_dir:
+        temp_path = Path(temp_dir)
+        input_extension = current if current in {"mp3", "wav"} else "audio"
+        input_path = temp_path / f"input.{input_extension}"
+        output_path = temp_path / f"output.{requested}"
+        input_path.write_bytes(data)
+        codec_args = ["-codec:a", "libmp3lame", "-b:a", "160k"] if requested == "mp3" else ["-codec:a", "pcm_s16le"]
+        result = subprocess.run(
+            [
+                ffmpeg,
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-y",
+                "-i",
+                str(input_path),
+                "-ar",
+                "44100",
+                "-ac",
+                "1",
+                *codec_args,
+                str(output_path),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=parse_int_env("AI_AUDIO_TTS_TIMEOUT_SECONDS", 240),
+        )
+        if result.returncode != 0 or not output_path.exists():
+            raise RuntimeError(result.stderr or result.stdout or "audio format conversion failed")
+        output = output_path.read_bytes()
+
+    return {
+        **rendered,
+        "data": output,
+        "content_type": "audio/mpeg" if requested == "mp3" else "audio/wav",
+        "extension": requested,
+        "filename": f"audioraq-speech.{requested}",
+    }
+
+
+def render_text_to_audio_bytes(
+    script_text: str,
+    turns: Optional[List[Dict[str, str]]],
+    output_format: str,
+    quality_profile: str,
+) -> Dict[str, Any]:
+    voice_turns = cap_audio_script_turns(turns or [{"speaker": "Narrator", "voice_role": "narrator", "text": script_text}])
+    provider_errors = []
+    for provider in get_ai_audio_provider_order():
+        try:
+            if provider == "local_http":
+                rendered = render_local_http_ai_audio(
+                    script_text,
+                    voice_turns,
+                    output_format=output_format,
+                    quality_profile=quality_profile,
+                )
+            elif provider == "apple_say":
+                rendered = render_apple_say_proof_audio(script_text, voice_turns)
+            elif provider == "elevenlabs":
+                rendered = render_elevenlabs_ai_audio(voice_turns)
+            elif provider == "openai":
+                rendered = render_openai_ai_audio(voice_turns)
+            elif provider == "local":
+                rendered = render_local_ai_audio(script_text, voice_turns)
+            else:
+                raise RuntimeError(f"unknown provider '{provider}'")
+            return transcode_ai_audio_result(rendered, output_format)
+        except Exception as exc:
+            error = safe_tts_error(exc)
+            provider_errors.append(f"{provider}: {error}")
+            logger.warning(f"Text-to-audio provider {provider} failed; trying fallback if available: {error}")
+
+    raise HTTPException(
+        status_code=502,
+        detail=f"Text-to-audio rendering failed across configured providers. Last errors: {'; '.join(provider_errors[-3:])}",
     )
 
 
@@ -7844,7 +7942,11 @@ class CreateAIStudioRenderJobRequest(BaseModel):
     render_type: Literal["preview", "final"] = "preview"
 
 
-app = FastAPI()
+app = FastAPI(
+    title="Audioraq API",
+    version="1.0.0",
+    description="Create, publish, discover, and convert text into listenable audio with Audioraq.",
+)
 api_router = APIRouter(prefix="/api")
 
 
@@ -7860,6 +7962,17 @@ async def get_ai_voice_library():
             "end_padding_seconds": ai_audio_edge_padding_seconds(),
         },
     }
+
+
+api_router.include_router(
+    build_text_to_audio_router(
+        db=db,
+        get_current_user=get_current_user,
+        render_audio=render_text_to_audio_bytes,
+        voices=AI_PODCAST_VOICE_LIBRARY,
+        public_voice=public_ai_podcast_voice,
+    )
+)
 
 
 @app.middleware("http")
@@ -7878,6 +7991,7 @@ async def security_headers_middleware(request: Request, call_next):
 @app.on_event("startup")
 async def startup():
     validate_runtime_security()
+    await ensure_text_to_audio_indexes(db)
     await db.users.create_index("email", unique=True)
     await db.users.create_index("auth_providers.google.sub", unique=True, sparse=True)
     await db.users.create_index("auth_providers.apple.sub", unique=True, sparse=True)

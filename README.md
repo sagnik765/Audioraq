@@ -4,6 +4,8 @@
 
 [Live product](https://www.audioraq.com) | [Launch demo](frontend/public/launch/audioraq-launch-video.mp4)
 
+**Developer API:** [www.audioraq.com/developers](https://www.audioraq.com/developers) converts text into paced MP3 or WAV audio through Audioraq's voice pipeline.
+
 Audioraq helps podcasters move from an idea to a published show without stitching together separate planning, writing, audio, hosting, and analytics tools. Listeners get a podcast-native discovery experience with show pages, episode details, queues, saves, ratings, and listening history.
 
 ![Audioraq landing experience](docs/screenshots/landing.png)
@@ -83,6 +85,20 @@ sequenceDiagram
 | AI text | Provider chain with local deterministic fallback | Keeps core workflows available during provider outages or budget limits |
 | Audio | Pluggable local/neural TTS worker | Separates product workflow from any single voice vendor |
 | Quality | Synchronous quality and moderation gates before publish | Prevents low-quality or unsafe output from entering the public catalog |
+
+## Text-to-Audio API
+
+The versioned developer API accepts text and returns binary audio. Developer keys are created and revoked from the `/developers` page, stored as one-way hashes, and rate-limited per key. Usage analytics retain character counts and operational metadata, never submitted text.
+
+```bash
+curl https://www.audioraq.com/api/v1/audio/speech \
+  -H "Authorization: Bearer $AUDIORAQ_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"input":"Welcome to Audioraq.","voice":"aman-warm-analyst","format":"mp3"}' \
+  --output speech.mp3
+```
+
+See [Text-to-Audio API Reference](docs/text-to-audio-api.md) for authentication, request fields, response headers, errors, and examples.
 
 ## Tech Stack
 
