@@ -1,0 +1,11 @@
+# Test and lint tooling only.
+#
+# Application runtime dependencies live in requirements.prod.txt, which is what
+# the Docker image installs. CI installs both, so that anything imported by the
+# application is verified against the set of packages that actually ships.
+pytest==9.1.1
+httpx==0.28.1
+flake8==7.3.0
+black==26.3.1
+isort==8.0.1
+mypy==1.19.1
