@@ -1,25 +1,29 @@
-from dotenv import load_dotenv
 from pathlib import Path
 
-ROOT_DIR = Path(__file__).parent
-PROJECT_DIR = ROOT_DIR.parent
-load_dotenv(ROOT_DIR / ".env")
+# Importing config first loads .env, which the module-level settings below rely on.
+from backend.config import (
+    EMERGENT_KEY,
+    FRONTEND_BUILD_DIR,
+    is_production_env,
+    now_iso,
+    parse_bool,
+    parse_bool_env,
+    parse_csv_env,
+    parse_float_env,
+    parse_int_env,
+)
 
 from fastapi import APIRouter, FastAPI, File, Form, HTTPException, Request, Response, UploadFile
 from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pymongo import AsyncMongoClient
-from pydantic import BaseModel, Field
 from starlette.middleware.cors import CORSMiddleware
 
 from array import array
-import bcrypt
 import asyncio
 import base64
 import email.utils
 import hashlib
 import io
-import ipaddress
 import json
 import jwt
 import logging
@@ -30,12 +34,10 @@ import re
 import requests
 import secrets
 import shutil
-import socket
 import subprocess
 import sys
 import tempfile
 import textwrap
-import time
 import uuid
 import wave
 import xml.etree.ElementTree as ET
@@ -44,8 +46,8 @@ import zipfile
 from bson import ObjectId
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Iterator, List, Literal, Optional, Set, Tuple
-from urllib.parse import urlencode, urljoin, urlparse
+from typing import Any, Dict, List, Optional, Set, Tuple
+from urllib.parse import urlencode, urlparse
 
 from cryptography.fernet import Fernet, InvalidToken
 from backend.voice_quality import (
@@ -53,6 +55,80 @@ from backend.voice_quality import (
     score_podcast_voice_listenability,
 )
 from backend.text_to_audio_api import build_text_to_audio_router, ensure_text_to_audio_indexes
+from backend.security import (
+    JWT_ALGORITHM,
+    attach_auth_token_payload,
+    clear_auth_cookies,
+    create_access_token,
+    create_refresh_token,
+    enforce_rate_limit,
+    get_admin_password_for_seed,
+    get_client_fingerprint,
+    get_cookie_settings,
+    get_current_user,
+    get_jwt_secret,
+    hash_password,
+    safe_external_get,
+    set_auth_cookies,
+    try_get_current_user,
+    validate_external_redirect_url,
+    validate_runtime_security,
+    validate_runtime_url,
+    verify_password,
+    write_test_credentials_if_enabled,
+)
+from backend.storage import (
+    cleanup_storage_paths,
+    get_object,
+    get_storage_backend,
+    init_storage,
+    put_object,
+    should_count_stream_play,
+    stream_stored_object,
+)
+from backend.voices import (
+    AI_AUDIO_DISCLOSURE,
+    AI_AUDIO_VOICE_ROLES,
+    AI_PODCAST_VOICE_BY_ID,
+    AI_PODCAST_VOICE_LIBRARY,
+)
+from backend.audio import (
+    ai_audio_edge_padding_seconds,
+    ai_audio_sentence_gap_seconds,
+    cap_audio_script_turns,
+    extension_for_content_type,
+    get_ai_audio_provider_order,
+    render_ai_audio_bytes,
+    render_text_to_audio_bytes,
+)
+from backend.constants import (
+    DEFAULT_AI_PODCAST_VOICE_IDS,
+    SOCIAL_POST_STATUS_DRAFT,
+    SOCIAL_POST_STATUS_FAILED,
+    SOCIAL_POST_STATUS_PUBLISHED,
+    SOCIAL_POST_STATUS_PUBLISHING,
+    SOCIAL_POST_STATUS_QUEUED,
+)
+from backend.models import (
+    CompleteSocialSignupRequest,
+    CreateAIStudioProjectRequest,
+    CreateAIStudioRenderJobRequest,
+    EpisodeAssistantRequest,
+    FeedbackSubmissionRequest,
+    GenerateAIPodcastDraftRequest,
+    LoginRequest,
+    ManualSocialConnectRequest,
+    RedeemPromoRequest,
+    RegisterRequest,
+    RssImportRequest,
+    SocialPostCreateRequest,
+    UpdateAIStudioProjectRequest,
+    UpdateAIStudioProjectStageRequest,
+    UpdateInterestsRequest,
+    UpdatePlaybackProgressRequest,
+    UpdatePodcastDescriptionRequest,
+    UpdatePodcastRatingRequest,
+)
 from PIL import Image, ImageDraw, ImageFont
 
 
@@ -61,16 +137,9 @@ logger = logging.getLogger(__name__)
 social_queue_lock = None
 
 
-mongo_url = os.environ["MONGO_URL"]
-client = AsyncMongoClient(mongo_url)
-db = client[os.environ.get("DB_NAME", "audioraq")]
+from backend.db import client, db
 
-JWT_ALGORITHM = "HS256"
-DEFAULT_MEMORY_DIR = PROJECT_DIR / "memory"
-FRONTEND_BUILD_DIR = Path(os.environ.get("FRONTEND_BUILD_DIR", str(PROJECT_DIR / "frontend" / "build")))
 
-LEGACY_STORAGE_URL = os.environ.get("LEGACY_STORAGE_URL", "").strip()
-EMERGENT_KEY = os.environ.get("EMERGENT_LLM_KEY")
 APP_NAME = "audioraq"
 storage_key = None
 pending_social_cookie_name = "pending_social_auth"
@@ -96,11 +165,6 @@ SUPPORTED_SOCIAL_PUBLISH_PROVIDERS = {
     SOCIAL_PUBLISH_PROVIDER_LINKEDIN,
     SOCIAL_PUBLISH_PROVIDER_INSTAGRAM,
 }
-SOCIAL_POST_STATUS_DRAFT = "draft"
-SOCIAL_POST_STATUS_QUEUED = "queued"
-SOCIAL_POST_STATUS_PUBLISHING = "publishing"
-SOCIAL_POST_STATUS_PUBLISHED = "published"
-SOCIAL_POST_STATUS_FAILED = "failed"
 SOCIAL_POST_STATUSES = {
     SOCIAL_POST_STATUS_DRAFT,
     SOCIAL_POST_STATUS_QUEUED,
@@ -167,311 +231,6 @@ QUALITY_RLAIF_POLICY = [
     "Preserve the creator's chosen audience, tone, and episode goal.",
 ]
 
-AI_AUDIO_VOICE_ROLES = {"host", "guest", "narrator"}
-AI_AUDIO_DISCLOSURE = "This episode includes AI-generated voice audio."
-PROOF_STUDIO_LOCAL_FILTER = "highpass=f=80,lowpass=f=12000,loudnorm=I=-16:TP=-1.5:LRA=11"
-PROOF_STUDIO_APPLE_GAP_SECONDS = 1.0
-PROOF_STUDIO_APPLE_NARRATIVE_GAP_SECONDS = 1.0
-PROOF_STUDIO_APPLE_TARGET_PEAK_DBFS = -4.5
-PROOF_STUDIO_APPLE_RATES = {
-    "host": 100,
-    "guest": 98,
-    "narrator": 96,
-}
-PROOF_STUDIO_APPLE_NARRATIVE_RATES = {
-    "host": 100,
-    "guest": 98,
-    "narrator": 96,
-}
-PROOF_STUDIO_APPLE_VOICES = {
-    "host": ["Aman", "Daniel", "Alex"],
-    "guest": ["Samantha", "Ava", "Victoria"],
-    "narrator": ["Samantha", "Aman", "Alex"],
-}
-AI_PODCAST_VOICE_LIBRARY: List[Dict[str, Any]] = [
-    {
-        "id": "aman-warm-analyst",
-        "name": "Aman",
-        "gender": "male",
-        "style": "warm analyst",
-        "accent": "Indian English",
-        "description": "Warm, steady, and trustworthy for education or finance.",
-        "suggested_roles": ["host", "narrator"],
-        "apple_voices": ["Aman", "Aman (English (India))"],
-        "kokoro_voice": "am_michael",
-        "openai_voice": "ash",
-        "espeak": {"voice": "en-in+m3", "speed": "148", "pitch": "46", "amplitude": "142"},
-        "rate_wpm": 110,
-    },
-    {
-        "id": "rishi-clear-guide",
-        "name": "Rishi",
-        "gender": "male",
-        "style": "clear guide",
-        "accent": "Indian English",
-        "description": "Crisp and composed for explainers and founder conversations.",
-        "suggested_roles": ["host", "guest"],
-        "apple_voices": ["Rishi"],
-        "kokoro_voice": "am_adam",
-        "openai_voice": "sage",
-        "espeak": {"voice": "en-in+m2", "speed": "146", "pitch": "44", "amplitude": "142"},
-        "rate_wpm": 112,
-    },
-    {
-        "id": "daniel-calm-british",
-        "name": "Daniel",
-        "gender": "male",
-        "style": "calm British host",
-        "accent": "American English",
-        "description": "Polished and calm for law, current affairs, and long-form analysis.",
-        "suggested_roles": ["host", "narrator"],
-        "apple_voices": ["Daniel"],
-        "kokoro_voice": "bm_daniel",
-        "openai_voice": "onyx",
-        "espeak": {"voice": "en-gb+m3", "speed": "146", "pitch": "43", "amplitude": "140"},
-        "rate_wpm": 112,
-    },
-    {
-        "id": "reed-bright-teacher",
-        "name": "Reed",
-        "gender": "male",
-        "style": "clear teacher",
-        "accent": "warm Indian English",
-        "description": "Friendly and articulate for practical tutorials.",
-        "suggested_roles": ["host", "guest"],
-        "apple_voices": ["Rishi"],
-        "kokoro_voice": "am_michael",
-        "openai_voice": "echo",
-        "espeak": {"voice": "en-in+m2", "speed": "146", "pitch": "44", "amplitude": "142"},
-        "rate_wpm": 112,
-    },
-    {
-        "id": "eddy-casual-host",
-        "name": "Eddy",
-        "gender": "male",
-        "style": "casual host",
-        "accent": "warm Indian English",
-        "description": "Conversational and approachable for creator-led shows.",
-        "suggested_roles": ["host", "guest"],
-        "apple_voices": ["Rishi"],
-        "kokoro_voice": "am_adam",
-        "openai_voice": "verse",
-        "espeak": {"voice": "en-in+m2", "speed": "146", "pitch": "44", "amplitude": "142"},
-        "rate_wpm": 112,
-    },
-    {
-        "id": "rocko-energetic-host",
-        "name": "Rocko",
-        "gender": "male",
-        "style": "energetic host",
-        "accent": "American English",
-        "description": "More energetic without rushing; useful for technology and startup topics.",
-        "suggested_roles": ["host", "guest"],
-        "apple_voices": ["Rocko (English (US))", "Rocko"],
-        "kokoro_voice": "am_adam",
-        "openai_voice": "ash",
-        "espeak": {"voice": "en-us+m5", "speed": "152", "pitch": "52", "amplitude": "140"},
-        "rate_wpm": 220,
-    },
-    {
-        "id": "grandpa-wise-narrator",
-        "name": "Grandpa",
-        "gender": "male",
-        "style": "wise narrator",
-        "accent": "American English",
-        "description": "Grounded and patient for reflective storytelling.",
-        "suggested_roles": ["narrator", "guest"],
-        "apple_voices": ["Grandpa (English (US))", "Grandpa"],
-        "kokoro_voice": "am_michael",
-        "openai_voice": "onyx",
-        "espeak": {"voice": "en-us+m1", "speed": "138", "pitch": "38", "amplitude": "138"},
-        "rate_wpm": 152,
-    },
-    {
-        "id": "oliver-uk-commentator",
-        "name": "Oliver",
-        "gender": "male",
-        "style": "UK commentator",
-        "accent": "British English",
-        "description": "Composed and conversational for business and current-affairs contrast.",
-        "suggested_roles": ["guest", "narrator"],
-        "apple_voices": ["Eddy (English (UK))"],
-        "kokoro_voice": "bm_daniel",
-        "openai_voice": "echo",
-        "espeak": {"voice": "en-gb+m2", "speed": "148", "pitch": "45", "amplitude": "137"},
-        "rate_wpm": 220,
-    },
-    {
-        "id": "rowan-uk-analyst",
-        "name": "Rowan",
-        "gender": "male",
-        "style": "UK analyst",
-        "accent": "British English",
-        "description": "Crisp, slightly brighter analyst voice for explainers.",
-        "suggested_roles": ["host", "guest"],
-        "apple_voices": ["Reed (English (UK))"],
-        "kokoro_voice": "bm_daniel",
-        "openai_voice": "sage",
-        "espeak": {"voice": "en-gb+m3", "speed": "149", "pitch": "47", "amplitude": "138"},
-        "rate_wpm": 162,
-    },
-    {
-        "id": "roman-uk-host",
-        "name": "Roman",
-        "gender": "male",
-        "style": "energetic host",
-        "accent": "American English",
-        "description": "Energetic but controlled for technology and startup discussions.",
-        "suggested_roles": ["host", "guest"],
-        "apple_voices": ["Rocko (English (US))", "Rocko"],
-        "kokoro_voice": "am_adam",
-        "openai_voice": "verse",
-        "espeak": {"voice": "en-gb+m4", "speed": "150", "pitch": "50", "amplitude": "139"},
-        "rate_wpm": 220,
-    },
-    {
-        "id": "samantha-warm-cohost",
-        "name": "Samantha",
-        "gender": "female",
-        "style": "warm co-host",
-        "accent": "American English",
-        "description": "Warm, clear, and easy to stay with for long listening.",
-        "suggested_roles": ["host", "guest", "narrator"],
-        "apple_voices": ["Samantha"],
-        "kokoro_voice": "af_sarah",
-        "openai_voice": "nova",
-        "espeak": {"voice": "en-us+f3", "speed": "146", "pitch": "58", "amplitude": "136"},
-        "rate_wpm": 112,
-    },
-    {
-        "id": "tara-bright-indian",
-        "name": "Tara",
-        "gender": "female",
-        "style": "bright Indian host",
-        "accent": "Indian English",
-        "description": "Bright and precise for education, health, and creator shows.",
-        "suggested_roles": ["host", "guest"],
-        "apple_voices": ["Samantha"],
-        "kokoro_voice": "af_bella",
-        "openai_voice": "coral",
-        "espeak": {"voice": "en-in+f3", "speed": "146", "pitch": "59", "amplitude": "136"},
-        "rate_wpm": 112,
-    },
-    {
-        "id": "flo-friendly-guide",
-        "name": "Flo",
-        "gender": "female",
-        "style": "friendly guide",
-        "accent": "American English",
-        "description": "Friendly and modern for onboarding-style episodes.",
-        "suggested_roles": ["host", "guest"],
-        "apple_voices": ["Tara"],
-        "kokoro_voice": "af_bella",
-        "openai_voice": "shimmer",
-        "espeak": {"voice": "en-us+f4", "speed": "148", "pitch": "61", "amplitude": "135"},
-        "rate_wpm": 112,
-    },
-    {
-        "id": "sandy-calm-educator",
-        "name": "Sandy",
-        "gender": "female",
-        "style": "calm educator",
-        "accent": "American English",
-        "description": "Clear, relaxed, and teacherly for explainers.",
-        "suggested_roles": ["host", "narrator"],
-        "apple_voices": ["Samantha"],
-        "kokoro_voice": "af_sarah",
-        "openai_voice": "alloy",
-        "espeak": {"voice": "en-us+f2", "speed": "144", "pitch": "57", "amplitude": "136"},
-        "rate_wpm": 112,
-    },
-    {
-        "id": "shelley-story-host",
-        "name": "Shelley",
-        "gender": "female",
-        "style": "story host",
-        "accent": "American English",
-        "description": "Expressive but controlled for narrative shows.",
-        "suggested_roles": ["host", "narrator"],
-        "apple_voices": ["Samantha"],
-        "kokoro_voice": "af_sarah",
-        "openai_voice": "nova",
-        "espeak": {"voice": "en-us+f5", "speed": "143", "pitch": "60", "amplitude": "136"},
-        "rate_wpm": 112,
-    },
-    {
-        "id": "grandma-reflective-narrator",
-        "name": "Grandma",
-        "gender": "female",
-        "style": "reflective narrator",
-        "accent": "American English",
-        "description": "Patient and intimate for reflective narration.",
-        "suggested_roles": ["narrator", "guest"],
-        "apple_voices": ["Samantha"],
-        "kokoro_voice": "af_bella",
-        "openai_voice": "shimmer",
-        "espeak": {"voice": "en-us+f1", "speed": "136", "pitch": "52", "amplitude": "134"},
-        "rate_wpm": 112,
-    },
-    {
-        "id": "karen-australian-guide",
-        "name": "Karen",
-        "gender": "female",
-        "style": "Australian guide",
-        "accent": "Australian English",
-        "description": "Clean and composed for global business and environment shows.",
-        "suggested_roles": ["host", "guest"],
-        "apple_voices": ["Karen"],
-        "kokoro_voice": "af_bella",
-        "openai_voice": "coral",
-        "espeak": {"voice": "en-au+f3", "speed": "145", "pitch": "57", "amplitude": "136"},
-        "rate_wpm": 112,
-    },
-    {
-        "id": "moira-irish-storyteller",
-        "name": "Moira",
-        "gender": "female",
-        "style": "reflective storyteller",
-        "accent": "warm neutral English",
-        "description": "Textured and warm for story-led episodes.",
-        "suggested_roles": ["narrator", "guest"],
-        "apple_voices": ["Samantha"],
-        "kokoro_voice": "af_sarah",
-        "openai_voice": "fable",
-        "espeak": {"voice": "en-us+f3", "speed": "144", "pitch": "57", "amplitude": "136"},
-        "rate_wpm": 112,
-    },
-    {
-        "id": "tessa-global-host",
-        "name": "Tessa",
-        "gender": "female",
-        "style": "global host",
-        "accent": "South African English",
-        "description": "Distinctive and articulate for international topics.",
-        "suggested_roles": ["host", "guest"],
-        "apple_voices": ["Tessa"],
-        "kokoro_voice": "af_bella",
-        "openai_voice": "shimmer",
-        "espeak": {"voice": "en+f3", "speed": "144", "pitch": "56", "amplitude": "136"},
-        "rate_wpm": 112,
-    },
-    {
-        "id": "fiona-british-guide",
-        "name": "Fiona",
-        "gender": "female",
-        "style": "British guide",
-        "accent": "British English",
-        "description": "Friendly and precise for educational recaps and guided explainers.",
-        "suggested_roles": ["host", "guest", "narrator"],
-        "apple_voices": ["Samantha"],
-        "kokoro_voice": "af_sarah",
-        "openai_voice": "alloy",
-        "espeak": {"voice": "en-gb+f2", "speed": "148", "pitch": "57", "amplitude": "136"},
-        "rate_wpm": 112,
-    },
-]
-AI_PODCAST_VOICE_BY_ID = {voice["id"]: voice for voice in AI_PODCAST_VOICE_LIBRARY}
-DEFAULT_AI_PODCAST_VOICE_IDS = ["aman-warm-analyst", "samantha-warm-cohost", "daniel-calm-british"]
 
 
 def public_ai_podcast_voice(voice: Dict[str, Any]) -> Dict[str, Any]:
@@ -532,17 +291,10 @@ def apply_ai_voice_cast_to_turns(turns: List[Dict[str, str]], intake: Optional[D
     return voiced_turns
 
 
-def ai_audio_sentence_gap_seconds() -> float:
-    return max(0.0, parse_float_env("AI_AUDIO_TTS_SENTENCE_GAP_SECONDS", 1.0))
 
 
-def ai_audio_edge_padding_seconds() -> float:
-    return max(0.0, parse_float_env("AI_AUDIO_TTS_EDGE_PADDING_SECONDS", 1.0))
 
 
-def tts_sentence_parts(text: str) -> List[str]:
-    normalized = normalize_local_tts_text(text)
-    return [part.strip() for part in re.split(r"(?<=[.!?])\s+", normalized) if part.strip()]
 
 
 AI_STUDIO_STAGES = [
@@ -633,34 +385,12 @@ LAUNCH_PROMO_OFFERS = {
 }
 
 
-def now_iso():
-    return datetime.now(timezone.utc).isoformat()
 
 
-def parse_int_env(name: str, default: int, minimum: Optional[int] = None, maximum: Optional[int] = None) -> int:
-    try:
-        value = int(os.environ.get(name, default))
-    except (TypeError, ValueError):
-        value = default
-    if minimum is not None:
-        value = max(minimum, value)
-    if maximum is not None:
-        value = min(maximum, value)
-    return value
 
 
-def parse_bool_env(name: str, default: bool = False) -> bool:
-    value = os.environ.get(name)
-    if value is None:
-        return default
-    return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
-def parse_float_env(name: str, default: float) -> float:
-    try:
-        return float(os.environ.get(name, default))
-    except (TypeError, ValueError):
-        return default
 
 
 def get_google_client_id() -> str:
@@ -825,8 +555,6 @@ def get_linkedin_social_scopes() -> str:
     return "r_organization_social w_organization_social"
 
 
-def parse_csv_env(name: str) -> List[str]:
-    return [item.strip() for item in os.environ.get(name, "").split(",") if item.strip()]
 
 
 def normalize_guardrail_label(value: str) -> str:
@@ -1148,35 +876,14 @@ def build_public_episode_query(current_user: Optional[Dict[str, Any]] = None) ->
     return query
 
 
-def get_jwt_secret():
-    return os.environ["JWT_SECRET"]
 
 
-def parse_bool(value, default=False):
-    if value is None:
-        return default
-    return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
-def is_production_env() -> bool:
-    explicit_env = (os.environ.get("APP_ENV") or os.environ.get("ENVIRONMENT") or "").strip().lower()
-    if explicit_env:
-        return explicit_env in {"prod", "production"}
-    public_origin = (os.environ.get("PUBLIC_APP_ORIGIN") or "").strip().lower()
-    return public_origin.startswith("https://") or parse_bool(os.environ.get("COOKIE_SECURE"), default=False)
 
 
-def should_return_auth_tokens() -> bool:
-    configured = os.environ.get("AUTH_RETURN_BEARER_TOKENS")
-    if configured is not None:
-        return parse_bool(configured, default=False)
-    return not is_production_env()
 
 
-def attach_auth_token_payload(payload: Dict[str, Any], access_token: str) -> Dict[str, Any]:
-    if should_return_auth_tokens():
-        payload["access_token"] = access_token
-    return payload
 
 
 def normalize_promo_code(value: Optional[str]) -> str:
@@ -1290,54 +997,12 @@ async def redeem_launch_promo_for_user(user_doc: Dict[str, Any], raw_code: Optio
     return public_promo_status(redemption)
 
 
-def validate_runtime_security() -> None:
-    production = is_production_env()
-    jwt_secret = (os.environ.get("JWT_SECRET") or "").strip()
-    weak_jwt_values = {"", "secret", "changeme", "replace-with-a-long-random-secret", "dev-secret"}
-    if jwt_secret.lower() in weak_jwt_values or len(jwt_secret) < 32:
-        message = "JWT_SECRET must be a unique high-entropy value of at least 32 characters."
-        if production:
-            raise RuntimeError(message)
-        logger.warning(message)
-
-    admin_password = (os.environ.get("ADMIN_PASSWORD") or "").strip()
-    weak_admin_values = {"", "admin", "admin123", "password", "test123", "replace-with-a-strong-admin-password"}
-    if admin_password.lower() in weak_admin_values or len(admin_password) < 12:
-        message = "ADMIN_PASSWORD must be explicitly configured with a strong password before production launch."
-        if production:
-            raise RuntimeError(message)
-        logger.warning(message)
 
 
-def get_admin_password_for_seed() -> str:
-    admin_password = (os.environ.get("ADMIN_PASSWORD") or "").strip()
-    if admin_password:
-        return admin_password
-    if is_production_env():
-        raise RuntimeError("ADMIN_PASSWORD is required in production")
-    return "admin123"
 
 
-def write_test_credentials_if_enabled(admin_email: str, admin_password: str) -> None:
-    if not parse_bool(os.environ.get("WRITE_TEST_CREDENTIALS"), default=not is_production_env()):
-        return
-    memory_dir = Path(os.environ.get("MEMORY_DIR", str(DEFAULT_MEMORY_DIR)))
-    memory_dir.mkdir(parents=True, exist_ok=True)
-    include_admin_password = parse_bool(os.environ.get("INCLUDE_ADMIN_TEST_PASSWORD"), default=False)
-    admin_password_display = admin_password if include_admin_password and not is_production_env() else "<configured in environment>"
-    with open(memory_dir / "test_credentials.md", "w", encoding="utf-8") as f:
-        f.write("# Test Credentials\n\n")
-        f.write(f"## Admin\n- Email: {admin_email}\n- Password: {admin_password_display}\n- Role: admin\n\n")
-        f.write("## Test User\n- Email: testuser@test.com\n- Password: test123\n- Role: user\n\n")
-        f.write("## Test Podcaster\n- Email: podcaster@test.com\n- Password: test123\n- Role: podcaster\n\n")
-        f.write("## Auth Endpoints\n- POST /api/auth/register\n- POST /api/auth/login\n- POST /api/auth/logout\n- GET /api/auth/me\n- POST /api/auth/refresh\n")
 
 
-def get_client_fingerprint(request: Request) -> str:
-    forwarded_for = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip()
-    client_ip = forwarded_for or (request.client.host if request.client else "unknown")
-    digest = hashlib.sha256(f"{client_ip}:{os.environ.get('JWT_SECRET', '')[:16]}".encode("utf-8")).hexdigest()
-    return digest[:32]
 
 
 def is_manual_social_connect_enabled() -> bool:
@@ -1357,56 +1022,10 @@ def analytics_retention_seconds() -> int:
     return days * 86400
 
 
-def validate_runtime_url(url: str, *, allow_local: bool = False) -> str:
-    candidate = (url or "").strip()
-    parsed = urlparse(candidate)
-    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
-        raise HTTPException(status_code=400, detail="URL must be an absolute http(s) URL")
-    hostname = parsed.hostname.strip().lower()
-    try:
-        addresses = socket.getaddrinfo(hostname, parsed.port or (443 if parsed.scheme == "https" else 80), type=socket.SOCK_STREAM)
-    except socket.gaierror:
-        raise HTTPException(status_code=400, detail="URL host could not be resolved")
-    for address in addresses:
-        ip = ipaddress.ip_address(address[4][0])
-        if allow_local:
-            continue
-        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.is_reserved or ip.is_unspecified:
-            raise HTTPException(status_code=400, detail="URL points to a private or unsafe network")
-    return candidate
 
 
-def safe_external_get(url: str, *, timeout: int = 30, max_bytes: int = 5_242_880, max_redirects: int = 3) -> requests.Response:
-    current_url = validate_runtime_url(url)
-    for _ in range(max_redirects + 1):
-        response = requests.get(current_url, timeout=timeout, stream=True, allow_redirects=False)
-        if response.is_redirect or response.status_code in {301, 302, 303, 307, 308}:
-            location = response.headers.get("Location", "")
-            response.close()
-            if not location:
-                raise HTTPException(status_code=400, detail="External URL redirect was missing a destination")
-            current_url = validate_runtime_url(urljoin(current_url, location))
-            continue
-        content_length = response.headers.get("Content-Length")
-        if content_length and int(content_length) > max_bytes:
-            response.close()
-            raise HTTPException(status_code=400, detail="External URL response is too large")
-        data = bytearray()
-        for chunk in response.iter_content(chunk_size=65536):
-            if not chunk:
-                continue
-            data.extend(chunk)
-            if len(data) > max_bytes:
-                response.close()
-                raise HTTPException(status_code=400, detail="External URL response is too large")
-        response._content = bytes(data)
-        response.close()
-        return response
-    raise HTTPException(status_code=400, detail="External URL redirected too many times")
 
 
-def validate_external_redirect_url(url: str) -> str:
-    return validate_runtime_url(url)
 
 
 def safe_extension(filename: str, allowed_extensions: Set[str], default: str = "bin") -> str:
@@ -1451,548 +1070,78 @@ def validate_media_extension_matches_type(filename: str, content_type: str, is_a
     return ext
 
 
-def get_cookie_settings(request: Optional[Request] = None):
-    forwarded_proto = request.headers.get("x-forwarded-proto") if request else None
-    request_scheme = request.url.scheme if request else None
-    secure_default = (forwarded_proto or request_scheme or "").lower() == "https"
-    secure = parse_bool(os.environ.get("COOKIE_SECURE"), default=secure_default)
-    same_site = os.environ.get("COOKIE_SAMESITE", "lax").strip().lower()
-    if same_site not in {"lax", "strict", "none"}:
-        same_site = "lax"
-
-    settings = {
-        "httponly": True,
-        "secure": secure,
-        "samesite": same_site,
-        "path": "/",
-    }
-
-    cookie_domain = os.environ.get("COOKIE_DOMAIN")
-    if cookie_domain:
-        settings["domain"] = cookie_domain
-
-    return settings
-
-
-def set_auth_cookies(response: Response, access_token: str, refresh_token: str, request: Optional[Request] = None):
-    cookie_settings = get_cookie_settings(request)
-    response.set_cookie(key="access_token", value=access_token, max_age=3600, **cookie_settings)
-    response.set_cookie(key="refresh_token", value=refresh_token, max_age=604800, **cookie_settings)
-
-
-def clear_auth_cookies(response: Response):
-    cookie_settings = {"path": "/"}
-    cookie_domain = os.environ.get("COOKIE_DOMAIN")
-    if cookie_domain:
-        cookie_settings["domain"] = cookie_domain
-    response.delete_cookie("access_token", **cookie_settings)
-    response.delete_cookie("refresh_token", **cookie_settings)
-
-
-def init_storage():
-    if get_storage_backend() == "local":
-        return "local"
-    return init_legacy_storage()
-
-
-def init_legacy_storage():
-    global storage_key
-    if storage_key:
-        return storage_key
-    if not LEGACY_STORAGE_URL:
-        raise RuntimeError("LEGACY_STORAGE_URL is required when STORAGE_BACKEND=legacy.")
-    if not EMERGENT_KEY:
-        raise RuntimeError("EMERGENT_LLM_KEY is required for legacy object storage. Set STORAGE_BACKEND=local to use local disk storage.")
-    resp = requests.post(f"{LEGACY_STORAGE_URL}/init", json={"emergent_key": EMERGENT_KEY}, timeout=30)
-    resp.raise_for_status()
-    storage_key = resp.json()["storage_key"]
-    return storage_key
-
-
-def get_storage_backend() -> str:
-    backend = os.environ.get("STORAGE_BACKEND", "local").strip().lower()
-    if backend == "emergent":
-        return "legacy"
-    return backend if backend in {"legacy", "local"} else "local"
-
-
-def local_storage_root() -> Path:
-    configured = Path(os.environ.get("LOCAL_STORAGE_DIR", str(PROJECT_DIR / "data" / "media"))).expanduser()
-    return (configured if configured.is_absolute() else PROJECT_DIR / configured).resolve()
-
-
-def local_storage_path(path: str) -> Path:
-    normalized = (path or "").strip().lstrip("/")
-    if not normalized:
-        raise ValueError("Storage path is required")
-    destination = (local_storage_root() / normalized).resolve()
-    if local_storage_root() not in destination.parents and destination != local_storage_root():
-        raise ValueError("Invalid storage path")
-    return destination
-
-
-def local_storage_content_type_path(path: str) -> Path:
-    return local_storage_path(path).with_name(f"{local_storage_path(path).name}.content-type")
-
-
-def object_cache_key(path: str) -> str:
-    normalized = (path or "").strip().lstrip("/")
-    if not normalized:
-        raise ValueError("Storage path is required")
-    return f"__object_cache/{normalized}"
-
-
-def cache_object_locally(path: str, data: bytes, content_type: str) -> None:
-    cache_path = object_cache_key(path)
-    destination = local_storage_path(cache_path)
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    temp_destination = destination.with_name(f".{destination.name}.{uuid.uuid4().hex}.tmp")
-    temp_destination.write_bytes(data)
-    temp_destination.replace(destination)
-    local_storage_content_type_path(cache_path).write_text(content_type or "application/octet-stream", encoding="utf-8")
-
-
-def cached_object_exists(path: str) -> bool:
-    try:
-        source = local_storage_path(object_cache_key(path))
-        return source.exists() and source.stat().st_size > 0
-    except Exception:
-        return False
-
-
-def cached_object_content_type(path: str, fallback: str) -> str:
-    try:
-        content_type_path = local_storage_content_type_path(object_cache_key(path))
-        if content_type_path.exists():
-            return content_type_path.read_text(encoding="utf-8").strip() or fallback
-    except Exception:
-        pass
-    return fallback
-
-
-def delete_cached_object(path: str) -> None:
-    try:
-        cache_path = object_cache_key(path)
-        source = local_storage_path(cache_path)
-        content_type_path = local_storage_content_type_path(cache_path)
-        if source.exists():
-            source.unlink()
-        if content_type_path.exists():
-            content_type_path.unlink()
-    except Exception as exc:
-        logger.warning(f"Could not remove cached media object for {path}: {exc}")
-
-
-def write_local_object(path: str, data: bytes, content_type: str) -> None:
-    destination = local_storage_path(path)
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    temp_destination = destination.with_name(f".{destination.name}.{uuid.uuid4().hex}.tmp")
-    temp_destination.write_bytes(data)
-    temp_destination.replace(destination)
-    local_storage_content_type_path(path).write_text(content_type or "application/octet-stream", encoding="utf-8")
-
-
-def put_object(path, data, content_type):
-    if get_storage_backend() == "local":
-        write_local_object(path, data, content_type)
-        return {"path": path, "storage_backend": "local"}
-
-    key = init_storage()
-    for attempt in range(4):
-        try:
-            resp = requests.put(
-                f"{LEGACY_STORAGE_URL}/objects/{path}",
-                headers={"X-Storage-Key": key, "Content-Type": content_type},
-                data=data,
-                timeout=300,
-            )
-            resp.raise_for_status()
-            break
-        except requests.RequestException as exc:
-            status_code = getattr(getattr(exc, "response", None), "status_code", None)
-            if status_code and status_code < 500:
-                raise
-            if attempt == 3:
-                raise
-            delay = 2 ** attempt
-            logger.warning(f"Storage upload retry {attempt + 1}/4 for {path} after {status_code or exc.__class__.__name__}; waiting {delay}s")
-            time.sleep(delay)
-    try:
-        cache_object_locally(path, data, content_type)
-    except Exception as exc:
-        logger.warning(f"Could not cache uploaded media object {path}: {exc}")
-    return resp.json()
-
-
-def get_legacy_object(path: str) -> Tuple[bytes, str]:
-    key = init_legacy_storage()
-    resp = requests.get(
-        f"{LEGACY_STORAGE_URL}/objects/{path}",
-        headers={"X-Storage-Key": key},
-        timeout=120,
-    )
-    resp.raise_for_status()
-    return resp.content, resp.headers.get("Content-Type", "application/octet-stream")
-
-
-def get_object(path):
-    if get_storage_backend() == "local":
-        source = local_storage_path(path)
-        if source.exists():
-            content_type_path = local_storage_content_type_path(path)
-            guessed_type = mimetypes.guess_type(source.name)[0] or "application/octet-stream"
-            content_type = content_type_path.read_text(encoding="utf-8").strip() if content_type_path.exists() else guessed_type
-            return source.read_bytes(), content_type
-        try:
-            data, content_type = get_legacy_object(path)
-            try:
-                write_local_object(path, data, content_type)
-            except Exception as cache_exc:
-                logger.warning(f"Could not migrate legacy media object {path} into local storage: {cache_exc}")
-            return data, content_type
-        except Exception as exc:
-            logger.warning(f"Legacy media fallback miss for {path}: {exc}")
-            raise FileNotFoundError(path) from exc
-
-    return get_legacy_object(path)
-
-
-STREAM_CHUNK_SIZE = 1024 * 1024
-
-
-def safe_inline_filename(filename: str) -> str:
-    safe_name = re.sub(r'[\r\n"\\]+', "", (filename or "podcast").strip()) or "podcast"
-    return safe_name[:180]
-
-
-def media_stream_headers(
-    filename: str,
-    *,
-    content_length: Optional[int] = None,
-    content_range: Optional[str] = None,
-) -> Dict[str, str]:
-    headers = {
-        "Accept-Ranges": "bytes",
-        "Content-Disposition": f'inline; filename="{safe_inline_filename(filename)}"',
-        "Cache-Control": "private, max-age=3600, no-transform",
-    }
-    if content_length is not None:
-        headers["Content-Length"] = str(max(0, content_length))
-    if content_range:
-        headers["Content-Range"] = content_range
-    return headers
-
-
-def parse_range_header(range_header: Optional[str], size: int) -> Optional[Tuple[int, int]]:
-    if not range_header:
-        return None
-
-    header = range_header.strip().lower()
-    if not header.startswith("bytes=") or "," in header:
-        raise HTTPException(
-            status_code=416,
-            detail="Requested range not satisfiable",
-            headers={"Content-Range": f"bytes */{size}", "Accept-Ranges": "bytes"},
-        )
-
-    start_text, separator, end_text = header[6:].partition("-")
-    if separator != "-":
-        raise HTTPException(
-            status_code=416,
-            detail="Requested range not satisfiable",
-            headers={"Content-Range": f"bytes */{size}", "Accept-Ranges": "bytes"},
-        )
-
-    try:
-        if start_text == "":
-            suffix_length = int(end_text)
-            if suffix_length <= 0:
-                raise ValueError("suffix range must be positive")
-            start = max(size - suffix_length, 0)
-            end = size - 1
-        else:
-            start = int(start_text)
-            end = int(end_text) if end_text else size - 1
-            end = min(end, size - 1)
-    except ValueError:
-        raise HTTPException(
-            status_code=416,
-            detail="Requested range not satisfiable",
-            headers={"Content-Range": f"bytes */{size}", "Accept-Ranges": "bytes"},
-        )
-
-    if size <= 0 or start < 0 or start >= size or end < start:
-        raise HTTPException(
-            status_code=416,
-            detail="Requested range not satisfiable",
-            headers={"Content-Range": f"bytes */{size}", "Accept-Ranges": "bytes"},
-        )
-
-    return start, end
-
-
-def iter_file_range(source: Path, start: int, end: int) -> Iterator[bytes]:
-    with source.open("rb") as file_handle:
-        file_handle.seek(start)
-        remaining = end - start + 1
-        while remaining > 0:
-            chunk = file_handle.read(min(STREAM_CHUNK_SIZE, remaining))
-            if not chunk:
-                break
-            remaining -= len(chunk)
-            yield chunk
-
-
-def should_count_stream_play(range_header: Optional[str]) -> bool:
-    if not range_header:
-        return True
-    match = re.match(r"^\s*bytes=(\d*)-", range_header, flags=re.IGNORECASE)
-    return bool(match and match.group(1) in {"", "0"})
-
-
-def stream_local_object(path: str, content_type: str, request: Request, filename: str):
-    source = local_storage_path(path)
-    if not source.exists():
-        raise FileNotFoundError(path)
-
-    size = source.stat().st_size
-    range_tuple = parse_range_header(request.headers.get("range"), size)
-    if not range_tuple:
-        return FileResponse(
-            source,
-            media_type=content_type,
-            headers=media_stream_headers(filename, content_length=size),
-        )
-
-    start, end = range_tuple
-    content_length = end - start + 1
-    return StreamingResponse(
-        iter_file_range(source, start, end),
-        status_code=206,
-        media_type=content_type,
-        headers=media_stream_headers(
-            filename,
-            content_length=content_length,
-            content_range=f"bytes {start}-{end}/{size}",
-        ),
-    )
-
-
-def stream_bytes_object(data: bytes, content_type: str, request: Request, filename: str):
-    size = len(data)
-    range_tuple = parse_range_header(request.headers.get("range"), size)
-    if not range_tuple:
-        return Response(content=data, media_type=content_type, headers=media_stream_headers(filename, content_length=size))
-
-    start, end = range_tuple
-    partial_data = data[start : end + 1]
-    return Response(
-        content=partial_data,
-        status_code=206,
-        media_type=content_type,
-        headers=media_stream_headers(
-            filename,
-            content_length=len(partial_data),
-            content_range=f"bytes {start}-{end}/{size}",
-        ),
-    )
-
-
-def stream_cached_or_remote_object(path: str, content_type: str, request: Request, filename: str):
-    if cached_object_exists(path):
-        return stream_local_object(object_cache_key(path), cached_object_content_type(path, content_type), request, filename)
-
-    data, storage_content_type = get_object(path)
-    resolved_content_type = content_type or storage_content_type
-    try:
-        cache_object_locally(path, data, resolved_content_type)
-        return stream_local_object(object_cache_key(path), resolved_content_type, request, filename)
-    except Exception as exc:
-        logger.warning(f"Could not cache streamed media object {path}; serving from memory: {exc}")
-        return stream_bytes_object(data, resolved_content_type, request, filename)
-
-
-def stream_stored_object(path: str, content_type: str, request: Request, filename: str):
-    if get_storage_backend() == "local":
-        try:
-            return stream_local_object(path, content_type, request, filename)
-        except FileNotFoundError:
-            return stream_cached_or_remote_object(path, content_type, request, filename)
-    return stream_cached_or_remote_object(path, content_type, request, filename)
-
-
-def delete_object(path, missing_ok: bool = True) -> str:
-    normalized_path = (path or "").strip()
-    if not normalized_path:
-        return "skipped"
-
-    if get_storage_backend() == "local":
-        source = local_storage_path(normalized_path)
-        content_type_path = local_storage_content_type_path(normalized_path)
-        existed = source.exists()
-        if source.exists():
-            source.unlink()
-        if content_type_path.exists():
-            content_type_path.unlink()
-        if existed:
-            return "deleted"
-        if missing_ok:
-            return "missing"
-        raise FileNotFoundError(normalized_path)
-
-    delete_cached_object(normalized_path)
-    key = init_storage()
-    resp = requests.delete(
-        f"{LEGACY_STORAGE_URL}/objects/{normalized_path}",
-        headers={"X-Storage-Key": key},
-        timeout=120,
-    )
-    if missing_ok and resp.status_code == 404:
-        return "missing"
-    if resp.status_code == 405:
-        logger.warning(f"Storage API does not support hard delete for {normalized_path}; scrubbing object contents instead")
-        scrub_resp = requests.put(
-            f"{LEGACY_STORAGE_URL}/objects/{normalized_path}",
-            headers={"X-Storage-Key": key, "Content-Type": "application/octet-stream"},
-            data=b"",
-            timeout=120,
-        )
-        scrub_resp.raise_for_status()
-        return "scrubbed"
-    resp.raise_for_status()
-    return "deleted"
-
-
-def cleanup_storage_paths(paths: List[str], strict: bool = False) -> Dict[str, Any]:
-    deleted = []
-    scrubbed = []
-    missing = []
-    failures = []
-
-    seen = set()
-    normalized_paths = []
-    for raw_path in paths:
-        path = (raw_path or "").strip()
-        if not path or path in seen:
-            continue
-        seen.add(path)
-        normalized_paths.append(path)
-
-    for path in normalized_paths:
-        try:
-            cleanup_result = delete_object(path, missing_ok=True)
-            if cleanup_result == "deleted":
-                deleted.append(path)
-            elif cleanup_result == "scrubbed":
-                scrubbed.append(path)
-            elif cleanup_result == "missing":
-                missing.append(path)
-        except Exception as exc:
-            logger.error(f"Storage cleanup failed for {path}: {exc}")
-            failures.append({"path": path, "error": str(exc)})
-
-    if strict and failures:
-        raise HTTPException(status_code=502, detail="Could not remove media from storage. Please retry.")
-
-    return {"deleted": deleted, "scrubbed": scrubbed, "missing": missing, "failures": failures}
-
-
-def hash_password(password):
-    salt = bcrypt.gensalt()
-    hashed = bcrypt.hashpw(password.encode("utf-8"), salt)
-    return hashed.decode("utf-8")
-
-
-def verify_password(plain_password, hashed_password):
-    if not hashed_password:
-        return False
-    return bcrypt.checkpw(plain_password.encode("utf-8"), hashed_password.encode("utf-8"))
-
-
-def create_access_token(user_id, email):
-    payload = {
-        "sub": user_id,
-        "email": email,
-        "exp": datetime.now(timezone.utc) + timedelta(minutes=60),
-        "type": "access",
-    }
-    return jwt.encode(payload, get_jwt_secret(), algorithm=JWT_ALGORITHM)
-
-
-def create_refresh_token(user_id):
-    payload = {
-        "sub": user_id,
-        "exp": datetime.now(timezone.utc) + timedelta(days=7),
-        "type": "refresh",
-    }
-    return jwt.encode(payload, get_jwt_secret(), algorithm=JWT_ALGORITHM)
-
-
-async def get_current_user(request: Request):
-    token = request.cookies.get("access_token")
-    if not token:
-        auth_header = request.headers.get("Authorization", "")
-        if auth_header.startswith("Bearer "):
-            token = auth_header[7:]
-    if not token:
-        raise HTTPException(status_code=401, detail="Not authenticated")
-    try:
-        payload = jwt.decode(token, get_jwt_secret(), algorithms=[JWT_ALGORITHM])
-        if payload.get("type") != "access":
-            raise HTTPException(status_code=401, detail="Invalid token type")
-        user = await db.users.find_one({"_id": ObjectId(payload["sub"])})
-        if not user:
-            raise HTTPException(status_code=401, detail="User not found")
-        user["_id"] = str(user["_id"])
-        user.pop("password_hash", None)
-        return user
-    except jwt.ExpiredSignatureError:
-        raise HTTPException(status_code=401, detail="Token expired")
-    except jwt.InvalidTokenError:
-        raise HTTPException(status_code=401, detail="Invalid token")
-
-
-async def try_get_current_user(request: Optional[Request]):
-    if request is None:
-        return None
-    try:
-        return await get_current_user(request)
-    except HTTPException as exc:
-        if exc.status_code == 401:
-            return None
-        raise
-
-
-async def enforce_rate_limit(request: Request, action: str, max_attempts: int, window_seconds: int) -> None:
-    now = datetime.now(timezone.utc)
-    key = hashlib.sha256(f"{action}:{get_client_fingerprint(request)}".encode("utf-8")).hexdigest()
-    window_start = now - timedelta(seconds=window_seconds)
-    existing = await db.rate_limits.find_one({"_id": key})
-    if existing:
-        created_at = ensure_aware_utc(existing.get("created_at"))
-        if created_at and created_at > window_start:
-            attempts = int(existing.get("attempts", 0)) + 1
-            await db.rate_limits.update_one(
-                {"_id": key},
-                {"$set": {"last_attempt_at": now, "expires_at": now + timedelta(seconds=window_seconds)}, "$inc": {"attempts": 1}},
-            )
-            if attempts > max_attempts:
-                raise HTTPException(status_code=429, detail="Too many requests. Please slow down.")
-            return
-
-    await db.rate_limits.update_one(
-        {"_id": key},
-        {
-            "$set": {
-                "action": action,
-                "created_at": now,
-                "last_attempt_at": now,
-                "expires_at": now + timedelta(seconds=window_seconds),
-                "attempts": 1,
-            }
-        },
-        upsert=True,
-    )
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 async def record_analytics_event(
@@ -2062,20 +1211,6 @@ def clean_doc(doc):
     return cleaned
 
 
-def ensure_aware_utc(value: Any) -> Optional[datetime]:
-    if not value:
-        return None
-    parsed = value
-    if isinstance(value, str):
-        try:
-            parsed = datetime.fromisoformat(value)
-        except ValueError:
-            return None
-    if not isinstance(parsed, datetime):
-        return None
-    if parsed.tzinfo is None:
-        return parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)
 
 
 def ensure_social_publishing_access(user: Dict[str, Any]):
@@ -4384,117 +3519,8 @@ def audio_turns_to_script(turns: List[Dict[str, str]]) -> str:
     ).strip()
 
 
-def cap_audio_script_turns(turns: List[Dict[str, str]]) -> List[Dict[str, str]]:
-    max_words = parse_int_env("AI_AUDIO_MAX_WORDS", 1200)
-    max_chars = parse_int_env("AI_AUDIO_TTS_MAX_CHARS", 4500)
-    min_final_turn_words = parse_int_env("AI_AUDIO_MIN_FINAL_TURN_WORDS", 18)
-    reserved_end_turns = max(0, parse_int_env("AI_AUDIO_RESERVED_END_TURNS", 2))
-
-    def trim_text_to_budget(text: str, remaining_words: int, remaining_chars: int) -> str:
-        text = (text or "").strip()
-        if not text or remaining_words <= 0 or remaining_chars <= 0:
-            return ""
-
-        truncated = False
-        words = text.split()
-        if len(words) > remaining_words:
-            if remaining_words < min_final_turn_words:
-                return ""
-            text = " ".join(words[:remaining_words])
-            truncated = True
-
-        if len(text) > remaining_chars:
-            if remaining_chars < 140:
-                return ""
-            text = text[:remaining_chars].rsplit(" ", 1)[0].strip()
-            sentence_boundary = max(text.rfind("."), text.rfind("?"), text.rfind("!"))
-            if sentence_boundary >= 120:
-                text = text[: sentence_boundary + 1].strip()
-            elif text and text[-1] not in ".!?":
-                text = f"{text.rstrip(' ,;:')}."
-            truncated = True
-
-        if truncated and len(text.split()) < min_final_turn_words:
-            return ""
-        return text.strip()
-
-    normalized_turns = []
-    for turn in turns:
-        text = (turn.get("text") or "").strip()
-        if text:
-            normalized_turns.append({**turn, "text": text})
-
-    if not normalized_turns:
-        return []
-
-    reserved_turns = []
-    main_turns = normalized_turns
-    if reserved_end_turns and len(normalized_turns) > reserved_end_turns + 2:
-        reserved_turns = normalized_turns[-reserved_end_turns:]
-        main_turns = normalized_turns[:-reserved_end_turns]
-
-    reserved_words = sum(len(turn["text"].split()) for turn in reserved_turns)
-    reserved_chars = sum(len(turn["text"]) for turn in reserved_turns)
-    main_word_budget = max(max_words - reserved_words, 0) if reserved_turns else max_words
-    main_char_budget = max(max_chars - reserved_chars, 0) if reserved_turns else max_chars
-    capped = []
-    word_count = 0
-    char_count = 0
-
-    for turn in main_turns:
-        remaining_words = main_word_budget - word_count
-        remaining_chars = main_char_budget - char_count
-        text = trim_text_to_budget(turn["text"], remaining_words, remaining_chars)
-        if not text:
-            break
-        capped.append({**turn, "text": text})
-        word_count += len(text.split())
-        char_count += len(text)
-
-    for turn in reserved_turns:
-        remaining_words = max_words - word_count
-        remaining_chars = max_chars - char_count
-        text = trim_text_to_budget(turn["text"], remaining_words, remaining_chars)
-        if not text:
-            continue
-        capped.append({**turn, "text": text})
-        word_count += len(text.split())
-        char_count += len(text)
-    return capped
 
 
-def split_audio_turns_for_tts(turns: List[Dict[str, str]]) -> List[Dict[str, str]]:
-    max_chars = parse_int_env("AI_AUDIO_TTS_MAX_CHARS_PER_TURN", 1400)
-    max_sentences = parse_int_env("AI_AUDIO_TTS_MAX_SENTENCES_PER_TURN", 1, minimum=1, maximum=4)
-    split_turns = []
-    for turn in turns:
-        text = (turn.get("text") or "").strip()
-        if not text:
-            continue
-        sentences = tts_sentence_parts(text)
-        if not sentences:
-            continue
-        if len(text) <= max_chars and len(sentences) <= max_sentences:
-            split_turns.append({**turn, "text": normalize_local_tts_text(text)})
-            continue
-        buffer = ""
-        sentence_count = 0
-        for sentence in sentences:
-            candidate = f"{buffer} {sentence}".strip()
-            if len(candidate) <= max_chars and sentence_count < max_sentences:
-                buffer = candidate
-                sentence_count += 1
-                continue
-            if buffer:
-                split_turns.append({**turn, "text": buffer})
-            if len(sentence) > max_chars:
-                buffer = sentence[:max_chars].rsplit(" ", 1)[0].strip()
-            else:
-                buffer = sentence
-            sentence_count = 1
-        if buffer:
-            split_turns.append({**turn, "text": buffer})
-    return split_turns
 
 
 def build_ai_audio_turns(
@@ -4541,992 +3567,60 @@ def build_ai_audio_turns(
     return apply_ai_voice_cast_to_turns(cap_audio_script_turns(turns), intake)
 
 
-def get_ai_audio_provider_order() -> List[str]:
-    requested = os.environ.get("AI_AUDIO_TTS_PROVIDER", "auto").strip().lower() or "auto"
-    if requested == "auto":
-        order = []
-        if os.environ.get("AI_AUDIO_LOCAL_TTS_URL"):
-            order.append("local_http")
-        if os.environ.get("ELEVENLABS_API_KEY"):
-            order.append("elevenlabs")
-        if os.environ.get("OPENAI_API_KEY"):
-            order.append("openai")
-        if (
-            apple_say_tts_available()
-            and parse_bool_env("AI_AUDIO_TTS_APPLE_SAY_ENABLED", True)
-            and not parse_bool_env("AI_AUDIO_REQUIRE_NEURAL_WORKER", False)
-        ):
-            order.append("apple_say")
-        if not parse_bool_env("AI_AUDIO_REQUIRE_NEURAL_WORKER", False):
-            order.append("local")
-        return order or (["local_http"] if parse_bool_env("AI_AUDIO_REQUIRE_NEURAL_WORKER", False) else ["local"])
-
-    aliases = {
-        "apple": "apple_say",
-        "apple-say": "apple_say",
-        "macos": "apple_say",
-        "macos_say": "apple_say",
-        "macos-say": "apple_say",
-        "say": "apple_say",
-        "espeak": "local",
-        "espeak-ng": "local",
-        "local-neural": "local_http",
-        "http": "local_http",
-    }
-    order = [aliases.get(provider.strip(), provider.strip()) for provider in requested.split(",") if provider.strip()]
-    if parse_bool_env("AI_AUDIO_TTS_LOCAL_FALLBACK", True) and "local" not in order and not parse_bool_env("AI_AUDIO_REQUIRE_NEURAL_WORKER", False):
-        order.append("local")
-    if parse_bool_env("AI_AUDIO_REQUIRE_NEURAL_WORKER", False):
-        order = [provider for provider in order if provider not in {"local", "apple_say"}]
-    return order or (["local_http"] if parse_bool_env("AI_AUDIO_REQUIRE_NEURAL_WORKER", False) else ["local"])
-
-
-def safe_tts_error(exc: Exception) -> str:
-    return re.sub(r"\s+", " ", str(exc)).strip()[:220]
-
-
-def content_type_for_tts_output(output_format: str) -> str:
-    if output_format.startswith("mp3"):
-        return "audio/mpeg"
-    if output_format.startswith("wav"):
-        return "audio/wav"
-    if output_format.startswith("pcm"):
-        return "audio/L16"
-    return "audio/mpeg"
-
-
-def extension_for_content_type(content_type: str) -> str:
-    if content_type == "audio/wav":
-        return "wav"
-    if content_type == "audio/L16":
-        return "pcm"
-    return "mp3"
-
-
-def wav_silence_bytes(duration_seconds: float, reference_segment: bytes) -> bytes:
-    sample_rate = 44100
-    channels = 1
-    sample_width = 2
-    try:
-        with wave.open(io.BytesIO(reference_segment), "rb") as wav_file:
-            sample_rate = wav_file.getframerate() or sample_rate
-            channels = wav_file.getnchannels() or channels
-            sample_width = wav_file.getsampwidth() or sample_width
-    except Exception:
-        pass
-    output = io.BytesIO()
-    with wave.open(output, "wb") as wav_file:
-        wav_file.setnchannels(channels)
-        wav_file.setsampwidth(sample_width)
-        wav_file.setframerate(sample_rate)
-        frame_count = max(1, int(sample_rate * max(0.0, duration_seconds)))
-        wav_file.writeframes(b"\x00" * frame_count * channels * sample_width)
-    return output.getvalue()
-
-
-def compressed_silence_bytes(duration_seconds: float, extension: str) -> bytes:
-    ffmpeg = shutil.which("ffmpeg")
-    if not ffmpeg:
-        return b""
-    with tempfile.TemporaryDirectory(prefix="audioraq-tts-silence-") as temp_dir:
-        temp_path = Path(temp_dir)
-        output_path = temp_path / f"silence.{extension}"
-        codec_args = ["-acodec", "libmp3lame", "-b:a", "128k"] if extension == "mp3" else ["-acodec", "pcm_s16le"]
-        cmd = [
-            ffmpeg,
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-y",
-            "-f",
-            "lavfi",
-            "-i",
-            "anullsrc=r=44100:cl=mono",
-            "-t",
-            f"{max(0.01, duration_seconds):.3f}",
-            *codec_args,
-            str(output_path),
-        ]
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
-        if result.returncode != 0:
-            logger.warning(f"Could not generate {extension} silence: {result.stderr or result.stdout}")
-            return b""
-        return output_path.read_bytes()
-
-
-def audio_silence_segment(duration_seconds: float, extension: str, reference_segment: bytes) -> bytes:
-    if duration_seconds <= 0:
-        return b""
-    if extension == "wav":
-        return wav_silence_bytes(duration_seconds, reference_segment)
-    return compressed_silence_bytes(duration_seconds, extension)
-
-
-def apply_audio_segment_padding(
-    segments: List[bytes],
-    extension: str,
-    gap_seconds: float,
-    edge_padding_seconds: float,
-) -> List[bytes]:
-    if not segments:
-        return segments
-    silence_gap = audio_silence_segment(gap_seconds, extension, segments[0]) if gap_seconds > 0 else b""
-    silence_edge = audio_silence_segment(edge_padding_seconds, extension, segments[0]) if edge_padding_seconds > 0 else b""
-    padded = []
-    if silence_edge:
-        padded.append(silence_edge)
-    for index, segment in enumerate(segments):
-        if index and silence_gap:
-            padded.append(silence_gap)
-        padded.append(segment)
-    if silence_edge:
-        padded.append(silence_edge)
-    return padded
-
-
-def stitch_audio_segments(
-    segments: List[bytes],
-    extension: str = "mp3",
-    gap_seconds: Optional[float] = None,
-    edge_padding_seconds: Optional[float] = None,
-) -> bytes:
-    gap = ai_audio_sentence_gap_seconds() if gap_seconds is None else max(0.0, gap_seconds)
-    edge = ai_audio_edge_padding_seconds() if edge_padding_seconds is None else max(0.0, edge_padding_seconds)
-    segments = apply_audio_segment_padding(segments, extension, gap, edge)
-    if len(segments) == 1:
-        return segments[0]
-    ffmpeg = shutil.which("ffmpeg")
-    if not ffmpeg:
-        raise RuntimeError("ffmpeg is required to stitch multi-voice TTS audio segments")
-
-    with tempfile.TemporaryDirectory(prefix="audioraq-tts-stitch-") as temp_dir:
-        temp_path = Path(temp_dir)
-        concat_path = temp_path / "concat.txt"
-        output_path = temp_path / f"episode.{extension}"
-        concat_lines = []
-        for index, segment in enumerate(segments):
-            segment_path = temp_path / f"segment-{index:03d}.{extension}"
-            segment_path.write_bytes(segment)
-            concat_lines.append(f"file '{segment_path}'")
-        concat_path.write_text("\n".join(concat_lines) + "\n", encoding="utf-8")
-        cmd = [
-            ffmpeg,
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-f",
-            "concat",
-            "-safe",
-            "0",
-            "-i",
-            str(concat_path),
-            "-vn",
-            "-acodec",
-            "libmp3lame" if extension == "mp3" else "pcm_s16le",
-            "-b:a",
-            "128k",
-            str(output_path),
-        ]
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=240)
-        if result.returncode != 0:
-            if extension == "mp3":
-                logger.warning(f"ffmpeg MP3 stitching failed; using safe byte concatenation fallback: {result.stderr or result.stdout}")
-                data = b"".join(segments)
-                if len(data) < 1024:
-                    raise RuntimeError("byte-concatenated audio was empty after ffmpeg stitching failed")
-                return data
-            raise RuntimeError(result.stderr or result.stdout or "ffmpeg stitching failed")
-        data = output_path.read_bytes()
-        if len(data) < 1024:
-            raise RuntimeError("ffmpeg stitched an empty audio file")
-        return data
-
-
-def local_tts_voice_profile() -> str:
-    raw_profile = os.environ.get("AI_AUDIO_TTS_LOCAL_VOICE_PROFILE", "proof_studio").strip().lower()
-    normalized = raw_profile.replace("-", "_")
-    if normalized in {"proof_studio", "proof", "audioraq_proof"}:
-        return "proof_studio"
-    if normalized in {"dialogue", "multi_voice", "multivoice"}:
-        return "dialogue"
-    return "proof_studio"
-
-
-def local_tts_role_config(voice_role: str) -> Dict[str, str]:
-    role = voice_role if voice_role in AI_AUDIO_VOICE_ROLES else "host"
-    role_key = role.upper()
-    if local_tts_voice_profile() == "proof_studio":
-        voice_defaults = {"host": "en-us+m3", "guest": "en-us+m3", "narrator": "en-us+m3"}
-        speed_defaults = {"host": "158", "guest": "158", "narrator": "158"}
-        pitch_defaults = {"host": "48", "guest": "48", "narrator": "48"}
-        amplitude_defaults = {"host": "145", "guest": "145", "narrator": "145"}
-    else:
-        voice_defaults = {"host": "en-us+m3", "guest": "en-us+f3", "narrator": "en-us+m1"}
-        speed_defaults = {"host": "158", "guest": "150", "narrator": "142"}
-        pitch_defaults = {"host": "48", "guest": "58", "narrator": "42"}
-        amplitude_defaults = {"host": "145", "guest": "135", "narrator": "140"}
-    return {
-        "voice": os.environ.get(f"AI_AUDIO_TTS_LOCAL_VOICE_{role_key}", voice_defaults[role]).strip() or voice_defaults[role],
-        "speed": os.environ.get(f"AI_AUDIO_TTS_LOCAL_SPEED_{role_key}", speed_defaults[role]).strip() or speed_defaults[role],
-        "pitch": os.environ.get(f"AI_AUDIO_TTS_LOCAL_PITCH_{role_key}", pitch_defaults[role]).strip() or pitch_defaults[role],
-        "amplitude": os.environ.get(f"AI_AUDIO_TTS_LOCAL_AMPLITUDE_{role_key}", amplitude_defaults[role]).strip() or amplitude_defaults[role],
-    }
-
-
-def shape_tts_pronunciation(text: str) -> str:
-    """Make synthetic speech easier to articulate without changing meaning."""
-    text = text.replace("&", " and ")
-    text = re.sub(r"\bQ\s*&\s*A\b", "Q and A", text, flags=re.IGNORECASE)
-    text = re.sub(r"\bvs\.?\b", "versus", text, flags=re.IGNORECASE)
-    text = re.sub(r"\be\.g\.", "for example", text, flags=re.IGNORECASE)
-    text = re.sub(r"\bi\.e\.", "that is", text, flags=re.IGNORECASE)
-    text = re.sub(r"(?<=\w)/(?=\w)", " and ", text)
-    text = re.sub(r"(?<=\d)%", " percent", text)
-
-    def spell_acronym(match: re.Match) -> str:
-        acronym = match.group(0)
-        if "." in acronym:
-            return acronym
-        return ".".join(acronym) + "."
-
-    return re.sub(r"\b[A-Z]{2,6}\b", spell_acronym, text)
-
-
-def normalize_local_tts_text(text: str) -> str:
-    text = re.sub(r"\s+", " ", (text or "").strip())
-    text = text.replace(" - ", ", ")
-    text = shape_tts_pronunciation(text)
-    text = re.sub(r"\s+", " ", text).strip()
-    if text and text[-1] not in ".!?":
-        text = f"{text}."
-    return text
-
-
-def postprocess_local_wav_audio(data: bytes) -> bytes:
-    if not parse_bool_env("AI_AUDIO_TTS_LOCAL_POSTPROCESS", True):
-        return data
-    ffmpeg = shutil.which("ffmpeg")
-    if not ffmpeg:
-        return data
-    audio_filter = os.environ.get(
-        "AI_AUDIO_TTS_LOCAL_FILTER",
-        PROOF_STUDIO_LOCAL_FILTER,
-    ).strip()
-    with tempfile.TemporaryDirectory(prefix="audioraq-local-tts-post-") as temp_dir:
-        temp_path = Path(temp_dir)
-        input_path = temp_path / "input.wav"
-        output_path = temp_path / "output.wav"
-        input_path.write_bytes(data)
-        cmd = [
-            ffmpeg,
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-y",
-            "-i",
-            str(input_path),
-            "-af",
-            audio_filter,
-            "-ar",
-            "44100",
-            "-ac",
-            "1",
-            str(output_path),
-        ]
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=240)
-        if result.returncode != 0:
-            logger.warning(f"Local TTS post-processing failed; using raw local output: {result.stderr or result.stdout}")
-            return data
-        processed = output_path.read_bytes()
-        return processed if len(processed) >= 1024 else data
-
-
-def transcode_local_tts_output(data: bytes) -> Tuple[bytes, str, str]:
-    output_format = os.environ.get("AI_AUDIO_TTS_LOCAL_OUTPUT_FORMAT", "wav").strip().lower() or "wav"
-    if output_format in {"wav", "wave"}:
-        return data, "audio/wav", "wav"
-    if output_format not in {"mp3", "mpeg"}:
-        logger.warning(f"Unsupported AI_AUDIO_TTS_LOCAL_OUTPUT_FORMAT={output_format}; using WAV output")
-        return data, "audio/wav", "wav"
-
-    ffmpeg = shutil.which("ffmpeg")
-    if not ffmpeg:
-        logger.warning("ffmpeg is not installed; using WAV local TTS output")
-        return data, "audio/wav", "wav"
-
-    bitrate = os.environ.get("AI_AUDIO_TTS_LOCAL_MP3_BITRATE", "160k").strip() or "160k"
-    with tempfile.TemporaryDirectory(prefix="audioraq-local-tts-transcode-") as temp_dir:
-        temp_path = Path(temp_dir)
-        input_path = temp_path / "input.wav"
-        output_path = temp_path / "output.mp3"
-        input_path.write_bytes(data)
-        cmd = [
-            ffmpeg,
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-y",
-            "-i",
-            str(input_path),
-            "-vn",
-            "-acodec",
-            "libmp3lame",
-            "-b:a",
-            bitrate,
-            "-ar",
-            "44100",
-            "-ac",
-            "1",
-            str(output_path),
-        ]
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=240)
-        if result.returncode != 0:
-            logger.warning(f"Local TTS MP3 transcode failed; using WAV output: {result.stderr or result.stdout}")
-            return data, "audio/wav", "wav"
-        transcoded = output_path.read_bytes()
-        if len(transcoded) < 1024:
-            logger.warning("Local TTS MP3 transcode produced an empty file; using WAV output")
-            return data, "audio/wav", "wav"
-        return transcoded, "audio/mpeg", "mp3"
-
-
-def apple_say_tts_available() -> bool:
-    return bool(shutil.which("say") and shutil.which("afconvert"))
-
-
-def proof_studio_apple_role(voice_role: str, speaker: str = "") -> str:
-    normalized_speaker = (speaker or "").strip().lower()
-    if normalized_speaker in {"co-host", "cohost", "guest"}:
-        return "guest"
-    if normalized_speaker == "narrator":
-        return "narrator"
-    return voice_role if voice_role in AI_AUDIO_VOICE_ROLES else "host"
-
-
-def synthesize_apple_say_turn(text: str, output_wav: Path, voices: List[str], rate_wpm: int) -> Tuple[str, float]:
-    say = shutil.which("say")
-    afconvert = shutil.which("afconvert")
-    if not say or not afconvert:
-        raise RuntimeError("Apple proof-studio voices require macOS say and afconvert")
-
-    text_path = output_wav.with_suffix(".txt")
-    text_path.write_text(normalize_local_tts_text(text), encoding="utf-8")
-    last_error: Optional[Exception] = None
-    for attempt, selected_voice in enumerate(dict.fromkeys(voices), start=1):
-        tmp_aiff = output_wav.with_suffix(f".{attempt}.aiff")
-        try:
-            say_result = subprocess.run(
-                [say, "-v", selected_voice, "-r", str(rate_wpm), "-o", str(tmp_aiff), "-f", str(text_path)],
-                capture_output=True,
-                text=True,
-                timeout=240,
-            )
-            if say_result.returncode != 0:
-                raise RuntimeError(say_result.stderr or say_result.stdout or "Apple say rendering failed")
-            convert_result = subprocess.run([afconvert, "-f", "WAVE", "-d", "LEI16", str(tmp_aiff), str(output_wav)], capture_output=True, text=True, timeout=240)
-            if convert_result.returncode != 0:
-                raise RuntimeError(convert_result.stderr or convert_result.stdout or "Apple say WAV conversion failed")
-            with wave.open(str(output_wav), "rb") as wav_file:
-                duration_seconds = wav_file.getnframes() / max(1, wav_file.getframerate())
-            min_duration = 0.16 if len((text or "").split()) <= 3 else 0.35
-            if duration_seconds >= min_duration:
-                return selected_voice, duration_seconds
-            last_error = RuntimeError(f"Apple say voice {selected_voice} produced a short turn: {duration_seconds:.2f}s")
-        except Exception as exc:
-            last_error = exc
-        finally:
-            tmp_aiff.unlink(missing_ok=True)
-    raise RuntimeError(f"Could not synthesize Apple proof-studio dialogue turn: {last_error}")
-
-
-def concat_wav_files_with_silence(
-    segment_paths: List[Path],
-    output_wav: Path,
-    gap_seconds: float = PROOF_STUDIO_APPLE_GAP_SECONDS,
-    edge_padding_seconds: float = 1.0,
-) -> None:
-    if not segment_paths:
-        raise RuntimeError("No Apple proof-studio audio segments were generated")
-    with wave.open(str(segment_paths[0]), "rb") as first:
-        params = first.getparams()
-        framerate = first.getframerate()
-        sample_width = first.getsampwidth()
-        channels = first.getnchannels()
-    silence_frames = int(framerate * max(0.0, gap_seconds))
-    silence = b"\x00" * silence_frames * sample_width * channels
-    edge_frames = int(framerate * max(0.0, edge_padding_seconds))
-    edge_silence = b"\x00" * edge_frames * sample_width * channels
-    with wave.open(str(output_wav), "wb") as out:
-        out.setparams(params)
-        if edge_silence:
-            out.writeframes(edge_silence)
-        for index, segment_path in enumerate(segment_paths):
-            with wave.open(str(segment_path), "rb") as segment:
-                if segment.getframerate() != framerate or segment.getsampwidth() != sample_width or segment.getnchannels() != channels:
-                    raise RuntimeError(f"Apple proof-studio segment format mismatch: {segment_path}")
-                out.writeframes(segment.readframes(segment.getnframes()))
-                if index < len(segment_paths) - 1 and silence:
-                    out.writeframes(silence)
-        if edge_silence:
-            out.writeframes(edge_silence)
-
-
-def master_wav_peak_headroom(path: Path, target_peak_dbfs: float = PROOF_STUDIO_APPLE_TARGET_PEAK_DBFS) -> Dict[str, Any]:
-    with wave.open(str(path), "rb") as wav_in:
-        params = wav_in.getparams()
-        frames = wav_in.readframes(wav_in.getnframes())
-    if params.sampwidth != 2 or not frames:
-        return {"target_peak_dbfs": target_peak_dbfs, "gain": 1.0, "peak_before": None, "peak_after": None}
-
-    samples = array("h")
-    samples.frombytes(frames)
-    if sys.byteorder != "little":
-        samples.byteswap()
-
-    max_abs = max((abs(sample) for sample in samples), default=0)
-    if max_abs <= 0:
-        return {"target_peak_dbfs": target_peak_dbfs, "gain": 1.0, "peak_before": None, "peak_after": None}
-
-    full_scale = float((1 << (params.sampwidth * 8 - 1)) - 1)
-    target_abs = max(1, int(full_scale * (10 ** (target_peak_dbfs / 20.0))))
-    gain = target_abs / max_abs
-    mastered = array("h", (max(-32768, min(32767, int(round(sample * gain)))) for sample in samples))
-    peak_after = max((abs(sample) for sample in mastered), default=0)
-    if sys.byteorder != "little":
-        mastered.byteswap()
-
-    with wave.open(str(path), "wb") as wav_out:
-        wav_out.setparams(params)
-        wav_out.writeframes(mastered.tobytes())
-
-    return {
-        "target_peak_dbfs": target_peak_dbfs,
-        "gain": round(gain, 4),
-        "peak_before": round(20 * math.log10(max(max_abs / full_scale, 0.0000001)), 2),
-        "peak_after": round(20 * math.log10(max(max(1, peak_after) / full_scale, 0.0000001)), 2),
-    }
-
-
-def render_apple_say_proof_audio(script_text: str, turns: Optional[List[Dict[str, str]]] = None) -> Dict[str, Any]:
-    if not apple_say_tts_available():
-        raise RuntimeError("Apple proof-studio TTS is only available on macOS with say and afconvert")
-
-    rendered_turns = split_audio_turns_for_tts(turns or [{"speaker": "Host", "voice_role": "host", "text": script_text}])
-    if not rendered_turns:
-        raise RuntimeError("no voice turns were available for Apple proof-studio TTS")
-    rendered_roles = [
-        proof_studio_apple_role(str(turn.get("voice_role") or "host"), str(turn.get("speaker") or ""))
-        for turn in rendered_turns
-    ]
-    narrative_mode = "narrator" in rendered_roles
-    active_rates = PROOF_STUDIO_APPLE_NARRATIVE_RATES if narrative_mode else PROOF_STUDIO_APPLE_RATES
-    turn_gap_seconds = ai_audio_sentence_gap_seconds()
-    edge_padding_seconds = ai_audio_edge_padding_seconds()
-
-    with tempfile.TemporaryDirectory(prefix="audioraq-apple-proof-") as temp_dir:
-        temp_path = Path(temp_dir)
-        segments = []
-        voices = {}
-        timings = []
-        cursor = edge_padding_seconds
-        for index, turn in enumerate(rendered_turns, start=1):
-            role = rendered_roles[index - 1]
-            voice_profile = AI_PODCAST_VOICE_BY_ID.get(str(turn.get("voice_id") or ""))
-            voice_candidates = (
-                list(voice_profile.get("apple_voices") or []) + PROOF_STUDIO_APPLE_VOICES.get(role, PROOF_STUDIO_APPLE_VOICES["host"])
-                if voice_profile
-                else PROOF_STUDIO_APPLE_VOICES.get(role, PROOF_STUDIO_APPLE_VOICES["host"])
-            )
-            rate_wpm = int(voice_profile.get("rate_wpm") or active_rates.get(role, active_rates["host"])) if voice_profile else active_rates.get(role, active_rates["host"])
-            segment_path = temp_path / f"segment-{index:03d}-{role}.wav"
-            selected_voice, duration_seconds = synthesize_apple_say_turn(
-                turn.get("text") or "",
-                segment_path,
-                voice_candidates,
-                rate_wpm,
-            )
-            speaker_key = turn.get("speaker") or role
-            voices[speaker_key] = {
-                "voice_id": voice_profile.get("id") if voice_profile else "",
-                "display_name": voice_profile.get("name") if voice_profile else selected_voice,
-                "gender": voice_profile.get("gender") if voice_profile else "",
-                "style": voice_profile.get("style") if voice_profile else "",
-                "engine_voice": selected_voice,
-            }
-            timings.append(
-                {
-                    "speaker": turn.get("speaker") or role.title(),
-                    "voice_role": role,
-                    "voice_id": voice_profile.get("id") if voice_profile else "",
-                    "voice_name": voice_profile.get("name") if voice_profile else selected_voice,
-                    "voice": selected_voice,
-                    "start": round(cursor, 3),
-                    "end": round(cursor + duration_seconds, 3),
-                    "duration": round(duration_seconds, 3),
-                }
-            )
-            cursor += duration_seconds + (turn_gap_seconds if index < len(rendered_turns) else edge_padding_seconds)
-            segments.append(segment_path)
-
-        output_path = temp_path / "episode.wav"
-        concat_wav_files_with_silence(segments, output_path, gap_seconds=turn_gap_seconds, edge_padding_seconds=edge_padding_seconds)
-        mastering = master_wav_peak_headroom(output_path)
-        data = output_path.read_bytes()
-        if len(data) < 1024:
-            raise RuntimeError("Apple proof-studio TTS produced an empty audio file")
-        return {
-            "data": data,
-            "content_type": "audio/wav",
-            "provider": "apple-say:proof-studio",
-            "provider_kind": "local-proof",
-            "model": "macOS say",
-            "voices": voices,
-            "turn_count": len(rendered_turns),
-            "chunk_count": len(segments),
-            "timings": timings,
-            "rates_wpm": active_rates,
-            "turn_gap_seconds": turn_gap_seconds,
-            "edge_padding_seconds": edge_padding_seconds,
-            "mastering": mastering,
-            "enhancement_profile": f"audioraq-qa-proof-dialogue+20-voice-library+calm-podcast-rate+{turn_gap_seconds}s-sentence-gaps+{edge_padding_seconds}s-edge-padding",
-            "benchmark_note": "Replicates the April 11 QA proof-studio recipe using generic macOS system voices; does not clone a real person's voice.",
-            "voice_profile": "apple_proof_studio",
-            "extension": "wav",
-            "filename": "ai-generated-episode.wav",
-        }
-
-
-def render_local_ai_audio(script_text: str, turns: Optional[List[Dict[str, str]]] = None) -> Dict[str, Any]:
-    renderer = shutil.which("espeak-ng") or shutil.which("espeak")
-    if not renderer:
-        raise RuntimeError("local AI audio renderer is not installed")
-
-    use_multivoice = parse_bool_env("AI_AUDIO_TTS_LOCAL_MULTIVOICE", True)
-    if use_multivoice and turns:
-        rendered_turns = split_audio_turns_for_tts(turns)
-    else:
-        host_config = local_tts_role_config("host")
-        rendered_turns = [{"speaker": "Host", "voice_role": "host", "text": script_text, **host_config}]
-
-    with tempfile.TemporaryDirectory(prefix="audioraq-ai-audio-") as temp_dir:
-        temp_path = Path(temp_dir)
-        segments = []
-        voices = {}
-        for index, turn in enumerate(rendered_turns):
-            role = turn.get("voice_role") if turn.get("voice_role") in AI_AUDIO_VOICE_ROLES else "host"
-            voice_profile = AI_PODCAST_VOICE_BY_ID.get(str(turn.get("voice_id") or ""))
-            host_config = local_tts_role_config("host")
-            if voice_profile and voice_profile.get("espeak"):
-                profile_config = voice_profile["espeak"]
-                config = {
-                    "voice": str(profile_config.get("voice") or host_config["voice"]),
-                    "speed": str(profile_config.get("speed") or host_config["speed"]),
-                    "pitch": str(profile_config.get("pitch") or host_config["pitch"]),
-                    "amplitude": str(profile_config.get("amplitude") or host_config["amplitude"]),
-                }
-            else:
-                config = (
-                    local_tts_role_config(role)
-                    if use_multivoice and turns
-                    else {
-                        "voice": turn.get("voice") or host_config["voice"],
-                        "speed": turn.get("speed") or host_config["speed"],
-                        "pitch": turn.get("pitch") or host_config["pitch"],
-                        "amplitude": turn.get("amplitude") or host_config["amplitude"],
-                    }
-                )
-            speaker_key = turn.get("speaker") or role
-            voices[speaker_key] = {
-                "voice_id": voice_profile.get("id") if voice_profile else "",
-                "display_name": voice_profile.get("name") if voice_profile else config["voice"],
-                "gender": voice_profile.get("gender") if voice_profile else "",
-                "style": voice_profile.get("style") if voice_profile else "",
-                "engine_voice": config["voice"],
-            }
-            script_path = temp_path / f"script-{index:03d}.txt"
-            output_path = temp_path / f"segment-{index:03d}.wav"
-            script_path.write_text(normalize_local_tts_text(turn.get("text") or ""), encoding="utf-8")
-            cmd = [
-                renderer,
-                "-v",
-                config["voice"],
-                "-s",
-                config["speed"],
-                "-p",
-                config["pitch"],
-                "-a",
-                config["amplitude"],
-                "-f",
-                str(script_path),
-                "-w",
-                str(output_path),
-            ]
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=240)
-            if result.returncode != 0:
-                logger.error(f"AI audio renderer failed: {result.stderr or result.stdout}")
-                raise RuntimeError("local AI audio rendering failed")
-            segment = output_path.read_bytes()
-            if len(segment) >= 1024:
-                segments.append(segment)
-        if not segments:
-            raise RuntimeError("local AI audio renderer produced no usable segments")
-        data = stitch_audio_segments(segments, extension="wav")
-        data = postprocess_local_wav_audio(data)
-        data, content_type, extension = transcode_local_tts_output(data)
-        if len(data) < 1024:
-            raise RuntimeError("local AI audio renderer produced an empty file")
-        return {
-            "data": data,
-            "content_type": content_type,
-            "provider": f"{Path(renderer).name}:{local_tts_voice_profile()}-enhanced-local",
-            "provider_kind": "local",
-            "model": Path(renderer).name,
-            "voices": voices or {"host": os.environ.get("AI_AUDIO_TTS_VOICE", "en-us").strip() or "en-us"},
-            "turn_count": len(rendered_turns),
-            "chunk_count": len(segments),
-            "enhancement_profile": f"role-voice-variants+pacing+ffmpeg-normalization+{extension}-delivery",
-            "benchmark_note": "Local espeak-ng fallback optimized for clarity; not equivalent to neural ElevenLabs production TTS.",
-            "voice_profile": local_tts_voice_profile(),
-            "extension": extension,
-            "filename": f"ai-generated-episode.{extension}",
-        }
-
-
-def render_elevenlabs_ai_audio(turns: List[Dict[str, str]]) -> Dict[str, Any]:
-    api_key = os.environ.get("ELEVENLABS_API_KEY", "").strip()
-    if not api_key:
-        raise RuntimeError("ELEVENLABS_API_KEY is not configured")
-
-    host_voice = os.environ.get("ELEVENLABS_VOICE_ID_HOST", "JBFqnCBsd6RMkjVDRZzb").strip() or "JBFqnCBsd6RMkjVDRZzb"
-    voice_ids = {
-        "host": host_voice,
-        "guest": os.environ.get("ELEVENLABS_VOICE_ID_GUEST", "").strip() or host_voice,
-        "narrator": os.environ.get("ELEVENLABS_VOICE_ID_NARRATOR", "").strip() or host_voice,
-    }
-
-    model_id = os.environ.get("ELEVENLABS_MODEL_ID", "eleven_v3").strip() or "eleven_v3"
-    output_format = os.environ.get("ELEVENLABS_OUTPUT_FORMAT", "mp3_44100_128").strip() or "mp3_44100_128"
-    content_type = content_type_for_tts_output(output_format)
-    extension = extension_for_content_type(content_type)
-    rendered_turns = split_audio_turns_for_tts(turns)
-    if not rendered_turns:
-        raise RuntimeError("no voice turns were available for ElevenLabs TTS")
-
-    def build_inputs(active_voice_ids: Dict[str, str]) -> List[Dict[str, str]]:
-        tts_inputs = []
-        for turn in rendered_turns:
-            voice_role = turn.get("voice_role") if turn.get("voice_role") in AI_AUDIO_VOICE_ROLES else "host"
-            profile = AI_PODCAST_VOICE_BY_ID.get(str(turn.get("voice_id") or ""))
-            env_key = f"ELEVENLABS_VOICE_ID_{re.sub(r'[^A-Z0-9]+', '_', (profile or {}).get('id', '').upper()).strip('_')}" if profile else ""
-            selected_voice_id = os.environ.get(env_key, "").strip() if env_key else ""
-            tts_inputs.append({"text": turn["text"], "voice_id": selected_voice_id or active_voice_ids[voice_role]})
-        return tts_inputs
-
-    body_template = {"model_id": model_id}
-    language_code = os.environ.get("ELEVENLABS_LANGUAGE_CODE", "").strip()
-    if language_code:
-        body_template["language_code"] = language_code
-
-    request_timeout = parse_int_env("AI_AUDIO_TTS_TIMEOUT_SECONDS", 240)
-    max_request_chars = max(1000, parse_int_env("ELEVENLABS_MAX_REQUEST_CHARS", 4500))
-
-    def post_dialogue(tts_inputs: List[Dict[str, str]]):
-        return requests.post(
-            "https://api.elevenlabs.io/v1/text-to-dialogue",
-            params={"output_format": output_format},
-            headers={"xi-api-key": api_key, "Content-Type": "application/json", "Accept": content_type},
-            json={**body_template, "inputs": tts_inputs},
-            timeout=request_timeout,
-        )
-
-    inputs = build_inputs(voice_ids)
-    input_chars = sum(len(item.get("text") or "") for item in inputs)
-    if input_chars > max_request_chars:
-        raise RuntimeError(f"ElevenLabs TTS input has {input_chars} characters, above the configured {max_request_chars}-character cap")
-
-    response = post_dialogue(inputs)
-    if response.status_code == 404 and "voice_not_found" in response.text and len(set(voice_ids.values())) > 1:
-        logger.warning("ElevenLabs secondary voice was not available; retrying dialogue render with host voice only")
-        voice_ids = {role: voice_ids["host"] for role in voice_ids}
-        inputs = build_inputs(voice_ids)
-        response = post_dialogue(inputs)
-    if response.status_code >= 400:
-        raise RuntimeError(f"ElevenLabs TTS failed with {response.status_code}: {response.text[:300]}")
-
-    data = response.content
-    if len(data) < 1024:
-        raise RuntimeError("ElevenLabs TTS produced an empty file")
-    return {
-        "data": data,
-        "content_type": content_type,
-        "provider": f"elevenlabs:{model_id}",
-        "provider_kind": "elevenlabs",
-        "model": model_id,
-        "voices": {role: voice for role, voice in voice_ids.items() if voice},
-        "turn_count": len(rendered_turns),
-        "chunk_count": 1,
-        "extension": extension,
-        "filename": f"ai-generated-episode.{extension}",
-    }
-
-
-def render_openai_ai_audio(turns: List[Dict[str, str]]) -> Dict[str, Any]:
-    api_key = os.environ.get("OPENAI_API_KEY", "").strip()
-    if not api_key:
-        raise RuntimeError("OPENAI_API_KEY is not configured")
-
-    model = os.environ.get("OPENAI_TTS_MODEL", "gpt-4o-mini-tts").strip() or "gpt-4o-mini-tts"
-    response_format = os.environ.get("OPENAI_TTS_RESPONSE_FORMAT", "mp3").strip() or "mp3"
-    content_type = "audio/mpeg" if response_format == "mp3" else f"audio/{response_format}"
-    gpt4o_voice_defaults = {"host": "marin", "guest": "cedar", "narrator": "coral"}
-    legacy_voice_defaults = {"host": "alloy", "guest": "nova", "narrator": "onyx"}
-    defaults = gpt4o_voice_defaults if model.startswith("gpt-4o") else legacy_voice_defaults
-    voices = {
-        "host": os.environ.get("OPENAI_TTS_VOICE_HOST", defaults["host"]).strip() or defaults["host"],
-        "guest": os.environ.get("OPENAI_TTS_VOICE_GUEST", defaults["guest"]).strip() or defaults["guest"],
-        "narrator": os.environ.get("OPENAI_TTS_VOICE_NARRATOR", defaults["narrator"]).strip() or defaults["narrator"],
-    }
-    base_instructions = os.environ.get(
-        "OPENAI_TTS_INSTRUCTIONS",
-        "Natural podcast delivery: warm, clear, conversational, and expressive without imitating any real person.",
-    ).strip()
-
-    segments = []
-    actual_voices: Dict[str, Any] = {}
-    rendered_turns = split_audio_turns_for_tts(turns)
-    if not rendered_turns:
-        raise RuntimeError("no voice turns were available for OpenAI TTS")
-    for turn in rendered_turns:
-        voice_role = turn.get("voice_role") if turn.get("voice_role") in AI_AUDIO_VOICE_ROLES else "host"
-        voice_profile = AI_PODCAST_VOICE_BY_ID.get(str(turn.get("voice_id") or ""))
-        selected_voice = (voice_profile.get("openai_voice") if voice_profile else "") or voices[voice_role]
-        speaker_key = turn.get("speaker") or voice_role
-        actual_voices[speaker_key] = {
-            "voice_id": voice_profile.get("id") if voice_profile else "",
-            "display_name": voice_profile.get("name") if voice_profile else selected_voice,
-            "gender": voice_profile.get("gender") if voice_profile else "",
-            "style": voice_profile.get("style") if voice_profile else "",
-            "engine_voice": selected_voice,
-        }
-        payload = {
-            "model": model,
-            "voice": selected_voice,
-            "input": turn["text"],
-            "response_format": response_format,
-        }
-        if model.startswith("gpt-4o") and base_instructions:
-            payload["instructions"] = f"{base_instructions} Speaker role: {turn.get('speaker') or voice_role}."
-        response = requests.post(
-            "https://api.openai.com/v1/audio/speech",
-            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-            json=payload,
-            timeout=parse_int_env("AI_AUDIO_TTS_TIMEOUT_SECONDS", 240),
-        )
-        if response.status_code >= 400:
-            raise RuntimeError(f"OpenAI TTS failed with {response.status_code}: {response.text[:300]}")
-        if len(response.content) < 1024:
-            raise RuntimeError("OpenAI TTS produced an empty segment")
-        segments.append(response.content)
-
-    extension = "mp3" if response_format == "mp3" else response_format
-    data = stitch_audio_segments(segments, extension=extension)
-    return {
-        "data": data,
-        "content_type": content_type,
-        "provider": f"openai:{model}",
-        "provider_kind": "openai",
-        "model": model,
-        "voices": actual_voices or voices,
-        "turn_count": len(rendered_turns),
-        "extension": extension,
-        "filename": f"ai-generated-episode.{extension}",
-    }
-
-
-def render_local_http_ai_audio(
-    script_text: str,
-    turns: List[Dict[str, str]],
-    output_format: str = "",
-    quality_profile: str = "",
-) -> Dict[str, Any]:
-    base_url = os.environ.get("AI_AUDIO_LOCAL_TTS_URL", "").strip().rstrip("/")
-    if not base_url:
-        raise RuntimeError("AI_AUDIO_LOCAL_TTS_URL is not configured")
-
-    payload = {
-        "script_text": script_text,
-        "turns": split_audio_turns_for_tts(turns),
-        "target_loudness_lufs": parse_float_env("AI_AUDIO_TARGET_LUFS", -16.0),
-        "format": output_format or os.environ.get("AI_AUDIO_LOCAL_TTS_FORMAT", "wav").strip().lower() or "wav",
-        "quality_profile": quality_profile or os.environ.get("AI_AUDIO_LOCAL_TTS_PROFILE", "podcast-dialogue").strip() or "podcast-dialogue",
-        "pacing": {
-            "sentence_gap_seconds": ai_audio_sentence_gap_seconds(),
-            "edge_padding_seconds": ai_audio_edge_padding_seconds(),
-        },
-    }
-    response = requests.post(
-        f"{base_url}/v1/render",
-        json=payload,
-        timeout=parse_int_env("AI_AUDIO_LOCAL_TTS_TIMEOUT_SECONDS", 900),
-    )
-    if response.status_code >= 400:
-        raise RuntimeError(f"Local TTS worker failed with {response.status_code}: {response.text[:300]}")
-
-    if (response.headers.get("Content-Type") or "").startswith("audio/"):
-        data = response.content
-        content_type = response.headers.get("Content-Type", "audio/wav").split(";")[0]
-        extension = extension_for_content_type(content_type)
-        provider = response.headers.get("X-Audioraq-TTS-Provider", "local-http:audio")
-        provider_kind = response.headers.get("X-Audioraq-TTS-Provider-Kind", "local-neural")
-        model = response.headers.get("X-Audioraq-TTS-Model", "")
-    else:
-        body = response.json()
-        encoded_audio = body.get("audio_base64") or body.get("data_base64") or ""
-        if not encoded_audio:
-            raise RuntimeError("Local TTS worker did not return audio_base64")
-        data = base64.b64decode(encoded_audio)
-        content_type = body.get("content_type") or "audio/wav"
-        extension = body.get("extension") or extension_for_content_type(content_type)
-        provider = body.get("provider") or "local-http:audio"
-        provider_kind = body.get("provider_kind") or "local-neural"
-        model = body.get("model") or ""
-
-    if len(data) < 1024:
-        raise RuntimeError("Local TTS worker produced an empty audio file")
-    if parse_bool_env("AI_AUDIO_REQUIRE_NEURAL_WORKER", False) and provider_kind != "local-neural":
-        raise RuntimeError(f"Local TTS worker returned {provider_kind} audio, but AI_AUDIO_REQUIRE_NEURAL_WORKER=true")
-
-    return {
-        "data": data,
-        "content_type": content_type,
-        "provider": provider,
-        "provider_kind": provider_kind,
-        "model": model,
-        "voices": {"source": "local-http-worker"},
-        "turn_count": len(payload["turns"]),
-        "extension": extension,
-        "filename": f"ai-generated-episode.{extension}",
-        "quality_profile": payload["quality_profile"],
-    }
-
-
-def render_ai_audio_bytes(script_text: str, turns: Optional[List[Dict[str, str]]] = None) -> Dict[str, Any]:
-    voice_turns = cap_audio_script_turns(turns or [{"speaker": "Host", "voice_role": "host", "text": script_text}])
-    provider_errors = []
-    for provider in get_ai_audio_provider_order():
-        try:
-            if provider == "local_http":
-                return render_local_http_ai_audio(script_text, voice_turns)
-            if provider == "apple_say":
-                return render_apple_say_proof_audio(script_text, voice_turns)
-            if provider == "elevenlabs":
-                return render_elevenlabs_ai_audio(voice_turns)
-            if provider == "openai":
-                return render_openai_ai_audio(voice_turns)
-            if provider == "local":
-                return render_local_ai_audio(script_text, voice_turns)
-            raise RuntimeError(f"unknown provider '{provider}'")
-        except Exception as exc:
-            error = safe_tts_error(exc)
-            provider_errors.append(f"{provider}: {error}")
-            logger.warning(f"AI audio provider {provider} failed; trying fallback if available: {error}")
-
-    raise HTTPException(
-        status_code=502,
-        detail=f"AI audio rendering failed across configured providers. Last errors: {'; '.join(provider_errors[-3:])}",
-    )
-
-
-def transcode_ai_audio_result(rendered: Dict[str, Any], output_format: str) -> Dict[str, Any]:
-    requested = "mp3" if output_format == "mp3" else "wav"
-    current = str(rendered.get("extension") or extension_for_content_type(str(rendered.get("content_type") or ""))).lower()
-    if current == requested:
-        return rendered
-
-    ffmpeg = shutil.which("ffmpeg")
-    if not ffmpeg:
-        raise RuntimeError(f"ffmpeg is required to deliver {requested} output")
-    data = rendered.get("data") or b""
-    if len(data) < 1024:
-        raise RuntimeError("audio renderer returned an incomplete file")
-
-    with tempfile.TemporaryDirectory(prefix="audioraq-text-to-audio-") as temp_dir:
-        temp_path = Path(temp_dir)
-        input_extension = current if current in {"mp3", "wav"} else "audio"
-        input_path = temp_path / f"input.{input_extension}"
-        output_path = temp_path / f"output.{requested}"
-        input_path.write_bytes(data)
-        codec_args = ["-codec:a", "libmp3lame", "-b:a", "160k"] if requested == "mp3" else ["-codec:a", "pcm_s16le"]
-        result = subprocess.run(
-            [
-                ffmpeg,
-                "-hide_banner",
-                "-loglevel",
-                "error",
-                "-y",
-                "-i",
-                str(input_path),
-                "-ar",
-                "44100",
-                "-ac",
-                "1",
-                *codec_args,
-                str(output_path),
-            ],
-            capture_output=True,
-            text=True,
-            timeout=parse_int_env("AI_AUDIO_TTS_TIMEOUT_SECONDS", 240),
-        )
-        if result.returncode != 0 or not output_path.exists():
-            raise RuntimeError(result.stderr or result.stdout or "audio format conversion failed")
-        output = output_path.read_bytes()
-
-    return {
-        **rendered,
-        "data": output,
-        "content_type": "audio/mpeg" if requested == "mp3" else "audio/wav",
-        "extension": requested,
-        "filename": f"audioraq-speech.{requested}",
-    }
-
-
-def render_text_to_audio_bytes(
-    script_text: str,
-    turns: Optional[List[Dict[str, str]]],
-    output_format: str,
-    quality_profile: str,
-) -> Dict[str, Any]:
-    voice_turns = cap_audio_script_turns(turns or [{"speaker": "Narrator", "voice_role": "narrator", "text": script_text}])
-    provider_errors = []
-    for provider in get_ai_audio_provider_order():
-        try:
-            if provider == "local_http":
-                rendered = render_local_http_ai_audio(
-                    script_text,
-                    voice_turns,
-                    output_format=output_format,
-                    quality_profile=quality_profile,
-                )
-            elif provider == "apple_say":
-                rendered = render_apple_say_proof_audio(script_text, voice_turns)
-            elif provider == "elevenlabs":
-                rendered = render_elevenlabs_ai_audio(voice_turns)
-            elif provider == "openai":
-                rendered = render_openai_ai_audio(voice_turns)
-            elif provider == "local":
-                rendered = render_local_ai_audio(script_text, voice_turns)
-            else:
-                raise RuntimeError(f"unknown provider '{provider}'")
-            return transcode_ai_audio_result(rendered, output_format)
-        except Exception as exc:
-            error = safe_tts_error(exc)
-            provider_errors.append(f"{provider}: {error}")
-            logger.warning(f"Text-to-audio provider {provider} failed; trying fallback if available: {error}")
-
-    raise HTTPException(
-        status_code=502,
-        detail=f"Text-to-audio rendering failed across configured providers. Last errors: {'; '.join(provider_errors[-3:])}",
-    )
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 def enforce_ai_audio_listenability_gate(quality_agent: Dict[str, Any], stored_paths: Optional[List[str]] = None) -> None:
@@ -7748,198 +5842,54 @@ Rules:
     return strategy
 
 
-class RegisterRequest(BaseModel):
-    email: str
-    password: str
-    name: str
-    role: str
-    phone: Optional[str] = ""
-    age: Optional[int] = None
-    interests: Optional[List[str]] = []
-    podcast_description: Optional[str] = ""
-    show_title: Optional[str] = ""
-    promo_code: Optional[str] = ""
 
 
-class LoginRequest(BaseModel):
-    email: str
-    password: str
 
 
-class CompleteSocialSignupRequest(BaseModel):
-    name: Optional[str] = ""
-    role: str
-    phone: Optional[str] = ""
-    age: Optional[int] = None
-    interests: Optional[List[str]] = []
-    podcast_description: Optional[str] = ""
-    show_title: Optional[str] = ""
-    promo_code: Optional[str] = ""
 
 
-class RedeemPromoRequest(BaseModel):
-    code: str
 
 
-class UpdateInterestsRequest(BaseModel):
-    interests: List[str]
 
 
-class UpdatePodcastDescriptionRequest(BaseModel):
-    podcast_description: str
 
 
-class UpdatePlaybackProgressRequest(BaseModel):
-    progress_seconds: float = 0
-    duration_seconds: float = 0
-    event_type: Optional[str] = "progress"
 
 
-class UpdatePodcastRatingRequest(BaseModel):
-    rating: int
 
 
-class EpisodeAssistantRequest(BaseModel):
-    question: str
 
 
-class ManualSocialConnectRequest(BaseModel):
-    provider: Literal["linkedin", "instagram"]
-    access_token: str
-    refresh_token: Optional[str] = ""
-    organization_id: Optional[str] = ""
-    organization_name: Optional[str] = ""
-    page_id: Optional[str] = ""
-    instagram_account_id: Optional[str] = ""
-    account_name: Optional[str] = ""
 
 
-class SocialPostCreateRequest(BaseModel):
-    provider: Literal["linkedin", "instagram"]
-    social_account_id: str
-    headline: str
-    caption: Optional[str] = ""
-    cta: Optional[str] = ""
-    link_url: Optional[str] = ""
-    hashtags: Optional[List[str]] = []
-    scheduled_at: Optional[str] = ""
-    asset_url: Optional[str] = ""
-    use_generated_card: bool = True
-    source: Optional[str] = "manual"
-    status: Optional[str] = SOCIAL_POST_STATUS_DRAFT
-    publish_now: bool = False
 
 
-class FeedbackSubmissionRequest(BaseModel):
-    persona: Optional[Literal["listener", "podcaster", "visitor", "investor", "other"]] = "visitor"
-    category: Optional[Literal["bug", "confusing", "missing_feature", "delight", "pricing", "launch", "other"]] = "other"
-    rating: Optional[int] = None
-    page_url: Optional[str] = ""
-    message: str
-    desired_outcome: Optional[str] = ""
-    friction_area: Optional[str] = ""
-    email: Optional[str] = ""
-    contact_ok: bool = False
 
 
-class RssImportRequest(BaseModel):
-    feed_url: str
-    show_id: Optional[str] = ""
-    import_limit: Optional[int] = 10
 
 
-class PodcastIdentityInput(BaseModel):
-    podcastName: str
-    niche: str
-    targetAudience: str
 
 
-class EpisodeIntentInput(BaseModel):
-    episodeGoal: Literal["educate", "entertain", "storytelling", "interview"]
-    desiredOutcome: str
 
 
-class ContentInput(BaseModel):
-    topic: str
-    keyPoints: List[str]
-    references: Optional[List[str]] = []
 
 
-class ToneStyleInput(BaseModel):
-    tone: Literal["casual", "professional", "energetic", "storytelling"]
-    format: Literal["solo", "interview", "narrative"]
-    lengthPreference: Literal["short", "medium", "long"]
 
 
-class GrowthOptimizationInput(BaseModel):
-    optimizeFor: Literal["retention", "virality", "clarity"]
-    includeHook: bool = True
-    knownIssues: Optional[str] = ""
 
 
-class VoiceCastingInput(BaseModel):
-    selectedVoiceIds: List[str] = Field(default_factory=lambda: DEFAULT_AI_PODCAST_VOICE_IDS[:3])
 
 
-class AIPodcastIntake(BaseModel):
-    identity: PodcastIdentityInput
-    episodeIntent: EpisodeIntentInput
-    contentInput: ContentInput
-    toneStyle: ToneStyleInput
-    growthOptimization: GrowthOptimizationInput
-    voiceCasting: VoiceCastingInput = Field(default_factory=VoiceCastingInput)
 
 
-class GenerateAIPodcastDraftRequest(BaseModel):
-    show_id: str
-    intake: AIPodcastIntake
 
 
-class CreateAIStudioProjectRequest(BaseModel):
-    show_id: str
-    intake: Optional[AIPodcastIntake] = None
-    title: Optional[str] = ""
 
 
-class UpdateAIStudioProjectRequest(BaseModel):
-    title: Optional[str] = None
-    intake: Optional[AIPodcastIntake] = None
-    active_stage: Optional[Literal[
-        "brief",
-        "research",
-        "outline",
-        "script",
-        "cast",
-        "table_read",
-        "final_render",
-        "quality_review",
-        "publish",
-    ]] = None
-    show_bible: Optional[Dict[str, Any]] = None
-    cast: Optional[List[Dict[str, Any]]] = None
 
 
-class UpdateAIStudioProjectStageRequest(BaseModel):
-    stage: Literal[
-        "brief",
-        "research",
-        "outline",
-        "script",
-        "cast",
-        "table_read",
-        "final_render",
-        "quality_review",
-        "publish",
-    ]
-    status: str = "in_progress"
-    notes: Optional[str] = ""
-    artifact: Optional[Dict[str, Any]] = None
 
 
-class CreateAIStudioRenderJobRequest(BaseModel):
-    project_id: str
-    draft_id: Optional[str] = ""
-    render_type: Literal["preview", "final"] = "preview"
 
 
 @asynccontextmanager
