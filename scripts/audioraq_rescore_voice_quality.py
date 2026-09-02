@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from motor.motor_asyncio import AsyncIOMotorClient
+from pymongo import AsyncMongoClient
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -166,7 +166,7 @@ async def main() -> None:
     if not args.mongo_url:
         raise SystemExit("MONGO_URL is required.")
 
-    client = AsyncIOMotorClient(args.mongo_url)
+    client = AsyncMongoClient(args.mongo_url)
     db = client[args.db_name]
     query: Dict[str, Any] = {
         "is_deleted": False,

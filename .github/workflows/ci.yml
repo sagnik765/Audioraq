@@ -24,13 +24,34 @@ jobs:
       - run: npm ci
       - run: npm run build
 
-  voice-quality:
+  backend:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
         with:
           python-version: "3.11"
-      - run: python -m pip install pytest
-      - run: python -m py_compile backend/server.py backend/voice_quality.py scripts/audioraq_voice_benchmark.py
-      - run: pytest -q tests
+          cache: pip
+          cache-dependency-path: |
+            backend/requirements.prod.txt
+            backend/requirements.dev.txt
+
+      # The runtime set is installed first and on its own, so the test run
+      # exercises the application against exactly the packages the Docker
+      # image ships. A module imported by the app but missing from
+      # requirements.prod.txt fails here instead of at container start.
+      - name: Install runtime dependencies
+        run: python -m pip install -r backend/requirements.prod.txt
+      - name: Install test and lint tooling
+        run: python -m pip install -r backend/requirements.dev.txt
+
+      - name: Byte-compile
+        run: python -m py_compile backend/server.py backend/voice_quality.py scripts/audioraq_voice_benchmark.py
+
+      - name: Lint
+        run: python -m flake8 backend/ tests/
+
+      - name: Tests
+        env:
+          MONGO_URL: mongodb://localhost:27017
+        run: python -m pytest -q tests

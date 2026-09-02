@@ -101,3 +101,7 @@ frontend/node_modules/.cache/default-development/0.pack
 !backend/.env.example
 !frontend/.env.example
 deploy/oracle/oracle.env
+
+# Browser profiles (contain cookies, saved logins, and session tokens)
+**/chrome-profile/
+**/chrome-profile-clean/

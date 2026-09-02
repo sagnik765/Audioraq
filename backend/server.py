@@ -8,7 +8,7 @@ load_dotenv(ROOT_DIR / ".env")
 from fastapi import APIRouter, FastAPI, File, Form, HTTPException, Request, Response, UploadFile
 from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from motor.motor_asyncio import AsyncIOMotorClient
+from pymongo import AsyncMongoClient
 from pydantic import BaseModel, Field
 from starlette.middleware.cors import CORSMiddleware
 
@@ -42,14 +42,14 @@ import xml.etree.ElementTree as ET
 import zipfile
 
 from bson import ObjectId
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Iterator, List, Literal, Optional, Set, Tuple
-from urllib.parse import quote, urlencode, urljoin, urlparse
+from urllib.parse import urlencode, urljoin, urlparse
 
 from cryptography.fernet import Fernet, InvalidToken
 from backend.voice_quality import (
     build_voice_context_from_intake,
-    is_proof_studio_provider,
     score_podcast_voice_listenability,
 )
 from backend.text_to_audio_api import build_text_to_audio_router, ensure_text_to_audio_indexes
@@ -62,7 +62,7 @@ social_queue_lock = None
 
 
 mongo_url = os.environ["MONGO_URL"]
-client = AsyncIOMotorClient(mongo_url)
+client = AsyncMongoClient(mongo_url)
 db = client[os.environ.get("DB_NAME", "audioraq")]
 
 JWT_ALGORITHM = "HS256"
@@ -5620,7 +5620,7 @@ def build_fallback_ai_generation(brief: Dict[str, Any], show: Dict[str, Any]) ->
     talking_points = key_points or [
         f"The core misconception around {topic}",
         f"What actually matters for {audience}",
-        f"The practical next step listeners can take",
+        "The practical next step listeners can take",
     ]
     if references:
         talking_points.append(f"Weave in supporting references from {', '.join(references[:2])}")
@@ -5638,7 +5638,7 @@ def build_fallback_ai_generation(brief: Dict[str, Any], show: Dict[str, Any]) ->
         questions = [
             f"What do most people misunderstand about {topic}?",
             f"What changed your own thinking about {topic}?",
-            f"What should listeners do next if they want a better result?",
+            "What should listeners do next if they want a better result?",
         ]
         for index, question in enumerate(questions[:3]):
             answer = talking_points[index] if index < len(talking_points) else desired_outcome
@@ -5713,7 +5713,7 @@ def build_fallback_ai_generation(brief: Dict[str, Any], show: Dict[str, Any]) ->
         "guest_questions": [
             f"What do most people misunderstand about {topic}?",
             f"What changed your own thinking about {topic}?",
-            f"What should listeners do next if they want a better result?",
+            "What should listeners do next if they want a better result?",
         ] if format_name == "interview" else [],
         "production_notes": [
             f"Optimize pacing for {optimize_for}",
@@ -7942,10 +7942,21 @@ class CreateAIStudioRenderJobRequest(BaseModel):
     render_type: Literal["preview", "final"] = "preview"
 
 
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # startup/shutdown bodies are defined further down in this module; they are
+    # resolved at call time, so the forward references are fine.
+    await startup()
+    yield
+    await shutdown()
+    await shutdown_db_client()
+
+
 app = FastAPI(
     title="Audioraq API",
     version="1.0.0",
     description="Create, publish, discover, and convert text into listenable audio with Audioraq.",
+    lifespan=lifespan,
 )
 api_router = APIRouter(prefix="/api")
 
@@ -7988,7 +7999,6 @@ async def security_headers_middleware(request: Request, call_next):
     return response
 
 
-@app.on_event("startup")
 async def startup():
     validate_runtime_security()
     await ensure_text_to_audio_indexes(db)
@@ -8080,8 +8090,15 @@ async def startup():
     await migrate_existing_shows()
     app.state.social_queue_task = asyncio.create_task(social_queue_daemon())
 
+    try:
+        init_storage()
+        logger.info("Storage initialized")
+    except Exception as e:
+        logger.error(f"Storage init failed: {e}")
 
-@app.on_event("shutdown")
+    write_test_credentials_if_enabled(admin_email, admin_password)
+
+
 async def shutdown():
     task = getattr(app.state, "social_queue_task", None)
     if task:
@@ -8090,14 +8107,6 @@ async def shutdown():
             await task
         except asyncio.CancelledError:
             pass
-
-    try:
-        init_storage()
-        logger.info("Storage initialized")
-    except Exception as e:
-        logger.error(f"Storage init failed: {e}")
-
-    write_test_credentials_if_enabled(admin_email, admin_password)
 
 
 def build_social_display_name(email: str = "", fallback_name: str = "") -> str:
@@ -11004,6 +11013,5 @@ if FRONTEND_BUILD_DIR.exists():
         return FileResponse(FRONTEND_BUILD_DIR / "index.html")
 
 
-@app.on_event("shutdown")
 async def shutdown_db_client():
-    client.close()
+    await client.close()
