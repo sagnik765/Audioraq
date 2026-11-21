@@ -1,0 +1,20 @@
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "audioraq-mcp"
+version = "0.1.0"
+description = "Local MCP server for Audioraq text-to-audio tools"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "httpx>=0.28,<1",
+  "mcp>=2.2.0,<3",
+]
+
+[project.scripts]
+audioraq-mcp = "audioraq_mcp.server:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["audioraq_mcp"]

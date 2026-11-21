@@ -100,6 +100,10 @@ curl https://www.audioraq.com/api/v1/audio/speech \
 
 See [Text-to-Audio API Reference](docs/text-to-audio-api.md) for authentication, request fields, response headers, errors, and examples.
 
+## Audioraq MCP Server
+
+Connect an agent to Audioraq's hosted [MCP endpoint](https://www.audioraq.com/mcp) over Streamable HTTP. It exposes `list_voices` and `create_speech` and uses the existing developer API key and voice pipeline. See [hosted setup and client configuration](docs/mcp-server.md). A local stdio package is also available under `mcp-server/`.
+
 ## Tech Stack
 
 - **Frontend:** React, React Router, Tailwind CSS, Radix UI
@@ -217,3 +221,4 @@ The deployment includes the application, MongoDB, Caddy-managed HTTPS, and persi
 ## Portfolio Note
 
 Audioraq is an independently built product and an ongoing product-engineering case study. The repository documents both implemented behavior and explicit limitations so reviewers can distinguish current capabilities from planned work.
+

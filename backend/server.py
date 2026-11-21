@@ -53,6 +53,7 @@ from backend.voice_quality import (
     score_podcast_voice_listenability,
 )
 from backend.text_to_audio_api import build_text_to_audio_router, ensure_text_to_audio_indexes
+from backend.audioraq_mcp import build_audioraq_mcp_server
 from PIL import Image, ImageDraw, ImageFont
 
 
@@ -7944,10 +7945,10 @@ class CreateAIStudioRenderJobRequest(BaseModel):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # startup/shutdown bodies are defined further down in this module; they are
-    # resolved at call time, so the forward references are fine.
+    # Startup and shutdown helpers are resolved at call time.
     await startup()
-    yield
+    async with mcp_server.session_manager.run():
+        yield
     await shutdown()
     await shutdown_db_client()
 
@@ -7984,6 +7985,8 @@ api_router.include_router(
         public_voice=public_ai_podcast_voice,
     )
 )
+
+mcp_server, mcp_http_app = build_audioraq_mcp_server(db)
 
 
 @app.middleware("http")
@@ -10975,6 +10978,7 @@ async def health_check():
 
 
 app.include_router(api_router)
+app.mount("/mcp", mcp_http_app, name="audioraq-mcp")
 
 cors_origin_setting = os.environ.get("CORS_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000")
 cors_origins = [origin.strip() for origin in cors_origin_setting.split(",") if origin.strip()]
