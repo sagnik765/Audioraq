@@ -1,6 +1,6 @@
-# Audioraq MCP Server
+# Audioraq MCP Server (local stdio)
 
-Local Model Context Protocol server for Audioraq's developer text-to-audio API. It runs over stdio, exposes `list_voices` and `create_speech`, and returns audio as a standard MCP audio content block.
+This package runs a local stdio Model Context Protocol server for Audioraq's developer text-to-audio API. It exposes `list_voices` and `create_speech`, and returns audio as a standard MCP audio content block. For the hosted endpoint that does not require a local Python process, see [Audioraq MCP setup](../docs/mcp-server.md).
 
 ## Requirements
 
