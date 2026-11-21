@@ -102,9 +102,7 @@ See [Text-to-Audio API Reference](docs/text-to-audio-api.md) for authentication,
 
 ## Audioraq MCP Server
 
-Connect a local coding agent to Audioraq's product tools with the [Audioraq MCP server](mcp-server/README.md). It exposes `list_voices` and `create_speech` over stdio and uses the same developer API key and voice pipeline as the text-to-audio API. See [setup and client configuration](docs/mcp-server.md).
-
-The MCP server is a standalone package under `mcp-server/`; it does not add a network listener to the web application.
+Connect an agent to Audioraq's hosted [MCP endpoint](https://www.audioraq.com/mcp) over Streamable HTTP. It exposes `list_voices` and `create_speech` and uses the existing developer API key and voice pipeline. See [hosted setup and client configuration](docs/mcp-server.md). A local stdio package is also available under `mcp-server/`.
 
 ## Tech Stack
 
