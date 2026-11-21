@@ -16,6 +16,7 @@ import LibraryPage from "./pages/LibraryPage";
 import ShowPage from "./pages/ShowPage";
 import SettingsPage from "./pages/SettingsPage";
 import DeveloperPage from "./pages/DeveloperPage";
+import McpPage from "./pages/McpPage";
 
 function ProtectedRoute({ children, allowedRoles }) {
   const { user, loading } = useAuth();
@@ -67,6 +68,7 @@ function AppRoutes() {
         <Route path="/library" element={<ProtectedRoute allowedRoles={['user', 'admin']}><LibraryPage /></ProtectedRoute>} />
         <Route path="/settings" element={<ProtectedRoute><SettingsPage /></ProtectedRoute>} />
         <Route path="/developers" element={<DeveloperPage />} />
+        <Route path="/mcp" element={<McpPage />} />
         <Route path="/browse" element={<BrowsePage />} />
         <Route path="/shows/:showId" element={<ShowPage />} />
         <Route path="/episodes/:podcastId" element={<EpisodeDetailPage />} />
