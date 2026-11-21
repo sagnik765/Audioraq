@@ -12,7 +12,7 @@ Turn approved scripts into paced MP3 or WAV narration from your agent with Audio
 
 Turn a podcast intro, article, explainer, tutorial, or video script into finished MP3 or WAV narration from your agent. Audioraq's audio pipeline adds sentence-aware pacing, pauses, edge padding, and mastering. Choose a named Audioraq voice and one of three delivery profiles: calm education, dialogue, or storytelling.
 
-Connect the local Audioraq MCP server once, then use your agent to browse voices and render approved narration. The server returns an audio block and render metadata. It runs on your computer and uses Audioraq's API; you need an Audioraq developer key, but no separate voice-vendor accounts.
+Connect to Audioraq's hosted MCP endpoint once, then use your agent to browse voices and render approved narration. The server returns an audio block and render metadata over Streamable HTTP. You need an Audioraq developer key, but no local Python process or separate voice-vendor account.
 
 ## Demo prompt
 
@@ -20,7 +20,7 @@ Render this approved intro as an MP3 using the `aman-warm-analyst` voice and `po
 
 ## What the buyer gets
 
-- Agent tools to browse Audioraq voices and create narration through the local MCP server.
+- Agent tools to browse Audioraq voices and create narration through the hosted MCP server.
 - Sentence-aware pacing, pauses, edge padding, and mastering in Audioraq's pipeline.
 - MP3 or WAV output with voice, delivery profile, and available renderer/request metadata.
 - Sensible defaults and a workflow that shows edited narration for approval before rendering.
@@ -45,19 +45,19 @@ text-to-speech, text-to-audio, voiceover, podcast, narration, MP3, WAV, MCP, Aud
 ## Requirements and permissions
 
 - Requires an Audioraq developer account and API key with `audio:speech` scope.
-- Requires Python 3.11+, `uv`, and an MCP-compatible agent that can run a local stdio server.
+- Requires an MCP-compatible agent with Streamable HTTP support.
 - Network: outbound HTTPS to `www.audioraq.com` for speech generation; voice lookup is public.
-- Environment: pass `AUDIORAQ_API_KEY` to the local server process; never paste it into chat or commit it.
+- Authentication: pass `AUDIORAQ_API_KEY` as a bearer token from the agent's environment or secret manager; never paste it into chat or commit it.
 - Narration is sent to Audioraq when the user requests a render. If the agent edits the script, it shows the exact text and gets approval first.
 - The server does not open a public listener or automatically retry ambiguous timeouts.
 
 ## Known limitations
 
-- Buyers need their own Audioraq developer key and local MCP setup. The API account usage is separate from any Agensi listing price.
+- Buyers need their own Audioraq developer key and must connect the hosted MCP endpoint with a static bearer credential. The API account usage is separate from any Agensi listing price.
 - The API renders synchronously. Its documented default is 5,000 characters per request; the configured server limit is authoritative. Longer scripts need separate approved calls and audio results.
 - The current v1 docs do not describe subtitle generation, long-form jobs, stitching, voice cloning, or separate speaker tracks.
 - A dialogue profile does not generate separate speaker tracks. A delivery profile does not fact-check a script.
-- The local MCP server returns standard MCP audio content. Saving it to a file depends on the connected agent's audio/file support; the skill must say so if the client cannot export it.
+- The hosted MCP server returns standard MCP audio content. Saving it to a file depends on the connected agent's audio/file support; the skill must say so if the client cannot export it.
 
 ## FAQ
 
@@ -84,7 +84,7 @@ The API is synchronous and documents a 5,000-character default limit. Longer scr
 
 ## Pricing recommendation
 
-Launch free while validating whether buyers can configure their key, connect the MCP server, complete their first render, and export the returned audio. The extra account and local setup steps are a barrier. Consider a one-time price after observing repeat use and buyer feedback. Public marketplace usage is not sales data and cannot establish an optimal price.
+Launch free while validating whether buyers can configure their key, connect the hosted MCP server, complete their first render, and export the returned audio. The required Audioraq account and API key remain a setup step. Consider a one-time price after observing repeat use and buyer feedback. Public marketplace usage is not sales data and cannot establish an optimal price.
 
 ## Listing media
 
