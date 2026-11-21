@@ -3,14 +3,13 @@
 from __future__ import annotations
 
 import base64
+from contextvars import ContextVar
 import json
 import os
 from typing import Any, Literal
 
 import httpx
-from mcp.server.auth.middleware.auth_context import get_access_token
 from mcp.server.auth.provider import AccessToken, TokenVerifier
-from mcp.server.auth.settings import AuthSettings
 from mcp.server.mcpserver import MCPServer
 from mcp.server.transport_security import TransportSecuritySettings
 from mcp.types import AudioContent, CallToolResult, TextContent
@@ -48,25 +47,72 @@ class AudioraqApiKeyVerifier(TokenVerifier):
         )
 
 
+
+_current_access_token: ContextVar[AccessToken | None] = ContextVar(
+    "audioraq_mcp_access_token",
+    default=None,
+)
+
+
+class AudioraqBearerAuthMiddleware:
+    """Authenticate Audioraq API keys without advertising an OAuth flow."""
+
+    def __init__(self, app: Any, verifier: AudioraqApiKeyVerifier) -> None:
+        self.app = app
+        self.verifier = verifier
+
+    async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
+        if scope.get("type") != "http":
+            await self.app(scope, receive, send)
+            return
+
+        authorization = dict(scope.get("headers", [])).get(b"authorization", b"")
+        try:
+            scheme, credential = authorization.decode("latin-1").split(" ", 1)
+        except ValueError:
+            scheme, credential = "", ""
+        access_token = None
+        if scheme.lower() == "bearer" and credential.strip():
+            access_token = await self.verifier.verify_token(credential.strip())
+
+        if access_token is None:
+            body = json.dumps(
+                {"error": "invalid_api_key", "message": "A valid Audioraq API key is required."}
+            ).encode("utf-8")
+            await send(
+                {
+                    "type": "http.response.start",
+                    "status": 401,
+                    "headers": [
+                        (b"content-type", b"application/json"),
+                        (b"cache-control", b"no-store"),
+                        (b"content-length", str(len(body)).encode("ascii")),
+                    ],
+                }
+            )
+            await send({"type": "http.response.body", "body": body})
+            return
+
+        context_token = _current_access_token.set(access_token)
+        try:
+            await self.app(scope, receive, send)
+        finally:
+            _current_access_token.reset(context_token)
+
+
 def build_audioraq_mcp_server(db: Any) -> tuple[MCPServer, Any]:
     """Build the bearer-protected tools and deployed Streamable HTTP app."""
     api_root = os.environ.get(
         "AUDIORAQ_MCP_API_ROOT",
         f"http://127.0.0.1:{os.environ.get('PORT', '8001')}/api/v1/audio",
     ).rstrip("/")
+    verifier = AudioraqApiKeyVerifier(db)
     server = MCPServer(
         "Audioraq",
         instructions=(
             "Use list_voices to browse Audioraq's public voice catalog. Use create_speech "
             "to render user-approved narration as MP3 or WAV. Speech requests use the "
             "authenticated user's Audioraq developer key and count toward its API usage."
-        ),
-        token_verifier=AudioraqApiKeyVerifier(db),
-        # Audioraq API keys are supplied as static bearer credentials. No OAuth issuer
-        # metadata is published because Audioraq does not issue OAuth access tokens.
-        auth=AuthSettings(
-            issuer_url="https://www.audioraq.com",
-            required_scopes=[API_SCOPE_SPEECH],
         ),
     )
 
@@ -105,7 +151,7 @@ def build_audioraq_mcp_server(db: Any) -> tuple[MCPServer, Any]:
         if quality_profile not in QUALITY_PROFILES:
             raise ValueError("Unsupported Audioraq quality profile.")
 
-        access_token = get_access_token()
+        access_token = _current_access_token.get()
         if access_token is None:
             raise RuntimeError("An Audioraq API key is required for speech generation.")
 
@@ -215,4 +261,4 @@ def build_audioraq_mcp_server(db: Any) -> tuple[MCPServer, Any]:
         host="www.audioraq.com",
         transport_security=transport_security,
     )
-    return server, http_app
+    return server, AudioraqBearerAuthMiddleware(http_app, verifier)
