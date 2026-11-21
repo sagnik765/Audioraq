@@ -1,7 +1,7 @@
 import React from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
-import { BookmarkSimple, Broadcast, Code, Gear, House, MagnifyingGlass, Microphone, SignOut, User } from '@phosphor-icons/react';
+import { BookmarkSimple, Broadcast, Code, Gear, House, MagnifyingGlass, Microphone, Plug, SignOut, User } from '@phosphor-icons/react';
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -38,6 +38,16 @@ export default function Navbar() {
           >
             <MagnifyingGlass weight="bold" className="w-4 h-4" />
             <span className="hidden lg:inline">Browse</span>
+          </Link>
+
+          <Link
+            to="/mcp"
+            className="text-[#8A8A93] hover:text-white transition-colors text-sm font-medium flex items-center gap-1.5"
+            data-testid="nav-mcp-link"
+            aria-label="MCP"
+          >
+            <Plug weight="bold" className="w-4 h-4" />
+            <span className="hidden lg:inline">MCP</span>
           </Link>
 
           <Link
