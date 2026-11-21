@@ -24,6 +24,22 @@ const qualityProfiles = [
   ['podcast-storytelling', 'Storytelling', 'More expressive timing for narrative scripts.'],
 ];
 
+const mcpRepo = "git+https://github.com/sagnik765/Audioraq.git#subdirectory=mcp-server";
+const codexMcpExample = `[mcp_servers.audioraq]
+command = "uvx"
+args = ["--python", "3.11", "--from", "${mcpRepo}", "audioraq-mcp"]
+env_vars = ["AUDIORAQ_API_KEY"]`;
+const cursorMcpExample = `{
+  "mcpServers": {
+    "audioraq": {
+      "type": "stdio",
+      "command": "uvx",
+      "args": ["--python", "3.11", "--from", "${mcpRepo}", "audioraq-mcp"],
+      "env": { "AUDIORAQ_API_KEY": "\${env:AUDIORAQ_API_KEY}" }
+    }
+  }
+}`;
+
 function formatNumber(value) {
   return new Intl.NumberFormat().format(Number(value || 0));
 }
@@ -181,6 +197,7 @@ open("speech.mp3", "wb").write(response.content)`, [endpoint]);
                   </Link>
                 )}
                 <a href="#quickstart" className="rounded-full border border-[#3F3F46] px-6 py-3 font-semibold text-white hover:border-[#71717A]">Read quickstart</a>
+                <a href="#mcp-server" className="rounded-full border border-[#3F3F46] px-6 py-3 font-semibold text-white hover:border-[#71717A]">Connect an agent</a>
               </div>
             </div>
 
@@ -323,6 +340,37 @@ open("speech.mp3", "wb").write(response.content)`, [endpoint]);
           </div>
         </section>
 
+        <section id="mcp-server" className="border-y border-[#27272A] bg-[#111113] scroll-mt-20">
+          <div className="mx-auto max-w-7xl px-6 py-20 md:px-8 lg:px-12">
+            <div className="mb-10 max-w-3xl">
+              <p className="text-xs font-bold uppercase tracking-[0.2em] text-[#F5A623]">Model Context Protocol</p>
+              <h2 className="mt-2 font-['Outfit'] text-4xl font-semibold">Use Audioraq from your coding agent</h2>
+              <p className="mt-4 leading-7 text-[#A1A1AA]">Install the local Audioraq MCP server to list voices and render approved text as paced MP3 or WAV. The server runs on your machine and connects to Audioraq over HTTPS.</p>
+            </div>
+            <div className="grid gap-6 lg:grid-cols-2">
+              <div className="rounded-3xl border border-[#27272A] bg-[#141417] p-6 md:p-8">
+                <p className="text-xs font-bold uppercase tracking-[0.2em] text-[#8A8A93]">Available tools</p>
+                <div className="mt-5 space-y-4">
+                  <div>
+                    <code className="font-semibold text-[#F5A623]">list_voices</code>
+                    <p className="mt-1 text-sm leading-6 text-[#8A8A93]">Browse Audioraq voice IDs and delivery profiles. No key is needed for this read-only lookup.</p>
+                  </div>
+                  <div>
+                    <code className="font-semibold text-[#F5A623]">create_speech</code>
+                    <p className="mt-1 text-sm leading-6 text-[#8A8A93]">Render user-approved text as MP3 or WAV and return audio plus request metadata.</p>
+                  </div>
+                </div>
+                <p className="mt-6 border-t border-[#27272A] pt-5 text-xs leading-5 text-[#71717A]">Requires Python 3.11+, uv, and an Audioraq developer key for speech generation. Keep the key in your agent's local environment; never commit it to a project.</p>
+                <a href="https://github.com/sagnik765/Audioraq/blob/main/docs/mcp-server.md" target="_blank" rel="noreferrer" className="mt-5 inline-flex items-center gap-2 text-sm font-semibold text-[#F5A623] hover:text-[#F7B84B]">Full setup guide <ArrowRight className="h-4 w-4" /></a>
+              </div>
+              <div className="space-y-5">
+                <CodeBlock label="Codex · ~/.codex/config.toml">{codexMcpExample}</CodeBlock>
+                <CodeBlock label="Cursor · ~/.cursor/mcp.json">{cursorMcpExample}</CodeBlock>
+              </div>
+            </div>
+          </div>
+        </section>
+
         <section className="mx-auto max-w-7xl px-6 py-20 md:px-8 lg:px-12">
           <div className="grid gap-12 lg:grid-cols-[0.65fr_1.35fr]">
             <div>
@@ -363,3 +411,4 @@ open("speech.mp3", "wb").write(response.content)`, [endpoint]);
     </div>
   );
 }
+
