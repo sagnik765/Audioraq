@@ -14,6 +14,16 @@ fi
 
 cd "${ROOT_DIR}"
 
+# The runtime image copies this build output instead of building Node assets
+# inside the Python application image.
+docker run --rm \
+  --user "$(id -u):$(id -g)" \
+  --env HOME=/tmp/npm-home \
+  --volume "${ROOT_DIR}/frontend:/workspace" \
+  --workdir /workspace \
+  node:20-bookworm-slim \
+  sh -c 'mkdir -p "$HOME" && npm ci && npm run build'
+
 COMPOSE_PROFILE_ARGS=()
 if grep -Eq "^(AI_AUDIO_REQUIRE_NEURAL_WORKER|AI_STUDIO_INSTALL_KOKORO|AI_STUDIO_INSTALL_CHATTERBOX)=true$" "${ENV_FILE}"; then
   COMPOSE_PROFILE_ARGS=(--profile ai-studio)
